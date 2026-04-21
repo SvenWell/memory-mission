@@ -357,10 +357,11 @@ no knowledge graph — those land in 6b/6c once this interface is stable.
   - `new_page()` factory stamps `created` / `updated` in UTC
   - Slug regex enforces lowercase kebab-case, 1-128 chars, no traversal
 - `src/memory_mission/memory/schema.py` — MECE directory constants:
-  - 11 core domains: `people`, `clients`, `companies`, `portfolios`,
-    `mandates`, `deals`, `meetings`, `concepts`, `sources`, `inbox`,
-    `archive` (wealth-adapted — `clients` / `portfolios` / `mandates` are
-    the additions over GBrain's base)
+  - 8 core domains (GBrain base, vertical-neutral): `people`, `companies`,
+    `deals`, `meetings`, `concepts`, `sources`, `inbox`, `archive`
+  - Vertical-specific taxonomies (wealth, legal, CRM) extend via config,
+    NOT by editing this list — keeps the infrastructure deployable across
+    verticals without forking the schema
   - `page_path()` / `raw_sidecar_path()` return `PurePosixPath` so storage
     backends bind the concrete root
 - `src/memory_mission/memory/engine.py` — `BrainEngine` Protocol +

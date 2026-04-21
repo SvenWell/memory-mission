@@ -1,19 +1,20 @@
 """MECE directory schema for memory pages.
 
-Adopts GBrain's base schema and adds wealth-management-specific domains.
-MECE = Mutually Exclusive, Collectively Exhaustive: every entity has
-exactly one home domain, preventing the drift-apart problem where the same
-person exists under `people/sarah-chen.md` AND `clients/sarah-chen.md`
-with divergent facts.
+MECE = Mutually Exclusive, Collectively Exhaustive: every entity has exactly
+one home domain, preventing the drift-apart problem where the same person
+exists under `people/sarah-chen.md` AND `clients/sarah-chen.md` with
+divergent facts.
 
-Domains:
+This is the vertical-neutral core taxonomy. Verticals (wealth, CRM, legal,
+etc.) extend it via their own config — they do NOT modify this list. The
+project happens to deploy first into wealth management; the infrastructure
+is general.
 
-- ``people``: Employees, internal advisors, external contacts (non-client)
-- ``clients``: Firm's clients (distinct from generic people)
-- ``companies``: Corporate entities mentioned (non-client)
-- ``portfolios``: Investment portfolios
-- ``mandates``: Investment mandates / strategies
-- ``deals``: Deals, transactions, capital moves
+Core domains (ported from GBrain):
+
+- ``people``: Individuals — employees, contacts, advisors, clients
+- ``companies``: Organizations
+- ``deals``: Deals, transactions, negotiations
 - ``meetings``: Meeting records (calls, boards, 1:1s)
 - ``concepts``: Ideas, frameworks, strategies
 - ``sources``: Reference material, citations, research
@@ -35,10 +36,7 @@ from pathlib import PurePosixPath
 
 CORE_DOMAINS: tuple[str, ...] = (
     "people",
-    "clients",
     "companies",
-    "portfolios",
-    "mandates",
     "deals",
     "meetings",
     "concepts",

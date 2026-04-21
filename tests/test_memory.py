@@ -214,18 +214,23 @@ def test_timeline_entry_render_format() -> None:
 # ---------- MECE schema ----------
 
 
-def test_core_domains_includes_wealth_additions() -> None:
-    assert "clients" in CORE_DOMAINS
-    assert "portfolios" in CORE_DOMAINS
-    assert "mandates" in CORE_DOMAINS
-    # GBrain base retained
-    assert "people" in CORE_DOMAINS
-    assert "companies" in CORE_DOMAINS
-    assert "meetings" in CORE_DOMAINS
+def test_core_domains_is_vertical_neutral() -> None:
+    """GBrain base taxonomy only — verticals extend via config, not by editing core."""
+    assert set(CORE_DOMAINS) == {
+        "people",
+        "companies",
+        "deals",
+        "meetings",
+        "concepts",
+        "sources",
+        "inbox",
+        "archive",
+    }
 
 
 def test_is_valid_domain() -> None:
-    assert is_valid_domain("clients")
+    assert is_valid_domain("people")
+    assert not is_valid_domain("clients")  # vertical-specific, not in core
     assert not is_valid_domain("invalid")
     assert not is_valid_domain("")
 
@@ -236,8 +241,8 @@ def test_validate_domain_raises_for_unknown() -> None:
 
 
 def test_page_path_is_posix_and_under_domain() -> None:
-    p = page_path("clients", "acme-corp")
-    assert str(p) == "clients/acme-corp.md"
+    p = page_path("companies", "acme-corp")
+    assert str(p) == "companies/acme-corp.md"
 
 
 def test_raw_sidecar_path_lives_in_dot_raw() -> None:
@@ -427,7 +432,7 @@ def test_stats_counts_pages_by_domain() -> None:
     engine = InMemoryEngine()
     engine.put_page(_sample_page("a", "people"))
     engine.put_page(_sample_page("b", "people"))
-    engine.put_page(_sample_page("c", "clients"))
+    engine.put_page(_sample_page("c", "companies"))
     stats = engine.stats()
     assert stats.page_count == 3
-    assert stats.pages_by_domain == {"people": 2, "clients": 1}
+    assert stats.pages_by_domain == {"people": 2, "companies": 1}

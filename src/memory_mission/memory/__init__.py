@@ -9,7 +9,7 @@ Storage model:
 
 Adopts GBrain's patterns (ported from TypeScript):
 - Compiled truth + timeline page format (``pages.py``)
-- MECE directory schema, wealth-adapted (``schema.py``)
+- MECE directory schema — vertical-neutral core (``schema.py``)
 - BrainEngine interface + InMemoryEngine (``engine.py``)
 - Hybrid search with RRF fusion (Step 6b, on top of this interface)
 
