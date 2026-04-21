@@ -570,3 +570,85 @@ execution. Each message is a checkpointed step; output lands in
 observability-scoped middleware chain.
 
 ---
+
+## Step 7a: Backfill Primitives (StagingWriter + MentionTracker) — DONE (2026-04-21)
+
+**Goal:** Two pure-Python primitives the Hermes backfill skill (7b) will
+compose: a writer for the staging area + a tracker for entity-mention
+counts. Step 7 splits into "primitives in Python" (this commit) plus
+"workflow as a markdown skill" (next commit) so future backfills (calendar,
+Granola) reuse the same primitives without each shipping its own loop code.
+
+**Architecture decision (2026-04-21):**
+- The backfill orchestration lives as a Hermes markdown skill, not a
+  Python class. Matches GBrain's "thin harness, fat skills" philosophy
+  + the Hermes runtime we picked. Python provides the testable pieces;
+  the skill composes them.
+- OAuth + token refresh handled by Composio (already wired in Step 5),
+  so we don't need to port Rowboat's googleapis OAuth code. Rowboat
+  remains the *reference* for sync strategy (full vs incremental,
+  lookback windows); GBrain remains the reference for processing pattern
+  (raw sidecar + tiered enrichment).
+
+**Files created:**
+- `src/memory_mission/ingestion/staging.py` — `StagingWriter`:
+  - Writes pulled items to `<wiki_root>/staging/<source>/`:
+    - `.raw/<item_id>.json` — connector payload verbatim
+    - `<item_id>.md` — frontmatter (`source`, `source_id`,
+      `ingested_at`, plus caller extras) + body
+  - Atomic writes via temp + rename
+  - Path-segment validation (alnum + `._-`, length-bounded; same shape
+    as `_SAFE_FIRM_ID` in observability/logger)
+  - `get` / `list_pending` / `remove` / `iter_raw` for the promotion flow
+  - Canonical fields locked: caller extras can't override `source`,
+    `source_id`, `ingested_at`
+- `src/memory_mission/ingestion/mentions.py` — `MentionTracker`:
+  - Per-firm SQLite store of entity mention counts
+  - `record(name) -> (prev_tier, new_tier)` — caller checks the pair to
+    detect threshold crossings
+  - Tier mapping: `none` (0) → `stub` (1+) → `enrich` (3+) → `full` (8+),
+    matching GBrain's `enrichment-service.ts` thresholds
+  - `get`, `all` (count-desc), `stats` (counts per tier)
+  - Context manager + idempotent `close()`
+- `tests/test_staging.py` — 18 tests
+- `tests/test_mentions.py` — 24 tests
+
+**Files modified:**
+- `src/memory_mission/ingestion/__init__.py` — public exports
+
+**Key invariants enforced by tests:**
+- Source label and item_id are validated as safe path segments — no
+  traversal, no NUL, no path separators
+- Caller-supplied frontmatter extras can't override `source` /
+  `source_id` / `ingested_at` (these belong to the writer)
+- Re-writing same item_id replaces both files cleanly
+- `list_pending` skips orphan markdown without a matching raw sidecar
+- Per-source isolation (gmail and granola write to disjoint subdirs)
+- `MentionTracker.record` is transactional (all-or-nothing increment)
+- Tier crossings are detectable: `(prev, new)` tuple per record() call
+- Per-firm isolation (different DB paths = independent counts)
+
+**Verification:**
+- [x] `pytest` — 269/269 passed (42 new + 227 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 40 files
+
+**Deferred to 7b:**
+- The backfill workflow itself: `skills/backfill-gmail/SKILL.md` (Hermes
+  skill) that composes `make_gmail_connector` + `invoke` (harness) +
+  `durable_run` + `StagingWriter` + `MentionTracker` + `KnowledgeGraph`
+- The same skill, generalized: backfill-granola, backfill-calendar
+  re-use the same primitives, only the connector + per-item parsing
+  differ
+
+**Deferred to later steps:**
+- Per-message LLM extraction (Step 8 — Extraction Agent)
+- Promotion from staging into curated MECE pages (Step 9 — Promotion
+  Pipeline)
+
+**Next:** Step 7b — write the Hermes backfill skill in markdown. Pulls
+through the Gmail connector, wraps the loop in `durable_run`, writes
+each message to staging, records entity mentions, surfaces tier
+crossings.
+
+---
