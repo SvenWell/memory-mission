@@ -39,6 +39,13 @@ from memory_mission.memory.pages import (
     parse_page,
     render_page,
 )
+from memory_mission.memory.salience import (
+    MAX_RECENCY,
+    NEUTRAL_SCORE,
+    RECENCY_DECAY_PER_DAY,
+    RECURRENCE_CAP,
+    salience_score,
+)
 from memory_mission.memory.schema import (
     CORE_DOMAINS,
     is_valid_domain,
@@ -55,11 +62,17 @@ from memory_mission.memory.search import (
     cosine_similarity,
     rrf_fuse,
 )
+from memory_mission.memory.text import STOPWORDS, jaccard, word_set
 
 __all__ = [
     "COMPILED_TRUTH_BOOST",
     "CORE_DOMAINS",
+    "MAX_RECENCY",
+    "NEUTRAL_SCORE",
+    "RECENCY_DECAY_PER_DAY",
+    "RECURRENCE_CAP",
     "RRF_K",
+    "STOPWORDS",
     "VECTOR_RRF_BLEND",
     "BrainEngine",
     "Direction",
@@ -78,11 +91,14 @@ __all__ = [
     "Triple",
     "cosine_similarity",
     "is_valid_domain",
+    "jaccard",
     "new_page",
     "page_path",
     "parse_page",
     "raw_sidecar_path",
     "render_page",
     "rrf_fuse",
+    "salience_score",
     "validate_domain",
+    "word_set",
 ]
