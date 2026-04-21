@@ -101,3 +101,50 @@ Compliance-grade (7-year retention), immutable, per-firm isolated.
 before backfill agent can run (backfill = 24h+ job, must survive crashes).
 
 ---
+
+## Step 3: Durable Execution + Checkpointing (Component 0.6) — DONE (2026-04-18)
+
+**Goal:** Long-running agents (backfill = 24h+, dreaming loop, HITL pauses)
+survive crashes/deploys. Resume from last checkpoint, not from scratch.
+
+**Files created:**
+- `src/memory_mission/durable/store.py` — SQLite checkpoint store
+  - `CheckpointStore(db_path)` with WAL journal, foreign keys on
+  - Schema: `threads` (thread_id, firm_id, employee_id, workflow_type,
+    status, state_json, timestamps) + `checkpoints` (thread_id, step_name,
+    state_json, created_at, PK on pair)
+  - Idempotent writes via `INSERT OR REPLACE`
+  - Firm-scoped lookups, status filtering, transaction context manager
+  - Zero-dep (stdlib `sqlite3`), migrate-ready to Postgres later
+- `src/memory_mission/durable/run.py` — `DurableRun` API
+  - `durable_run()` context manager handles start/fail/save lifecycle
+  - `is_done(step)` / `mark_done(step, state)` / `run_step(step, fn)`
+  - `state` — mutable per-thread dict for carrying context across resumptions
+  - `pause()`, `complete()`, `fail()` status transitions
+  - Cross-firm thread access rejected at runtime
+  - Auto-seeds state with observability `trace_id` when scope is active
+    (cross-references durable threads with audit events)
+- `src/memory_mission/durable/__init__.py` — public API exports
+- `tests/test_durable.py` — 18 tests
+
+**Verification:**
+- [x] `pytest` — 42/42 passed (18 new + 24 from earlier steps)
+- [x] `ruff check src/ tests/` — clean
+- [x] `ruff format --check` — clean
+- [x] `mypy src/` — strict, no issues in 29 files
+- [x] **Crash/resume test**: 7-step run crashes at step 3 → thread marked failed,
+  3 checkpoints persisted. Re-running with same thread_id resumes, processes
+  steps 4-7 only, each item processed exactly once across both runs.
+
+**Key invariants enforced:**
+- Cross-firm access to a thread is rejected (firm A can't resume firm B's run)
+- `run_step` + `mark_done` are idempotent — safe to re-run completed steps
+- State is persisted on clean exit, failed exit, or explicit `pause()`
+- Trace_id bridges durable threads and observability audit events
+- SQLite WAL = atomic commits, no torn writes on crash
+
+**Next:** Step 4 — Middleware Layer (component 0.7). PII redaction ships
+with V1 for wealth management compliance. ToolCallLimit, ModelFallback,
+and Summarization middleware follow incrementally.
+
+---
