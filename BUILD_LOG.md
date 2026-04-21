@@ -244,3 +244,85 @@ External review flagged three issues. All fixed with regression-guard tests.
 - [x] `mypy src/` strict, no issues in 31 files
 
 ---
+
+## Step 5: Connector Layer (component 1.3) — DONE (2026-04-21)
+
+**Goal:** Connector Protocol + invocation harness that threads observability,
+PII redaction, and durability through every call into an external data
+source. Concrete SDK calls are stubbed — the point of this step is the
+harness. Granola and Gmail factories ship as first concrete connectors.
+
+**Scope narrowing (vs original plan):**
+- Composio SDK already works in adjacent production systems. Adapter in this
+  repo stays as a stub until credentials are wired in a later step.
+- **Granola only** for transcription in V1. Otter.ai dropped — revisit after
+  Granola-only produces clear wins.
+- **Gmail backfill** gets the harness but no live API test. GBrain's
+  `sync_gmail.ts` pattern is known-good; no value in re-proving it here.
+
+**Files created:**
+- `src/memory_mission/ingestion/connectors/` package (replaces prior stub
+  `connectors.py`):
+  - `base.py` — `Connector` Protocol, `ConnectorAction` / `ConnectorResult`
+    (frozen Pydantic), `invoke()` harness helper
+  - `composio.py` — `ComposioClient` Protocol + `ComposioConnector` adapter
+    (raises `NotImplementedError` when no client is attached)
+  - `granola.py` — `GRANOLA_ACTIONS` + `make_granola_connector()` factory
+  - `gmail.py` — `GMAIL_ACTIONS` + `make_gmail_connector()` factory
+  - `testing.py` — `InMemoryConnector` test double with callable responders
+- `tests/test_connectors.py` — 31 tests
+
+**Files extended:**
+- `src/memory_mission/observability/events.py` — added
+  `ConnectorInvocationEvent` (additive schema change, version stays at 1)
+- `src/memory_mission/observability/api.py` — added
+  `log_connector_invocation()`
+- `src/memory_mission/observability/__init__.py` — export both
+- `src/memory_mission/middleware/pii.py` — added public `scrub(text)` method
+  so callers outside the LLM chain share the same redaction policy
+- `src/memory_mission/ingestion/__init__.py` — updated docstring
+
+**Harness behavior:**
+- `invoke(connector, action, params)` runs the connector call, measures
+  latency, scrubs a truncated preview (default 500 chars) via
+  `PIIRedactionMiddleware`, then writes a `ConnectorInvocationEvent` into
+  the active `observability_scope`
+- Raw `ConnectorResult.data` flows back to the caller unchanged — only what
+  lands in the audit log is redacted
+- Errors are logged with `success=False` and re-raised (no silent swallow)
+- Durability is the caller's responsibility: backfill loops wrap each
+  `invoke()` in a `durable_run` step (demonstrated by integration test)
+
+**Verification:**
+- [x] `pytest` — 120/120 passed (31 new + 89 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 36 files
+- [x] Integration test: durable_run + observability_scope + invoke()
+  backfill loop crashes mid-run, resumes on restart, processes each
+  message exactly once (5 events in the audit log, 5 expected)
+
+**Key invariants enforced by tests:**
+- `ConnectorAction` / `ConnectorResult` are frozen Pydantic with
+  `extra="forbid"`
+- `Connector` Protocol `isinstance` checks succeed for both concrete impls
+- `ComposioConnector` raises `ValueError` for unknown actions and
+  `NotImplementedError` when no client is attached
+- Harness threads `firm_id` / `employee_id` / `trace_id` from scope
+- PII-scrubbed preview survives JSONL round-trip with redaction counts
+- Long previews truncated to `preview_chars` before scrubbing
+- Custom redactor (with literal client-name redaction) honored per-call
+- Failure path logs `success=False` then re-raises
+
+**Stubbed for later steps:**
+- Live Composio SDK wiring (inject a real `composio.Client` via
+  `ComposioClient` Protocol)
+- OAuth credentials flow for Gmail / Granola accounts
+- Custom MCP server for anything Composio doesn't cover (Otter.ai deferred
+  to post-V1)
+
+**Next:** Step 6 — Memory Layer (components 0.1 + 0.2). Port GBrain
+`BrainEngine` interface to Python, hybrid search with RRF_K=60 and
+70/30 cosine blend, compiled truth + timeline page format, MemPalace
+knowledge graph integration.
+
+---

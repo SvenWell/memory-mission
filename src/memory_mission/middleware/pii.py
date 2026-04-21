@@ -169,6 +169,15 @@ class PIIRedactionMiddleware:
 
     # --- Redaction -----------------------------------------------------------
 
+    def scrub(self, text: str) -> tuple[str, dict[str, int]]:
+        """Apply this middleware's redaction rules to arbitrary text.
+
+        Exposed for callers outside the LLM chain (e.g., the connector harness)
+        that want to apply the same policy without constructing a ``ModelCall``.
+        Returns ``(redacted_text, {rule_name: count})``. Idempotent.
+        """
+        return self._redact_text(text)
+
     def _redact_text(self, text: str) -> tuple[str, dict[str, int]]:
         """Apply all rules + literals, return redacted text and a count per rule."""
         found: dict[str, int] = {}

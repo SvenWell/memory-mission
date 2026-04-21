@@ -102,8 +102,27 @@ class DraftEvent(_EventBase):
     user_action: Literal["pending", "sent", "edited", "discarded"] | None = None
 
 
+class ConnectorInvocationEvent(_EventBase):
+    """One call into an external connector (Gmail, Granola, Composio, ...).
+
+    Logged by the connector harness (``ingestion.connectors.invoke``) on every
+    call so the audit trail shows which data sources were pulled, when, with
+    what parameters, and how long they took. The preview is PII-scrubbed before
+    it lands here — raw content never flows through the observability log.
+    """
+
+    event_type: Literal["connector_invocation"] = "connector_invocation"
+    connector_name: str
+    action: str
+    preview: str
+    preview_redactions: dict[str, int]
+    latency_ms: int
+    success: bool
+    error: str | None = None
+
+
 # Pydantic discriminated union — lets us serialize/parse any event type.
 Event = Annotated[
-    ExtractionEvent | PromotionEvent | RetrievalEvent | DraftEvent,
+    ExtractionEvent | PromotionEvent | RetrievalEvent | DraftEvent | ConnectorInvocationEvent,
     Field(discriminator="event_type"),
 ]

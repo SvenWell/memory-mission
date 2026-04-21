@@ -37,6 +37,7 @@ Format: immutable append-only JSONL per firm.
 """
 
 from memory_mission.observability.api import (
+    log_connector_invocation,
     log_draft,
     log_extraction,
     log_promotion,
@@ -51,6 +52,7 @@ from memory_mission.observability.context import (
 )
 from memory_mission.observability.events import (
     SCHEMA_VERSION,
+    ConnectorInvocationEvent,
     DraftEvent,
     Event,
     ExtractionEvent,
@@ -67,6 +69,7 @@ from memory_mission.observability.logger import (
 __all__ = [
     "EVENTS_FILENAME",
     "SCHEMA_VERSION",
+    "ConnectorInvocationEvent",
     "DraftEvent",
     "Event",
     "ExtractionEvent",
@@ -77,6 +80,7 @@ __all__ = [
     "current_firm_id",
     "current_logger",
     "current_trace_id",
+    "log_connector_invocation",
     "log_draft",
     "log_extraction",
     "log_promotion",

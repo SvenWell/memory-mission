@@ -19,6 +19,7 @@ from memory_mission.observability.context import (
     current_trace_id,
 )
 from memory_mission.observability.events import (
+    ConnectorInvocationEvent,
     DraftEvent,
     ExtractionEvent,
     PromotionEvent,
@@ -129,6 +130,37 @@ def log_draft(
         output_preview=output_preview,
         output_length_chars=output_length_chars,
         user_action=user_action,
+    )
+    current_logger().write(event)
+    return event
+
+
+def log_connector_invocation(
+    *,
+    connector_name: str,
+    action: str,
+    preview: str,
+    preview_redactions: dict[str, int],
+    latency_ms: int,
+    success: bool,
+    error: str | None = None,
+) -> ConnectorInvocationEvent:
+    """Record a connector invocation.
+
+    Called by the connector harness after every ``invoke()``. The preview is
+    expected to already be PII-scrubbed and truncated by the harness.
+    """
+    event = ConnectorInvocationEvent(
+        firm_id=current_firm_id(),
+        employee_id=current_employee_id(),
+        trace_id=current_trace_id(),
+        connector_name=connector_name,
+        action=action,
+        preview=preview,
+        preview_redactions=preview_redactions,
+        latency_ms=latency_ms,
+        success=success,
+        error=error,
     )
     current_logger().write(event)
     return event
