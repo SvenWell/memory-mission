@@ -326,3 +326,89 @@ harness. Granola and Gmail factories ship as first concrete connectors.
 knowledge graph integration.
 
 ---
+
+## Step 6a: Memory Layer — Pages, Schema, BrainEngine (Step 6 slice 1/3) — DONE (2026-04-21)
+
+**Goal:** Establish the data shape (compiled truth + timeline pages),
+MECE directory schema adapted for wealth management, and the `BrainEngine`
+Protocol with a dict-backed in-memory implementation. No DB, no embeddings,
+no knowledge graph — those land in 6b/6c once this interface is stable.
+
+**Scope decisions (2026-04-21):**
+- **Embeddings provider:** OpenAI `text-embedding-3-small` OR Gemini, wired
+  as a provider Protocol (Composio-style) in 6b. QMD stays a separate
+  system; this repo doesn't depend on it.
+- **Vector store:** pure Python. In-memory for V1. SQLite + sqlite-vec or
+  pgvector via Postgres swap in behind `BrainEngine` when a real extraction
+  flow needs them.
+- **MemPalace:** port `knowledge_graph.py` (~300 LOC, SQLite, temporal
+  triples) into our codebase in 6b. No pip install.
+
+**Files created:**
+- `src/memory_mission/memory/pages.py` — page parser + renderer:
+  - `PageFrontmatter` — Pydantic with core fields (slug / title / domain /
+    aliases / sources / valid_from / valid_to / confidence / created /
+    updated); `extra="allow"` preserves hand-edited custom keys
+  - `Page` — frontmatter + compiled_truth + timeline; `wikilinks()` extracts
+    `[[slug]]` / `[[slug|display]]` references
+  - `TimelineEntry` — frozen, `YYYY-MM-DD [source-id]: text` format
+  - `parse_page()` / `render_page()` — round-trip through markdown with
+    YAML frontmatter and dual `---` zone separators
+  - `new_page()` factory stamps `created` / `updated` in UTC
+  - Slug regex enforces lowercase kebab-case, 1-128 chars, no traversal
+- `src/memory_mission/memory/schema.py` — MECE directory constants:
+  - 11 core domains: `people`, `clients`, `companies`, `portfolios`,
+    `mandates`, `deals`, `meetings`, `concepts`, `sources`, `inbox`,
+    `archive` (wealth-adapted — `clients` / `portfolios` / `mandates` are
+    the additions over GBrain's base)
+  - `page_path()` / `raw_sidecar_path()` return `PurePosixPath` so storage
+    backends bind the concrete root
+- `src/memory_mission/memory/engine.py` — `BrainEngine` Protocol +
+  `InMemoryEngine`:
+  - Lifecycle (`connect` / `disconnect`), page CRUD, keyword search, graph
+    links (`links_from` / `links_to`), `EngineStats`
+  - Every `search()` logs a `RetrievalEvent` with query, tier, pages
+    loaded, latency — audit trail unified with extractions + promotions
+  - Keyword scoring: `2.0 * truth_hits + 1.0 * title_hits` (truth zone
+    outranks title, placeholder for `COMPILED_TRUTH_BOOST=2.0` in 6b)
+- `tests/test_memory.py` — 39 tests
+
+**Files modified:**
+- `src/memory_mission/memory/__init__.py` — public API exports
+- `pyproject.toml` — added `types-PyYAML>=6.0` to dev for mypy strict
+
+**Verification:**
+- [x] `pytest` — 159/159 passed (39 new + 120 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 37 files
+- [x] Round-trip: parse → render → parse preserves frontmatter (including
+  extras), compiled truth, and timeline entries
+- [x] Path safety: slug regex rejects `../escape`, `Sarah`, `sarah chen`,
+  `sarah/chen`, empty string
+
+**Key invariants enforced by tests:**
+- `Page`, `TimelineEntry`, `SearchHit`, `EngineStats` are frozen Pydantic
+- `confidence` in `[0, 1]` via Pydantic validator
+- Slug must match `[a-z0-9][a-z0-9-]{0,126}[a-z0-9]?`
+- `PageFrontmatter` preserves unknown keys through round-trip
+- `InMemoryEngine` rejects unknown domains at both `put_page` and `list_pages`
+- `links_to` excludes self-links
+- Search ranks truth-zone matches above title-only matches
+- `RetrievalEvent` lands in the audit log with correct query / tier /
+  pages_loaded when search runs inside an `observability_scope`
+
+**Deferred to 6b / 6c:**
+- MemPalace `KnowledgeGraph` port (temporal triples, SQLite, validity
+  windows + confidence + provenance)
+- Hybrid search (keyword + vector + RRF fusion + cosine re-score)
+- Embedding provider Protocol + OpenAI / Gemini adapters
+- Filesystem-backed `BrainEngine` (markdown-on-disk source of truth)
+- Postgres / pgvector concrete backend
+
+**Next:** Step 6b — Port MemPalace `knowledge_graph.py` into
+`src/memory_mission/memory/knowledge_graph.py`. SQLite schema for entities
++ triples with `valid_from` / `valid_to` / `confidence` / source tracking.
+API: `add_entity`, `add_triple`, `invalidate`, `query_entity`,
+`query_relationship`, `timeline`, `stats`.
+
+---
