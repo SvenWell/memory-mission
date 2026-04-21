@@ -413,3 +413,78 @@ API: `add_entity`, `add_triple`, `invalidate`, `query_entity`,
 `query_relationship`, `timeline`, `stats`.
 
 ---
+
+## Step 6b: Temporal Knowledge Graph (port from MemPalace) — DONE (2026-04-21)
+
+**Goal:** A per-firm entity-relationship graph where every fact carries a
+validity window, confidence, and provenance, so queries can ask "what was
+true on ``as_of``?" instead of only "what's the current state?". Ported
+from MemPalace's ``knowledge_graph.py`` — not installed, re-implemented so
+we own the schema and can evolve firm-scoping + observability hooks
+without forking a third-party package.
+
+**Files created:**
+- `src/memory_mission/memory/knowledge_graph.py` — SQLite-backed store:
+  - `Entity` (frozen Pydantic) — canonical by name, holds entity_type +
+    free-form properties dict
+  - `Triple` (frozen Pydantic) — subject-predicate-object with
+    `valid_from` / `valid_to` / `confidence` / `source_closet` /
+    `source_file`; `is_valid_at(as_of)` for time-travel semantics
+  - `GraphStats` — entity count, triple count, currently-true triple count
+  - `KnowledgeGraph` — SQLite-backed store with per-firm DB path
+  - API parity with MemPalace: `add_entity`, `add_triple`, `invalidate`,
+    `query_entity` (with `direction` + `as_of`), `query_relationship`,
+    `timeline`, `stats`, `seed_from_entity_facts`, `close`
+  - Schema: `entities` + `triples` tables with indexes on subject /
+    predicate / object plus partial index on currently-true triples
+  - Context manager support (`with KnowledgeGraph(path) as kg:`)
+- `tests/test_knowledge_graph.py` — 37 tests
+
+**Files modified:**
+- `src/memory_mission/memory/__init__.py` — exported `KnowledgeGraph`,
+  `Entity`, `Triple`, `GraphStats`, `Direction`
+
+**Semantics locked by tests:**
+- `valid_to` is **exclusive**: a triple with `valid_to=2025-01-01` is
+  invalid ON 2025-01-01 (the fact ended "as of" that day)
+- `valid_from` / `valid_to` both None = "always true" (no window bound)
+- `invalidate()` only updates currently-true rows (`valid_to IS NULL`),
+  returning the row count so callers can detect misses
+- `add_entity` is upsert-by-name: second call with richer type / properties
+  updates the row, doesn't create a duplicate
+- `seed_from_entity_facts` accepts ISO date strings and coerces them
+- `timeline(entity=None)` returns the whole graph chronologically; null
+  `valid_from` rows come first (undated facts)
+- Per-firm isolation is filesystem-based — different DB paths never share
+  state
+
+**Adaptations vs MemPalace original:**
+- Pydantic models for public types (matches the rest of the codebase)
+- Per-firm DB path (MemPalace is single-user)
+- No ChromaDB dependency (vector search lives in 6c, behind
+  `BrainEngine`)
+- No AAAK / dialect compression (MemPalace authors themselves flagged it
+  as a regression)
+
+**Verification:**
+- [x] `pytest` — 196/196 passed (37 new + 159 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 38 files
+- [x] Persistence: graph round-trips across `KnowledgeGraph` open/close
+- [x] Parametrized `is_valid_at` covers 8 cases across bounded, open-ended,
+  and always-true triples
+
+**Deferred to 6c (and beyond):**
+- Hybrid search with RRF fusion + vector scoring + `COMPILED_TRUTH_BOOST`
+- Embedding provider Protocol (OpenAI / Gemini adapters)
+- Filesystem-backed `BrainEngine` (markdown-on-disk source of truth)
+- Entity detection + canonicalization (MemPalace's `entity_detector.py` /
+  `entity_registry.py` — needed when the extraction agent lands)
+
+**Next:** Step 6c — hybrid search shell. Extend `BrainEngine` with
+`query(question, as_of=...)` that combines keyword (current) + vector
+(stubbed) via RRF fusion. Wire in the `COMPILED_TRUTH_BOOST=2.0` + 70/30
+blend constants from GBrain so when a real embedding provider plugs in,
+the search pipeline already has the right shape.
+
+---

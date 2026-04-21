@@ -24,6 +24,13 @@ from memory_mission.memory.engine import (
     SearchHit,
     SearchTier,
 )
+from memory_mission.memory.knowledge_graph import (
+    Direction,
+    Entity,
+    GraphStats,
+    KnowledgeGraph,
+    Triple,
+)
 from memory_mission.memory.pages import (
     Page,
     PageFrontmatter,
@@ -43,13 +50,18 @@ from memory_mission.memory.schema import (
 __all__ = [
     "CORE_DOMAINS",
     "BrainEngine",
+    "Direction",
     "EngineStats",
+    "Entity",
+    "GraphStats",
     "InMemoryEngine",
+    "KnowledgeGraph",
     "Page",
     "PageFrontmatter",
     "SearchHit",
     "SearchTier",
     "TimelineEntry",
+    "Triple",
     "is_valid_domain",
     "new_page",
     "page_path",
