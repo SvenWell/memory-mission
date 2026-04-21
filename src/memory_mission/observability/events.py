@@ -1,0 +1,109 @@
+"""Event schema for the audit trail.
+
+Every action the system takes writes an Event to the observability log.
+Events are immutable JSONL records scoped by firm_id.
+
+Design rules:
+- Event schema is versioned (SCHEMA_VERSION) — additive changes only
+- Every event has a trace_id so multi-step workflows can be stitched together
+- Every event has firm_id + (optional) employee_id for scoping
+- Payload fields differ by event_type — typed via Pydantic discriminated unions
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Annotated, Literal
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, ConfigDict, Field
+
+SCHEMA_VERSION = 1
+
+
+class _EventBase(BaseModel):
+    """Fields present on every observability event."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: int = SCHEMA_VERSION
+    event_id: UUID = Field(default_factory=uuid4)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    firm_id: str
+    employee_id: str | None = None
+    trace_id: UUID | None = None
+
+
+class ExtractionEvent(_EventBase):
+    """Fact extraction from an interaction (call, email, meeting transcript).
+
+    Logged by the real-time extraction agent (component 1.2) and the backfill
+    agent (component 1.1).
+    """
+
+    event_type: Literal["extraction"] = "extraction"
+    source_interaction_id: str
+    source_type: Literal["email", "calendar", "transcript", "manual"]
+    extracted_facts: list[dict[str, object]]
+    confidence_scores: dict[str, float]
+    llm_provider: str
+    llm_model: str
+    prompt_hash: str
+    latency_ms: int | None = None
+
+
+class PromotionEvent(_EventBase):
+    """A fact's progression through the promotion pipeline.
+
+    Covers: candidate proposed → scored → passed/failed gates → approved/rejected.
+    Logged by the staging area (4.2), dreaming loop (3.1), and human reviewer
+    actions.
+    """
+
+    event_type: Literal["promotion"] = "promotion"
+    candidate_fact: dict[str, object]
+    target_page: str
+    signal_scores: dict[str, float]
+    total_score: float
+    gates: dict[str, bool]
+    decision: Literal["proposed", "approved", "rejected", "revised"]
+    reviewer: str
+    reviewer_type: Literal["human", "agent"]
+    justification: str | None = None
+
+
+class RetrievalEvent(_EventBase):
+    """A query against the memory system.
+
+    Logged by employee agents + workflow agents on every search/query/get.
+    """
+
+    event_type: Literal["retrieval"] = "retrieval"
+    query: str
+    tier: Literal["navigate", "cascade", "discover"]
+    pages_loaded: list[str]
+    token_budget: int
+    tokens_used: int
+    latency_ms: int
+
+
+class DraftEvent(_EventBase):
+    """A workflow agent produced output (brief, email draft, CRM note).
+
+    Logged by workflow agents (2.1, 2.2, 2.3). User action (sent/edited/
+    discarded) is appended later as a separate DraftEvent with decision set.
+    """
+
+    event_type: Literal["draft"] = "draft"
+    workflow: Literal["meeting_prep", "email_draft", "crm_update"]
+    context_pages: list[str]
+    output_preview: str
+    output_length_chars: int
+    user_action: Literal["pending", "sent", "edited", "discarded"] | None = None
+
+
+# Pydantic discriminated union — lets us serialize/parse any event type.
+Event = Annotated[
+    ExtractionEvent | PromotionEvent | RetrievalEvent | DraftEvent,
+    Field(discriminator="event_type"),
+]

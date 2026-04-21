@@ -1,14 +1,19 @@
 """CLI entry point. Run: python -m memory_mission --help"""
 
+from __future__ import annotations
+
 import typer
 
 from memory_mission import __version__
+from memory_mission.cli_log import log_app
 
 app = typer.Typer(
     name="memory-mission",
     help="Memory Mission — enterprise AI knowledge infrastructure.",
     no_args_is_help=True,
 )
+
+app.add_typer(log_app, name="log", help="Inspect the observability audit trail.")
 
 
 @app.command()

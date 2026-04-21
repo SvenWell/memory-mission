@@ -47,3 +47,57 @@ later steps.
 JSONL logger. Every subsequent component writes to it.
 
 ---
+
+## Step 2: Observability Foundation (Component 0.4) — DONE (2026-04-18)
+
+**Goal:** Append-only audit trail that every subsequent component writes to.
+Compliance-grade (7-year retention), immutable, per-firm isolated.
+
+**Files created:**
+- `src/memory_mission/observability/events.py` — Pydantic event schema
+  - `_EventBase` (firm_id, employee_id, trace_id, timestamp, event_id, schema_version)
+  - `ExtractionEvent`, `PromotionEvent`, `RetrievalEvent`, `DraftEvent`
+  - Discriminated union via `event_type` field
+  - Frozen (immutable), `extra="forbid"` (strict schema)
+- `src/memory_mission/observability/logger.py` — Append-only JSONL writer
+  - `ObservabilityLogger(observability_root, firm_id)` — per-firm scoped
+  - `write(event)` — uses `O_APPEND` for POSIX-atomic concurrent appends
+  - `read_all()` / `tail()` / `count()` / `parse_event_line()`
+  - Rejects cross-firm writes at runtime
+- `src/memory_mission/observability/context.py` — Ambient context
+  - `observability_scope()` context manager binds firm_id/employee_id/trace_id/logger
+  - `current_firm_id()`, `current_employee_id()`, `current_trace_id()`, `current_logger()`
+  - Nested scopes isolate + restore correctly (LIFO reset)
+- `src/memory_mission/observability/api.py` — Convenience logging API
+  - `log_extraction()`, `log_promotion()`, `log_retrieval()`, `log_draft()`
+  - Each reads firm/employee/trace from ambient scope
+- `src/memory_mission/cli_log.py` — `memory-mission log` subcommands
+  - `log tail --firm <id> [--event-type ...] [--follow] [--limit N]`
+  - `log count --firm <id>`
+  - `log path --firm <id>`
+- `tests/test_observability.py` — 19 tests
+  - Event schema: creation, serialization round-trip, extra fields rejected
+  - Logger: write/read, append-only on reopen, cross-firm rejection, multi-firm isolation
+  - Context: scope requires firm_id, bindings, trace_id propagation, nested scopes
+  - Concurrency: 4 processes × 20 events = 80 parseable lines (no torn writes)
+  - CLI: count, path, tail, event-type filter
+
+**Verification:**
+- [x] `pytest` — 24/24 passed (19 new + 5 from Step 1)
+- [x] `ruff check src/ tests/` — clean
+- [x] `ruff format --check` — clean
+- [x] `mypy src/` — strict mode, no issues in 28 files
+- [x] End-to-end demo: extraction + retrieval events share auto-generated trace_id,
+  CLI `log tail` prints them as JSONL.
+
+**Key invariants enforced by tests:**
+- Events are immutable once constructed (frozen Pydantic models)
+- Schema evolution is additive (SCHEMA_VERSION on every event)
+- Multi-firm isolation at the logger level (firm A's writer refuses firm B events)
+- File-level isolation (separate directory per firm)
+- Concurrent writes from multiple processes don't corrupt the log
+
+**Next:** Step 3 — Durable Execution + Checkpointing (component 0.6). Required
+before backfill agent can run (backfill = 24h+ job, must survive crashes).
+
+---
