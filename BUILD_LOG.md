@@ -652,3 +652,84 @@ each message to staging, records entity mentions, surfaces tier
 crossings.
 
 ---
+
+## Step 7b: Hermes Backfill Skill (markdown workflow + skill registry) — DONE (2026-04-21)
+
+**Goal:** The Gmail backfill workflow as a Hermes-compatible markdown
+skill that composes the Step 7a primitives. First skill in our registry
+— sets up the convention so calendar / Granola / extraction skills slot
+in without re-inventing the layout. Adopts the agentic-stack skill
+format verbatim.
+
+**Architecture decision:**
+- Mention extraction is **deferred to Step 8** (Extraction Agent). The
+  backfill skill stays focused on pull + stage. Reasoning belongs in
+  the agent that has the LLM, not in the loop that just moves bytes.
+- Skills live at `skills/<name>/SKILL.md` at the repo root, plus
+  registry files at `skills/_*` — matches agentic-stack convention so
+  any Hermes-compatible runtime mounts our brain without translation.
+
+**Files created:**
+- `skills/_index.md` — human-readable registry (one entry: backfill-gmail)
+- `skills/_manifest.jsonl` — machine-readable, one JSON line per skill
+- `skills/_writing-skills.md` — convention guide (frontmatter spec,
+  "destinations and fences not driving directions" rule, self-rewrite
+  hook footer template, anti-patterns)
+- `skills/backfill-gmail/SKILL.md` — the workflow itself
+  - Frontmatter: name, version (quoted to keep it a string),
+    triggers, tools, preconditions, constraints, category
+  - Body sections: what this does, workflow, where the data lands,
+    what it does NOT do (LLM, MentionTracker, direct connector
+    invokes, OAuth bootstrap), on crash, self-rewrite hook
+  - 4 hard constraints encoded — extraction agent in Step 8 will run
+    inside this skill's output, not modify it
+- `tests/test_skills_registry.py` — 19 tests for layout + per-skill
+  invariants + manifest ↔ frontmatter agreement
+
+**Registry invariants enforced by tests:**
+- `skills/`, `_index.md`, `_manifest.jsonl`, `_writing-skills.md` all
+  exist
+- Every skill directory (non-underscore) has a `SKILL.md`
+- Every `SKILL.md` has the seven required frontmatter fields
+- `version` is a `YYYY-MM-DD` date string (not a YAML date object —
+  caught the auto-parse footgun on first test run, documented in
+  `_writing-skills.md`)
+- Frontmatter `name` matches directory name
+- `triggers` and `constraints` are non-empty lists of strings
+- Every `SKILL.md` includes a `Self-rewrite hook` section
+- `_manifest.jsonl` covers exactly the set of skill directories on
+  disk (no orphans either way)
+- Every manifest field agrees with the corresponding SKILL.md
+  frontmatter (parametrized over the seven fields)
+- `_index.md` mentions every skill by name
+
+**What the skill does NOT do (explicit constraints):**
+- No LLM call. Extraction is Step 8.
+- No `MentionTracker.record()`. Mentions are extracted from facts, not
+  raw email bodies; wired in Step 8.
+- No direct `connector.invoke()`. The harness `invoke()` is mandatory
+  for observability + PII redaction.
+- No OAuth bootstrap. Caller injects the `ComposioClient`; missing
+  client → `NotImplementedError` surfaced.
+- No writes outside `staging/`. Promotion to MECE domains is Step 9.
+
+**Verification:**
+- [x] `pytest` — 319/319 passed (19 new + 300 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 42 files
+- [x] Frontmatter parses; manifest matches frontmatter for every field
+
+**Deferred to Step 8:**
+- Per-message LLM extraction (entity detection, fact triples)
+- `MentionTracker.record()` calls — wired into the extraction agent
+- The extraction agent will be its own skill at
+  `skills/extract-from-staging/SKILL.md` and will consume from
+  `<wiki_root>/staging/<source>/`
+
+**Next:** Step 8 — Extraction Agent. Reads from `staging/`, calls an
+LLM through the middleware chain (PII-redacted in/out), writes
+structured triples to `KnowledgeGraph`, increments `MentionTracker` on
+each entity seen, surfaces tier crossings to a stage-2 enrichment
+queue.
+
+---
