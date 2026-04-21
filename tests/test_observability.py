@@ -215,6 +215,54 @@ def test_empty_firm_id_rejected(tmp_path: Path) -> None:
         ObservabilityLogger(observability_root=tmp_path, firm_id="")
 
 
+# ---------- Path traversal defense (HIGH-severity fix) ----------
+
+
+@pytest.mark.parametrize(
+    "firm_id",
+    [
+        "..",
+        ".",
+        "../escape",
+        "foo/bar",
+        "foo\\bar",
+        "/absolute",
+        "\\absolute",
+        ".hidden",
+        "a" * 129,  # too long
+        "bad\x00id",
+        "",
+    ],
+)
+def test_malicious_firm_id_rejected(tmp_path: Path, firm_id: str) -> None:
+    """firm_ids that could escape the root or break the path layout are rejected."""
+    with pytest.raises(ValueError):
+        ObservabilityLogger(observability_root=tmp_path, firm_id=firm_id)
+
+
+def test_traversal_cannot_write_outside_root(tmp_path: Path) -> None:
+    """No matter how crafted, firm_id cannot write files outside observability_root."""
+    root = tmp_path / "obs"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "should-not-be-created.jsonl"
+
+    with pytest.raises(ValueError):
+        ObservabilityLogger(observability_root=root, firm_id="../outside")
+
+    assert not sentinel.exists()
+
+
+@pytest.mark.parametrize(
+    "firm_id",
+    ["acme", "firm-123", "acme_wealth", "firm.01", "FirmA", "a"],
+)
+def test_valid_firm_id_shapes_accepted(tmp_path: Path, firm_id: str) -> None:
+    """Common/expected firm_id shapes work."""
+    logger = ObservabilityLogger(observability_root=tmp_path, firm_id=firm_id)
+    assert logger.events_path.parent == (tmp_path / firm_id).resolve()
+
+
 # ---------- Ambient context + convenience API ----------
 
 

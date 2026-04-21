@@ -282,6 +282,28 @@ def test_must_start_before_use(tmp_path: Path) -> None:
         run.is_done("x")
 
 
+def test_reopening_completed_thread_preserves_status(tmp_path: Path) -> None:
+    """HIGH-SEVERITY REGRESSION GUARD (review finding #2).
+
+    A completed terminal thread must stay ``completed`` when reopened without
+    calling ``.complete()`` again. Previously the code flipped ANY non-running
+    status (including completed) back to running on re-entry, losing the
+    terminal state.
+    """
+    store = CheckpointStore(tmp_path / "ck.db")
+
+    # First run: complete it.
+    with durable_run(store=store, thread_id="t-1", firm_id="acme") as run:
+        run.mark_done("only-step")
+        run.complete()
+    assert store.get_thread("t-1").status == "completed"  # type: ignore[union-attr]
+
+    # Reopen without calling complete() again — status must remain "completed".
+    with durable_run(store=store, thread_id="t-1", firm_id="acme") as run:
+        assert run.status == "completed"
+    assert store.get_thread("t-1").status == "completed"  # type: ignore[union-attr]
+
+
 # ---------- Observability integration ----------
 
 

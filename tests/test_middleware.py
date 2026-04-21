@@ -215,6 +215,39 @@ def test_pii_handles_clean_text() -> None:
     assert redacted.metadata["pii_redactions_input"] == {}
 
 
+@pytest.mark.parametrize(
+    "raw,redacted_marker",
+    [
+        ("12345678", "[ACCOUNT]"),  # 8-digit (REGRESSION GUARD — review finding #3)
+        ("1234-5678", "[ACCOUNT]"),  # 8-digit with hyphen
+        ("123456789012", "[ACCOUNT]"),  # 12-digit
+        ("12345678901234567", "[ACCOUNT]"),  # 17-digit (upper bound)
+    ],
+)
+def test_pii_redacts_8_to_17_digit_accounts(raw: str, redacted_marker: str) -> None:
+    """MEDIUM-SEVERITY REGRESSION GUARD (review finding #3).
+
+    The docstring + audit compliance requirement says 8-17 digit account
+    numbers get redacted. Previously the regex required 9+ digits, leaking
+    8-digit account numbers to model/provider logs.
+    """
+    mw = PIIRedactionMiddleware()
+    call = _call([{"role": "user", "content": f"Account {raw} balance check."}])
+    redacted = mw.before_model(call)
+    content = redacted.messages[0]["content"]
+    assert raw not in content
+    assert redacted_marker in content
+
+
+def test_pii_does_not_redact_short_numerics() -> None:
+    """7 digits is not an account per our docstring; stays unredacted."""
+    mw = PIIRedactionMiddleware()
+    call = _call([{"role": "user", "content": "Order 1234567 shipped."}])
+    redacted = mw.before_model(call)
+    # "1234567" (7 digits) should pass through.
+    assert "1234567" in redacted.messages[0]["content"]
+
+
 def test_pii_is_idempotent() -> None:
     """Redacting already-redacted text doesn't modify placeholders."""
     mw = PIIRedactionMiddleware()

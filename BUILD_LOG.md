@@ -205,3 +205,42 @@ integration, OAuth flows for Gmail/Outlook/Calendar/Salesforce/Notion,
 custom MCP servers for Granola/Otter.ai (if needed).
 
 ---
+
+## Review Fixes (post-Step-4 hardening) — DONE (2026-04-21)
+
+External review flagged three issues. All fixed with regression-guard tests.
+
+**Fix #1 (HIGH): Path traversal via firm_id**
+- `src/memory_mission/observability/logger.py` — added `_validate_firm_id()`
+  regex gate (alphanumeric + `-_.`, 1-128 chars, no leading dot, no path
+  separators, no NUL) + `_safe_firm_dir()` which resolves the final path and
+  verifies it stays under observability_root
+- 15 new tests: parametrized malicious-id rejection (``..``, ``../escape``,
+  ``foo/bar``, ``foo\bar``, absolute paths, hidden dotfiles, 129-char strings,
+  NUL bytes, empty), end-to-end traversal-write-outside-root test, valid
+  shape acceptance
+
+**Fix #2 (HIGH): Reopening a completed thread flipped status back to running**
+- `src/memory_mission/durable/run.py` — restructured `start()` so completed
+  threads are a true no-op: don't update status, don't flip state
+- New test: complete → reopen → exit cleanly, status remains `completed`
+
+**Fix #3 (MEDIUM): 8-digit account numbers not redacted**
+- `src/memory_mission/middleware/pii.py` — ACCOUNT_PATTERN had off-by-one:
+  ``{8,17}\d`` required 9+ digits. Fixed to ``{7,16}\d`` = 8-17 digit match
+  per docstring + compliance spec
+- 4 new parametrized tests (8, 8-with-hyphen, 12, 17 digits) + negative test
+  for 7-digit non-account numerics
+
+**Cleanup (pyproject.toml):**
+- Relaxed `runtime = []` (hermes-agent not yet on PyPI under stable name)
+- Removed unused mypy overrides for modules we haven't imported yet
+  (composio, mempalace, hermes_agent — will add back when we import them)
+
+**Verification (rebuilt venv from scratch):**
+- [x] `pip install -e '.[dev]'` succeeded
+- [x] `pytest` — 89/89 passed (24 new review-guard tests + 65 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 31 files
+
+---

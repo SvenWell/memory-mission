@@ -39,11 +39,13 @@ from memory_mission.middleware.types import ModelCall, ModelResponse
 
 # US Social Security Number, conservative format: NNN-NN-NNNN
 SSN_PATTERN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
-# Bank/brokerage account numbers: runs of 8-17 digits, optionally with hyphens.
-# We guard with a word boundary + length check to reduce false positives on
-# order numbers, timestamps, etc. This trades recall for precision; the whole
-# point is to be conservative in what we NEVER send to the model.
-ACCOUNT_PATTERN = re.compile(r"\b(?:\d[\s-]?){8,17}\d\b")
+# Bank/brokerage account numbers: runs of 8-17 digits, optionally with hyphens
+# or internal spaces. The leading ``{7,16}`` + trailing ``\d`` means 8-17
+# digits total (7 repetitions + 1 trailing = 8 minimum; 16 + 1 = 17 max).
+# Word boundaries + length bound reduce false positives on order numbers and
+# timestamps. Skews toward over-redaction on purpose — missing a real account
+# number in a trace is worse than occasionally redacting a non-account numeric.
+ACCOUNT_PATTERN = re.compile(r"\b(?:\d[\s-]?){7,16}\d\b")
 # Credit cards (16 digits, optionally spaced/hyphenated).
 CARD_PATTERN = re.compile(r"\b(?:\d[\s-]?){12,15}\d\b")
 # Email addresses.

@@ -136,19 +136,24 @@ class DurableRun:
                     f"Thread {self._thread_id!r} exists but belongs to firm "
                     f"{existing.firm_id!r}, not {self._firm_id!r}."
                 )
-            if existing.status == "completed":
-                # Resume a completed run is allowed but a no-op.
-                _log.info("durable_run.start.completed thread_id=%s", self._thread_id)
             self._thread = existing
             self._completed_steps = self._store.completed_step_names(self._thread_id)
             self._state = dict(existing.state)
-            if existing.status != "running":
-                self._store.update_thread_status(self._thread_id, "running")
-            _log.info(
-                "durable_run.start.resume thread_id=%s completed_steps=%d",
-                self._thread_id,
-                len(self._completed_steps),
-            )
+            if existing.status == "completed":
+                # Reopening a completed run is allowed and a no-op — leave the
+                # terminal status alone. Callers that want to run MORE steps on
+                # the same thread should either create a new thread or call
+                # an explicit reopen method (not implemented).
+                _log.info("durable_run.start.completed.noop thread_id=%s", self._thread_id)
+            else:
+                if existing.status != "running":
+                    # paused or failed → flip to running for the resumed work.
+                    self._store.update_thread_status(self._thread_id, "running")
+                _log.info(
+                    "durable_run.start.resume thread_id=%s completed_steps=%d",
+                    self._thread_id,
+                    len(self._completed_steps),
+                )
 
     def complete(self) -> None:
         self._require_started()

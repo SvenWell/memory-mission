@@ -17,6 +17,7 @@ Read contract:
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -29,15 +30,57 @@ from memory_mission.observability.events import Event
 _EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
 EVENTS_FILENAME = "events.jsonl"
 
+# Safe firm_id: alphanumeric + hyphen + underscore + dot, 1-128 chars, not
+# "." or ".." and not starting with a dot. This is strict on purpose — firm
+# ids are internal identifiers, not user-supplied display names. Stricter
+# than needed is safer than loose.
+_SAFE_FIRM_ID = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
+
+
+def _validate_firm_id(firm_id: str) -> None:
+    """Reject firm_ids that aren't safe path segments. Raises ValueError."""
+    if not firm_id:
+        raise ValueError("firm_id cannot be empty")
+    if firm_id in (".", ".."):
+        raise ValueError(f"firm_id {firm_id!r} is not allowed")
+    if "\x00" in firm_id:
+        raise ValueError("firm_id cannot contain NUL bytes")
+    if "/" in firm_id or "\\" in firm_id:
+        raise ValueError(f"firm_id {firm_id!r} must not contain path separators")
+    if not _SAFE_FIRM_ID.match(firm_id):
+        raise ValueError(
+            f"firm_id {firm_id!r} is invalid. Must match "
+            f"[A-Za-z0-9_-][A-Za-z0-9_.-]{{0,127}} (1-128 chars, alphanumeric "
+            f"+ hyphen/underscore/dot, not starting with a dot)."
+        )
+
+
+def _safe_firm_dir(observability_root: Path, firm_id: str) -> Path:
+    """Construct ``observability_root/firm_id`` and verify it stays within root.
+
+    Belts-and-suspenders over the regex: resolve both paths (handling symlinks
+    and ``..``) and confirm the firm dir is under the root. Prevents any residual
+    traversal even if the regex is wrong.
+    """
+    _validate_firm_id(firm_id)
+    candidate = (observability_root / firm_id).resolve()
+    root_resolved = observability_root.resolve()
+    try:
+        candidate.relative_to(root_resolved)
+    except ValueError as exc:
+        raise ValueError(
+            f"firm_id {firm_id!r} resolves outside observability_root {observability_root!r}."
+        ) from exc
+    return candidate
+
 
 class ObservabilityLogger:
     """Firm-scoped append-only event logger."""
 
     def __init__(self, observability_root: Path, firm_id: str) -> None:
-        if not firm_id:
-            raise ValueError("firm_id cannot be empty")
+        observability_root.mkdir(parents=True, exist_ok=True)
         self._firm_id = firm_id
-        self._firm_dir = observability_root / firm_id
+        self._firm_dir = _safe_firm_dir(observability_root, firm_id)
         self._firm_dir.mkdir(parents=True, exist_ok=True)
         self._events_path = self._firm_dir / EVENTS_FILENAME
 

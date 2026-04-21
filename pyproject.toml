@@ -45,10 +45,11 @@ integrations = [
     "google-auth-oauthlib>=1.2",
 ]
 
-# Hermes Agent runtime adapter (Layer 5)
-runtime = [
-    "hermes-agent>=0.1",
-]
+# Hermes Agent runtime adapter (Layer 5).
+# Hermes Agent isn't published to PyPI under a stable name yet — install from
+# source when we wire the runtime adapter (Step 5+). Leaving this extra empty
+# keeps `pip install -e '.[runtime]'` working once we pin a git URL or wheel.
+runtime = []
 
 # Dev tooling
 dev = [
@@ -86,9 +87,10 @@ strict = true
 warn_return_any = true
 warn_unused_configs = true
 
-[[tool.mypy.overrides]]
-module = ["mempalace.*", "hermes_agent.*", "composio.*"]
-ignore_missing_imports = true
+# Mypy overrides for third-party packages without type stubs will be added
+# back when we actually import those modules (Step 5+: composio; Step 6+:
+# mempalace; Layer 5: hermes_agent). Keeping the list lean today avoids
+# mypy's "unused section" warning.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
