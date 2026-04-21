@@ -148,3 +148,60 @@ with V1 for wealth management compliance. ToolCallLimit, ModelFallback,
 and Summarization middleware follow incrementally.
 
 ---
+
+## Step 4: Middleware Layer (Component 0.7) — DONE (2026-04-18)
+
+**Goal:** Guardrails that wrap every LLM call. PII redaction ships in V1 for
+wealth management compliance. Framework is ready for more middleware
+(ToolCallLimit, ModelFallback, Summarization) as later needs arrive.
+
+**Files created:**
+- `src/memory_mission/middleware/types.py` — core types
+  - `ModelCall` (messages, model, provider, tools, metadata) — frozen Pydantic
+  - `ModelResponse` (content, tool_calls, usage, metadata) — frozen Pydantic
+  - `Middleware` protocol with optional `before_model` / `wrap_model_call` /
+    `after_model` hooks (duck-typed, no inheritance required)
+- `src/memory_mission/middleware/chain.py` — composition
+  - `MiddlewareChain(middlewares=...)` applies hooks in documented order:
+    before → wrap (onion) → model → reverse wrap → after (reverse)
+  - Skips hooks the middleware doesn't implement via `_has_hook()`
+  - `.append()` for incremental registration
+- `src/memory_mission/middleware/pii.py` — PII redaction
+  - Pattern list: SSN, email, APIKEY, phone (strict NXX-NXX-NNNN), card, account
+  - Pattern ordering matters: specific patterns run first so greedy ones
+    don't swallow them
+  - `redact_input` / `redact_output` both default True
+  - `extra_patterns` for firm-specific policies
+  - `literal_redactions` for client-name lists
+  - Stamps `metadata["pii_redactions_input"]` / `["pii_redactions_output"]`
+    so observability can log what was scrubbed without re-scanning
+- `tests/test_middleware.py` — 23 tests
+
+**Verification:**
+- [x] `pytest` — 65/65 passed (23 new + 42 from earlier steps)
+- [x] `ruff check src/ tests/` — clean
+- [x] `ruff format --check` — clean
+- [x] `mypy src/` — strict, no issues in 31 files
+- [x] End-to-end test: PII middleware integrated with a chain; leaky model
+  that echoes input produces output with placeholders, never raw PII
+
+**Key invariants enforced:**
+- `ModelCall` and `ModelResponse` are frozen — middleware must use
+  `model_copy(update=...)` to produce new instances
+- Middleware hooks compose predictably: before-in-order, wrap-as-onion,
+  after-in-reverse (matches web framework mental model)
+- Subset middleware (implements only some hooks) doesn't break the chain
+- PII redaction is idempotent (re-running on already-redacted text is a no-op)
+- Non-content message fields (tool_call_id, name) preserved across redaction
+
+**Deferred to later steps:**
+- `wrap_tool_call` hook shipped as Protocol stub; concrete tool-call
+  middleware (ToolCallLimit) comes with Step 5 when we have actual tools
+- ModelFallback and Summarization middleware come when multi-provider
+  setup + token-counting infrastructure exists
+
+**Next:** Step 5 — Connector Layer (component 1.3). Composio Python SDK
+integration, OAuth flows for Gmail/Outlook/Calendar/Salesforce/Notion,
+custom MCP servers for Granola/Otter.ai (if needed).
+
+---
