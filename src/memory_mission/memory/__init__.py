@@ -46,14 +46,28 @@ from memory_mission.memory.schema import (
     raw_sidecar_path,
     validate_domain,
 )
+from memory_mission.memory.search import (
+    COMPILED_TRUTH_BOOST,
+    RRF_K,
+    VECTOR_RRF_BLEND,
+    EmbeddingProvider,
+    HashEmbedder,
+    cosine_similarity,
+    rrf_fuse,
+)
 
 __all__ = [
+    "COMPILED_TRUTH_BOOST",
     "CORE_DOMAINS",
+    "RRF_K",
+    "VECTOR_RRF_BLEND",
     "BrainEngine",
     "Direction",
+    "EmbeddingProvider",
     "EngineStats",
     "Entity",
     "GraphStats",
+    "HashEmbedder",
     "InMemoryEngine",
     "KnowledgeGraph",
     "Page",
@@ -62,11 +76,13 @@ __all__ = [
     "SearchTier",
     "TimelineEntry",
     "Triple",
+    "cosine_similarity",
     "is_valid_domain",
     "new_page",
     "page_path",
     "parse_page",
     "raw_sidecar_path",
     "render_page",
+    "rrf_fuse",
     "validate_domain",
 ]

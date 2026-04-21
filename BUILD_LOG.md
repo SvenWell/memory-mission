@@ -488,3 +488,85 @@ blend constants from GBrain so when a real embedding provider plugs in,
 the search pipeline already has the right shape.
 
 ---
+
+## Step 6c: Hybrid Search Shell (RRF + cosine blend, stub embedder) — DONE (2026-04-21)
+
+**Goal:** The full GBrain hybrid-search pipeline — keyword pass + vector
+pass + RRF fusion + compiled-truth boost + cosine blend — wired into
+`BrainEngine`. No live embedding provider yet; a deterministic
+`HashEmbedder` stands in so tests can verify plumbing end-to-end. When a
+real `EmbeddingProvider` (OpenAI, Gemini, QMD) gets injected in a later
+step, the pipeline already has the right shape.
+
+**Files created:**
+- `src/memory_mission/memory/search.py` — hybrid-search primitives:
+  - `EmbeddingProvider` Protocol (`dimension` + `embed(text)`)
+  - `HashEmbedder` — SHA256-hashed bag-of-tokens, L2-normalized,
+    deterministic across processes (explicit hash — Python's built-in
+    `hash()` is randomized per-process by PYTHONHASHSEED)
+  - `cosine_similarity(a, b)` — returns 0 on zero-norm vectors, raises
+    on dimension mismatch
+  - `rrf_fuse(ranked_lists, k=60)` — reciprocal rank fusion
+  - Constants: `RRF_K = 60`, `COMPILED_TRUTH_BOOST = 2.0`,
+    `VECTOR_RRF_BLEND = 0.7` — GBrain's starting values, tunable later on
+    pilot data
+
+**Files extended:**
+- `src/memory_mission/memory/engine.py`:
+  - `BrainEngine` Protocol gained `query()` method
+  - `InMemoryEngine(embedder=None)` — optional embedder, eager page
+    embedding on `put_page`, cleanup on `delete_page`
+  - New `query(question, *, limit=10, tier="cascade")` method runs the
+    full pipeline: keyword + vector → RRF fuse → compiled-truth boost →
+    cosine blend → logged `RetrievalEvent`
+  - When no embedder is attached, vector pass is skipped cleanly and the
+    pipeline degrades to keyword-only with the same boost shape
+- `src/memory_mission/memory/__init__.py` — exported `HashEmbedder`,
+  `EmbeddingProvider`, `cosine_similarity`, `rrf_fuse`, and all three
+  constants
+- `tests/test_search.py` — 31 tests
+
+**Pipeline behavior locked by tests:**
+- Pure keyword mode (no embedder): single page with query in truth scores
+  exactly `(1/61) * COMPILED_TRUTH_BOOST = 2/61`
+- Truth-match always outranks title-only match (quantitative check:
+  boosted `2/61` vs unboosted `1/62`)
+- With embedder: final score = `0.7 * RRF + 0.3 * cosine` (verified via
+  reproducing the exact cosine from `embedder.embed(title + truth)`)
+- RRF accumulates across lists — item in both lists scores higher than
+  item in one
+- `RRF_K` is tunable: `k=1` is tight, `k=1000` flattens the rank curve
+- `HashEmbedder` is deterministic across processes (same text → same
+  vector), L2-normalized, empty string → zero vector
+- `delete_page` drops the embedding alongside the page (no orphan
+  embeddings poisoning future queries)
+
+**Verification:**
+- [x] `pytest` — 227/227 passed (31 new + 196 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 38 files
+- [x] `HashEmbedder` satisfies `EmbeddingProvider` Protocol via
+  `isinstance()` check
+- [x] Cosine similarity: identical → 1.0, orthogonal → 0.0, opposite →
+  -1.0, zero-norm → 0.0, mismatched dims → ValueError
+- [x] Pipeline degrades cleanly: no embedder + no keyword match = empty
+  hits, still logs the event
+
+**Deferred:**
+- Real `EmbeddingProvider` adapters (OpenAI `text-embedding-3-small`,
+  Gemini) — wire when extraction flow needs semantic search
+- Vector store persistence (SQLite + sqlite-vec or Postgres + pgvector) —
+  wire when in-memory doesn't cut it
+- Filesystem-backed `BrainEngine` (markdown-on-disk source of truth)
+- Query expansion (optional callback path from GBrain)
+- `as_of=<date>` filtering on `query()` respecting page validity windows
+- Four-layer deduplication across chunk variants (becomes useful when
+  pages get chunked for retrieval)
+
+**Next:** Step 7 — Backfill Agent (component 1.1). Port Rowboat's
+`sync_gmail.ts` pattern to Python using the Gmail connector + durable
+execution. Each message is a checkpointed step; output lands in
+`/staging/` for human review; extraction happens in-loop via the
+observability-scoped middleware chain.
+
+---
