@@ -36,3 +36,20 @@ Constraints: Memory Mission imports no LLM SDK (host agent runs the
 LLM), every fact must carry a `support_quote` from the source, low
 confidence routes to `open_question`, extracted target_plane must
 match source target_plane.
+
+## review-proposals
+
+PR-model promotion review: the V1 centerpiece. Surface pending
+proposals from the `ProposalStore` one at a time to a human reviewer,
+capture the decision with required rationale, call `promote()` /
+`reject()` / `reopen()`. No auto-approve on any signal. Every approve
+atomically applies the proposal's facts to the firm's
+`KnowledgeGraph` with full provenance.
+
+Triggers: "review proposals", "pending reviews", "what's in the queue",
+"approve proposals", "review pending promotions"
+
+Constraints: rationale required on every decision (rubber-stamping
+structurally blocked), one proposal at a time (no batch approval),
+honor the permissions policy (skip proposals the reviewer can't
+decide), stop on error during promote (don't cascade failures).

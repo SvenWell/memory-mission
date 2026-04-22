@@ -945,3 +945,114 @@ in chat; skill calls `promote()` → writes to firm plane with full
 provenance + `PromotionEvent`. This is V1's centerpiece.
 
 ---
+
+## Step 10: Promotion Pipeline (V1 centerpiece) — DONE (2026-04-22)
+
+**Goal:** The PR-model merge gate. Nothing lands on a memory plane
+without an explicit human decision with rationale. Bad promotion is
+worse than missing promotion — default deny on auto-merge.
+
+Two sub-commits.
+
+### Step 10a — promotion infrastructure (commit `65c9bfe`)
+
+- `src/memory_mission/promotion/proposals.py`:
+  - `Proposal` frozen Pydantic — target_plane + target_entity +
+    facts + proposer + source_report_path + lifecycle fields
+    (status, decision_history, rejection_count)
+  - `DecisionEntry` — one audit entry per approve/reject/reopen
+  - `ProposalStore` — per-firm SQLite queue, indexed on status +
+    target_entity + target_plane; context manager; save/get/list/stats
+  - `generate_proposal_id` — deterministic hash so retries don't
+    duplicate
+- `src/memory_mission/promotion/pipeline.py`:
+  - `create_proposal` — validates inputs, inserts to store,
+    emits `ProposalCreatedEvent`. Idempotent by proposal_id.
+  - `promote` — loads pending proposal, applies facts to KG
+    atomically (identity → add_entity, relationship/preference →
+    add_triple, event → dated triple, update → invalidate +
+    add_triple, open_question → skipped), marks approved, emits
+    `ProposalDecidedEvent`. Rationale required (empty/whitespace
+    blocked structurally via `_require_rationale`). Raises
+    `ProposalStateError` on non-pending proposals.
+  - `reject` — marks rejected, bumps rejection_count, preserves
+    decision history. Same rationale requirement.
+  - `reopen` — only valid on rejected proposals; flips back to
+    pending so a reviewer with new evidence can reconsider. Full
+    history preserved across the lifecycle.
+- `src/memory_mission/observability/events.py` — additive:
+  - `ProposalCreatedEvent` (event_type="proposal_created")
+  - `ProposalDecidedEvent` (event_type="proposal_decided" —
+    covers approved/rejected/reopened)
+  - `log_proposal_created` / `log_proposal_decided` in api.py
+- `tests/test_promotion.py` — 33 tests
+
+**Provenance:** each promoted triple carries `source_closet` —
+"firm" for firm-plane promotions, "personal/<employee_id>" for
+personal. `source_file` is the `ExtractionReport` path that grounded
+the proposal. The KG time-travel semantics stay intact: `UpdateFact`
+with `supersedes_object` produces an `invalidate` + `add_triple` pair
+so `query_entity(as_of=<date>)` returns the right value for each
+point in time.
+
+### Step 10b — review-proposals skill (this commit)
+
+- `skills/review-proposals/SKILL.md` — the merge-gate workflow:
+  - Read pending proposals, rank by rejection_count → tier
+    crossings → age
+  - Permission pre-check via `can_propose(policy, reviewer_id,
+    proposal.target_scope)` — skip what reviewer can't decide
+  - Surface ONE proposal at a time via forcing questions
+  - Three decisions: Approve / Reject / Skip (all via host agent's
+    question mechanism)
+  - Call `promote` / `reject` — pipeline enforces rationale
+  - Stop on error; don't cascade
+- Forcing questions surface: contradictions with existing firm truth,
+  permission uplift warnings, recurring rejections, low-confidence
+  bundles. Never guess on the human's behalf.
+- `skills/_index.md` + `skills/_manifest.jsonl` updated
+
+**Verification (both sub-commits):**
+- [x] `pytest` — 434/434 passed (33 new + 401 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 51 files
+- [x] Registry-integrity tests still green with the new skill
+- [x] Observability tests still green (new events are additive,
+  existing PromotionEvent unchanged)
+
+**Key invariants enforced by tests:**
+- `generate_proposal_id` deterministic for same inputs; differs on
+  plane / employee / fact changes
+- `create_proposal` is idempotent — second call returns existing
+  proposal
+- `promote` writes facts to KG atomically; raises before marking
+  approved if apply fails
+- Every decision requires non-empty rationale (empty string,
+  whitespace-only → `ValueError`)
+- `promote` raises `ProposalStateError` on non-pending proposals
+- `reopen` only works on rejected; raises on pending or approved
+- `UpdateFact` produces correct time-travel shape in KG
+  (`as_of=<before effective_date>` returns old value; after returns
+  new)
+- `OpenQuestion` facts never write to KG even when part of approved
+  proposal
+- Full lifecycle (created → rejected → reopened → approved) emits
+  4 observable events; final proposal has `rejection_count=1` and
+  full decision_history chain
+
+**Deferred:**
+- Curated page rewrites (compiled-truth regeneration) — that's a
+  workflow-agent job, not promotion's
+- Scope widening check — `can_propose` is called in the skill but
+  the pipeline itself doesn't enforce scope (the skill is the gate)
+- Live host-agent integration — the `AskUserQuestion` surface lives
+  with the host, not Memory Mission
+
+**Next:** Step 11 — firm-artefact backfill skill. Pull from Drive /
+SharePoint / memos via Composio into firm-plane staging. Routes
+through the same promotion pipeline, solving Emile's authority
+problem for cold-start firm knowledge. Can ship in parallel with
+Granola backfill (same pattern as Gmail skill, different connector
++ target plane).
+
+---
