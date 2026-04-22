@@ -1153,3 +1153,108 @@ Or jump to Step 13 — first workflow agent skill (meeting-prep) —
 which closes the end-to-end loop and proves V1 is shippable.
 
 ---
+
+## Step 12: Per-Employee Brain — Four-Layer Personal Plane — DONE (2026-04-22)
+
+**Goal:** Extend the personal plane from "curated pages + staging" to
+a real per-employee brain. The user's framing: how we work at the
+individual level is structurally different from the firm system, and
+the personal side needs working / episodic / semantic / preferences /
+lessons layers — same shape as agentic-stack adapted to firm context.
+GBrain and Supermemory both ship strong per-person brains; we should
+too.
+
+Two sub-commits.
+
+### Step 12a — semantic/ layer in personal-plane paths (commit `9f3cb85`)
+
+- `src/memory_mission/memory/schema.py`:
+  - `page_path("personal", domain, slug, employee_id="alice")` →
+    `personal/alice/semantic/<domain>/<slug>.md` (was
+    `personal/alice/<domain>/<slug>.md`)
+  - `raw_sidecar_path` similarly gets `semantic/` inserted
+  - New `curated_root(plane, employee_id=None)` helper
+  - Firm plane unchanged (firm is purely curated, no per-layer split)
+- `tests/test_memory.py` — 3 new tests for `curated_root`,
+  2 path tests updated
+- 442/442 passed (3 new + 439 previous)
+
+### Step 12b — personal_brain package (this commit)
+
+New package at `src/memory_mission/personal_brain/` with four modules,
+each shipping a primitive for one layer:
+
+- `working.py` — `WorkingState` Pydantic + `read_/write_working_state`
+  + `archive_stale` helper. Stored as `working/WORKSPACE.md` with
+  YAML frontmatter (employee_id, updated_at, focus) + an "## Open
+  items" bullet section + free-form body. Vault-friendly so users
+  can hand-edit in Obsidian. Default 2-day archive threshold per
+  agentic-stack convention.
+- `episodic.py` — `AgentLearning` Pydantic + `EpisodicLog` (append /
+  all / top_k / filter) + `record_learning` convenience function.
+  Stored as `episodic/AGENT_LEARNINGS.jsonl`, append-only.
+  `top_k` ranks by salience using the existing
+  `memory.salience.salience_score()` formula.
+- `preferences.py` — `Preferences` Pydantic + `read_/write_/update_`
+  helpers. Stored as `preferences/PREFERENCES.md` (frontmatter +
+  body). Typed core fields (name / timezone / communication_style /
+  explanation_style / test_strategy) with `extra="allow"` for firm-
+  specific custom keys. `update_preferences` merges into existing
+  state without clobbering.
+- `lessons.py` — `Lesson` Pydantic + `LessonsStore` (append /
+  all / filter / render). Two files: `lessons.jsonl` is the source
+  of truth (append-only, deterministic `lesson_id` from rule text →
+  idempotent appends), `LESSONS.md` is rendered from it on every
+  append (newest-first, never hand-edit).
+- `personal_brain/__init__.py` — public exports.
+
+**Files modified:**
+- `README.md` — new "Open the personal plane in Obsidian" section
+  documents the four-layer layout + safety-hatch UX positioning
+
+**Verification (both sub-commits):**
+- [x] `pytest` — 472/472 passed (33 new + 439 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 57 files
+- [x] All four layer paths land under `personal/<employee_id>/`
+  exactly where the schema docstring says they should
+- [x] Round-trip serialization for each Pydantic model
+- [x] Archive-stale moves WORKSPACE.md only when older than threshold
+- [x] Salience-ranked top_k surfaces high-pain recent recurring
+  entries before old neutral ones
+- [x] Preferences extras (firm-specific keys) round-trip cleanly
+- [x] Lessons render orders newest-first; idempotent append by rule
+  text; rejects empty rule/rationale; confidence bounded [0, 1]
+
+**Why this matters:** workflow agents (Step 15+) will read the personal
+brain to answer "what does Alice know about this client" before
+drafting anything. Without the four-layer split, the agent sees only
+curated pages — no working state, no episodic context, no preferences,
+no learned lessons. With it, the personal plane behaves like a real
+agent brain.
+
+**Pairs with deferred work:**
+- Bayesian corroboration on the firm KG (Step 13) — when the same
+  triple is re-extracted, bump confidence rather than insert
+  duplicates
+- Federated cross-employee pattern detector (Step 14) — admin skill
+  that scans personal planes (now richer with the four layers) and
+  surfaces "the same fact appears across N employees" as firm-plane
+  proposal candidates
+
+**Deferred:**
+- Onboarding wizard for `PREFERENCES.md` (manual edit fine for V1)
+- Skill that consumes `top_k` episodic entries before agent decisions
+  (will land naturally in Step 15 workflow agents)
+- Cross-employee promotion suggestion (Step 14 federated detector)
+
+**Next:** Step 13 — Bayesian corroboration on the KG. New
+`KnowledgeGraph.corroborate()` op that bumps confidence + appends
+sources when an extraction matches an existing currently-true triple.
+`promote()._apply_facts` checks for existing matches before adding.
+Independent-evidence formula `new_conf = 1 - (1 - old) * (1 - new)`,
+capped at 0.99 so nothing reaches certainty without human review.
+Time-decay multiplier on old confidence using `salience_score`'s
+recency curve.
+
+---

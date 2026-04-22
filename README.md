@@ -135,6 +135,24 @@ make lint-fix       # auto-apply ruff fixes
 pytest -k <pattern> # run a subset
 ```
 
+## Open the personal plane in Obsidian
+
+The on-disk format is vault-native. Point Obsidian at
+`<MM_WIKI_ROOT>/personal/<employee_id>/` and you get a working vault
+for free — graph view, linked mentions, search, tag panel, all of it.
+The four-layer agent brain (`working/`, `episodic/`, `semantic/`,
+`preferences/`, `lessons/`) shows up as four top-level folders; the
+MECE domains (`people/`, `companies/`, etc.) live under `semantic/`.
+
+Hidden directories (`.facts/`, `.raw/`) are skipped by Obsidian by
+default, so the vault stays clean. The `---` zone separator inside
+each curated page renders as a horizontal rule rather than a two-zone
+split — cosmetic, doesn't affect content.
+
+Treat Obsidian as the safety hatch (browse / grep / hand-annotate),
+not the primary UX. Workflow-agent chat is where the daily work
+happens.
+
 ## Status
 
 Phase 1 foundations + memory layer + ingestion primitives complete. Step 7b (Hermes backfill skill in markdown) is next, then Step 8 (extraction agent), then promotion pipeline (Step 9) and workflow agents (Phase 2).
