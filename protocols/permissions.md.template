@@ -1,0 +1,75 @@
+# Firm Permissions Policy (TEMPLATE)
+
+> Copy this file to `protocols/permissions.md` in your firm's config
+> directory. Edit to match your scope model + employee roster. The
+> parser reads `## firm:`, `## default_scope:` (optional), and the
+> individual `### scope:` / `### employee:` sections. Comments and free
+> text between sections are ignored.
+
+## firm: acme-capital
+
+## default_scope: public
+
+---
+
+## Scopes
+
+### scope: public
+
+Baseline scope every employee has implicitly. Use for firm info that
+is safe to share across the whole team — employee roster, publicly
+stated firm thesis, industry memos, generic research.
+
+### scope: partner-only
+
+Partner-level strategy: deal pipeline specifics, portfolio construction
+notes, LP communications, compensation discussions. Not visible to
+associates or analysts.
+
+### scope: client-confidential
+
+Client-specific PII + account details + bespoke preferences. Only
+employees directly servicing that client see these pages.
+
+### scope: deal-team
+
+Deal-specific working notes + negotiation state. Members rotate per
+deal; scope is per-firm but membership is expected to churn.
+
+---
+
+## Employees
+
+### employee: alice
+
+scopes: [public, partner-only, deal-team]
+
+### employee: bob
+
+scopes: [public, deal-team]
+
+### employee: carol
+
+scopes: [public]
+
+---
+
+## Notes for administrators
+
+- **Adding a scope:** insert a new `### scope: <name>` heading + a short
+  description. Then grant it to the relevant employees.
+- **Promoting an employee:** add the higher-privilege scope name to
+  their `scopes: [...]` list. No need to restart anything — the policy
+  file is read on each session boot.
+- **Removing access:** delete the scope from the employee's list. Any
+  firm-plane page tagged with that scope becomes unreadable for them
+  on the next retrieval.
+- **Default deny:** employees not listed in this file have NO access
+  beyond `public`. Keep the file current.
+- **Scope on pages:** firm-plane pages add `scope: <name>` to their
+  YAML frontmatter. Pages without a scope fall back to
+  `default_scope` above.
+- **No-escalation rule:** `can_propose(employee, scope)` returns True
+  only when the employee already has read access to that scope. An
+  associate cannot propose a `partner-only` promotion even if they've
+  somehow read the source material.
