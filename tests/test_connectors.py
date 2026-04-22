@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from memory_mission.durable import CheckpointStore, durable_run
 from memory_mission.ingestion.connectors import (
+    DRIVE_ACTIONS,
     GMAIL_ACTIONS,
     GRANOLA_ACTIONS,
     ComposioConnector,
@@ -20,6 +21,7 @@ from memory_mission.ingestion.connectors import (
     ConnectorResult,
     InMemoryConnector,
     invoke,
+    make_drive_connector,
     make_gmail_connector,
     make_granola_connector,
 )
@@ -223,6 +225,53 @@ def test_gmail_preview_includes_sender_and_subject() -> None:
 
 def test_gmail_actions_match_exported_constant() -> None:
     assert make_gmail_connector().list_actions() == list(GMAIL_ACTIONS)
+
+
+# ---------- Drive factory ----------
+
+
+def test_drive_exposes_list_and_get_actions() -> None:
+    conn = make_drive_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {"list_files", "get_file"}
+    assert conn.name == "drive"
+
+
+def test_drive_actions_match_exported_constant() -> None:
+    assert make_drive_connector().list_actions() == list(DRIVE_ACTIONS)
+
+
+def test_drive_preview_includes_name_and_mime() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "name": "Q3 Investment Memo",
+                "mime_type": "application/vnd.google-apps.document",
+                "content": "Q3 thesis: lean into vertical AI infrastructure.",
+            }
+
+    conn = make_drive_connector(client=FakeClient())
+    result = conn.invoke("get_file", {"file_id": "f-1"})
+    assert "Q3 Investment Memo" in result.preview
+    assert "application/vnd.google-apps.document" in result.preview
+    assert "vertical AI infrastructure" in result.preview
+
+
+def test_drive_preview_handles_missing_fields() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {}
+
+    conn = make_drive_connector(client=FakeClient())
+    result = conn.invoke("get_file", {"file_id": "f-1"})
+    # Empty fields collapse cleanly — no header dash, no body content
+    assert result.preview == ""
+
+
+def test_drive_requires_client_for_invoke() -> None:
+    conn = make_drive_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_files", {})
 
 
 # ---------- Harness invoke() ----------

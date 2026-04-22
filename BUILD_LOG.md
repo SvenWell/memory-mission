@@ -1056,3 +1056,100 @@ Granola backfill (same pattern as Gmail skill, different connector
 + target plane).
 
 ---
+
+## Step 11: Firm-Artefact Backfill + Parallel Granola — DONE (2026-04-22)
+
+**Goal:** Solve Emile's authority problem for cold-start firm
+knowledge — institutional truth seeded from firm-authored documents
+(memos, decks, training docs, quarterly updates), not from one
+employee agent's extracted opinions. Plus the parallel Granola
+backfill skill for personal-plane meeting transcripts (Step 5's
+connector finally gets a workflow on top of it).
+
+One commit covers both — pattern is well-established at this point;
+both skills clone backfill-gmail's shape with different connector +
+target plane.
+
+**Files created:**
+- `src/memory_mission/ingestion/connectors/drive.py`:
+  - `make_drive_connector(client=None)` factory using the existing
+    `ComposioConnector` adapter pattern from Step 5
+  - `DRIVE_ACTIONS`: `list_files` (optional folder/mime/modified-since
+    filters), `get_file` (one file by id; Composio handles Google
+    Docs export to markdown server-side)
+  - `_drive_preview` formats `name | mime — body[:400]` for the
+    PII-scrubbed audit trail
+- `skills/backfill-granola/SKILL.md` — parallel personal-plane
+  backfill (employee_id required, target_plane="personal", source
+  "granola"). Uses the existing Granola connector from Step 5.
+- `skills/backfill-firm-artefacts/SKILL.md` — firm-plane cold-start
+  backfill via Drive (no employee_id, target_plane="firm", source
+  "drive"). Three explicit governance guardrails baked into the
+  skill text:
+  1. Administrator-only: regular employees should not run this.
+  2. Reviewer at the merge gate is separate from the administrator
+     who pulled the source — preserves audit-trail value.
+  3. Source-folder discipline: backfill from the firm's curated
+     knowledge folders, not sandboxes.
+
+**Files modified:**
+- `src/memory_mission/ingestion/connectors/__init__.py` — exports
+  `make_drive_connector` + `DRIVE_ACTIONS`
+- `tests/test_connectors.py` — 5 new Drive tests
+- `skills/_index.md` — entries for both new skills
+- `skills/_manifest.jsonl` — entries for both new skills
+
+**Verification:**
+- [x] `pytest` — 439/439 passed (5 new + 434 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 52 files
+- [x] Registry-integrity tests still green with two new skills
+
+**Key invariants enforced by tests:**
+- `make_drive_connector()` returns a `ComposioConnector` with name
+  "drive" and exactly the two `DRIVE_ACTIONS`
+- Drive preview includes file name + mime type + body snippet
+- Empty-payload preview collapses cleanly to empty string (no header
+  dash artifact)
+- Drive connector raises `NotImplementedError` until a Composio
+  client is injected — same stub-on-demand contract as Gmail/Granola
+
+**Architecture: V1 ingestion surface complete.** Three connectors
+(Gmail / Granola / Drive), three pull-and-stage skills (one per
+connector + plane combination):
+
+```
+backfill-gmail            → staging/personal/<emp>/gmail/
+backfill-granola          → staging/personal/<emp>/granola/
+backfill-firm-artefacts   → staging/firm/drive/
+```
+
+All three feed the same downstream:
+1. `extract-from-staging` reads each, runs the host LLM, writes
+   `ExtractionReport` to `.facts/`
+2. The promotion-pipeline skill (Step 10) bundles facts into
+   proposals
+3. `review-proposals` surfaces them for human approval with rationale
+4. Approved proposals apply to the firm's `KnowledgeGraph` with full
+   provenance chain (source closet + source file + reviewer +
+   rationale + timestamps)
+
+**Deferred:**
+- SharePoint connector (similar adapter, can clone Drive when needed)
+- Microsoft Calendar / Google Calendar connectors (when meeting-prep
+  workflow needs them)
+- Otter.ai (post-V1 per Step 5 scope)
+- Per-folder access control on the Drive connector (V1 trusts the
+  administrator running the skill to choose appropriate folders)
+
+**Next:** Step 12 — CRM output channel. `Proposal.target` field
+gains `"crm"` vs `"firm_knowledge"` distinction; differentiated
+gates per target (CRM auto-merge when confidence threshold + scope
+permits + non-contradiction; firm_knowledge always human-reviewed).
+`skills/push-to-crm/SKILL.md` writes approved CRM proposals via
+Composio.
+
+Or jump to Step 13 — first workflow agent skill (meeting-prep) —
+which closes the end-to-end loop and proves V1 is shippable.
+
+---

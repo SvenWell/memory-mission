@@ -37,6 +37,37 @@ LLM), every fact must carry a `support_quote` from the source, low
 confidence routes to `open_question`, extracted target_plane must
 match source target_plane.
 
+## backfill-granola
+
+Pull historical meeting transcripts through the Granola connector
+(Composio-backed) into the **employee's personal staging plane**
+(`<wiki_root>/staging/personal/<employee_id>/granola/`) for the
+extraction agent (Step 9) to consume. Same shape as backfill-gmail,
+different source. Each transcript is a checkpointed step.
+
+Triggers: "backfill granola", "import meeting transcripts",
+"sync granola transcripts", "pull historical meetings"
+
+Constraints: personal plane only, every fetch through the harness,
+no LLM, no firm-plane writes.
+
+## backfill-firm-artefacts
+
+Cold-start the firm plane from firm-authored documents (memos,
+decks, training docs, quarterly updates, board material) via the
+Drive connector. **Administrator-run only.** Stages under
+`<wiki_root>/staging/firm/drive/`; resulting proposals go through
+`skills/review-proposals` for merge gate. Solves Emile's authority
+problem — firm truth comes from firm-authored content, not one
+employee agent's extracted opinions.
+
+Triggers: "backfill firm artefacts", "cold-start firm knowledge",
+"import firm documents", "seed firm wiki", "ingest drive folder"
+
+Constraints: firm plane only (no employee_id), administrator-run,
+reviewer at the merge gate is separate from the administrator who
+pulled the source, every fetch through the harness, no LLM.
+
 ## review-proposals
 
 PR-model promotion review: the V1 centerpiece. Surface pending
