@@ -15,6 +15,7 @@ from memory_mission.memory import (
     Page,
     PageFrontmatter,
     TimelineEntry,
+    curated_root,
     is_valid_domain,
     new_page,
     page_path,
@@ -246,8 +247,9 @@ def test_page_path_firm_plane() -> None:
 
 
 def test_page_path_personal_plane() -> None:
+    """Personal plane curated pages live under the four-layer ``semantic/`` subdir."""
     p = page_path("personal", "people", "sarah-chen", employee_id="sarah")
-    assert str(p) == "personal/sarah/people/sarah-chen.md"
+    assert str(p) == "personal/sarah/semantic/people/sarah-chen.md"
 
 
 def test_page_path_personal_requires_employee_id() -> None:
@@ -267,12 +269,26 @@ def test_raw_sidecar_path_firm_plane() -> None:
 
 def test_raw_sidecar_path_personal_plane() -> None:
     p = raw_sidecar_path("personal", "people", "sarah-chen", employee_id="sarah")
-    assert str(p) == "personal/sarah/people/.raw/sarah-chen.json"
+    assert str(p) == "personal/sarah/semantic/people/.raw/sarah-chen.json"
 
 
 def test_page_path_rejects_unknown_domain() -> None:
     with pytest.raises(ValueError, match="Unknown domain"):
         page_path("firm", "not-a-domain", "x")
+
+
+def test_curated_root_personal_includes_semantic_layer() -> None:
+    """Personal plane curated content lives under the four-layer ``semantic/`` subdir."""
+    assert str(curated_root("personal", employee_id="alice")) == "personal/alice/semantic"
+
+
+def test_curated_root_firm_is_flat() -> None:
+    assert str(curated_root("firm")) == "firm"
+
+
+def test_curated_root_personal_requires_employee_id() -> None:
+    with pytest.raises(ValueError, match="personal plane requires employee_id"):
+        curated_root("personal")
 
 
 def test_page_path_rejects_bad_employee_id() -> None:

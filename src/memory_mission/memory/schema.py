@@ -20,10 +20,18 @@ Core domains (ported from GBrain):
 
 Memory planes (Emile's governance model, Step 8):
 
-- ``personal``: private to one employee. Path: ``personal/<employee_id>/``.
-  Rich, local, never shared across employees.
-- ``firm``: shared institutional truth. Path: ``firm/``. Only reached via
-  PR-model promotion through the staging zone.
+- ``personal``: private to one employee. Root: ``personal/<employee_id>/``.
+  Rich, local, never shared across employees. Internally split into four
+  layers (Step 12a, agentic-stack pattern adapted to firm context):
+  - ``working/`` — current task state (volatile)
+  - ``episodic/`` — agent's event log (AGENT_LEARNINGS.jsonl)
+  - ``semantic/`` — distilled patterns / curated pages (this is where
+    ``page_path`` puts personal-plane curated content)
+  - ``preferences/`` — how this employee wants their agent to behave
+  - ``lessons/`` — agent's accumulated personal lessons
+- ``firm``: shared institutional truth. Path: ``firm/``. Flat layout —
+  firm content is purely curated, no agent-private layers. Only reached
+  via PR-model promotion through the staging zone.
 
 Staging is a separate zone (not a plane) — pulled items + proposed
 promotions wait there under ``staging/personal/<emp>/<source>/`` or
@@ -32,7 +40,7 @@ promotions wait there under ``staging/personal/<emp>/<source>/`` or
 Slugs are lowercase kebab-case. Conflicts within one plane are resolved
 by disambiguation suffix (``sarah-chen-meridian`` vs ``sarah-chen-bain``).
 
-Raw API responses live in ``<plane_root>/<domain>/.raw/<slug>.json``
+Raw API responses live in ``<curated_root>/<domain>/.raw/<slug>.json``
 sidecars alongside the curated page — the page is the distilled view; the
 sidecar preserves provenance for audit and re-enrichment.
 """
@@ -90,6 +98,11 @@ def plane_root(plane: Plane, employee_id: str | None = None) -> PurePosixPath:
 
     - ``personal`` requires ``employee_id`` and returns ``personal/<employee_id>``
     - ``firm`` rejects ``employee_id`` and returns ``firm``
+
+    Note: this returns the PLANE root, not the curated-content root. For the
+    personal plane, curated content lives under ``<plane_root>/semantic/``
+    (one of the four agent-brain layers). Use ``curated_root()`` to reach
+    the curated subtree directly.
     """
     if plane == "personal":
         if not employee_id:
@@ -103,6 +116,19 @@ def plane_root(plane: Plane, employee_id: str | None = None) -> PurePosixPath:
     raise ValueError(f"unknown plane: {plane!r}")
 
 
+def curated_root(plane: Plane, employee_id: str | None = None) -> PurePosixPath:
+    """Return the repo-relative root for a plane's CURATED content.
+
+    - Personal: ``personal/<employee_id>/semantic`` (the four-layer
+      agent-brain model puts curated pages in the ``semantic/`` layer)
+    - Firm: ``firm`` (no per-layer split; firm is purely institutional)
+    """
+    root = plane_root(plane, employee_id)
+    if plane == "personal":
+        return root / "semantic"
+    return root
+
+
 def page_path(
     plane: Plane,
     domain: str,
@@ -110,16 +136,16 @@ def page_path(
     *,
     employee_id: str | None = None,
 ) -> PurePosixPath:
-    """Return the repo-relative page path.
+    """Return the repo-relative page path for curated content.
 
-    - Personal: ``personal/<employee_id>/<domain>/<slug>.md``
+    - Personal: ``personal/<employee_id>/semantic/<domain>/<slug>.md``
     - Firm: ``firm/<domain>/<slug>.md``
 
     ``PurePosixPath`` is filesystem-agnostic so storage backends bind the
     concrete root (``wiki_root``) separately.
     """
     validate_domain(domain)
-    return plane_root(plane, employee_id) / domain / f"{slug}.md"
+    return curated_root(plane, employee_id) / domain / f"{slug}.md"
 
 
 def raw_sidecar_path(
@@ -131,7 +157,7 @@ def raw_sidecar_path(
 ) -> PurePosixPath:
     """Return the raw-sidecar path.
 
-    - Personal: ``personal/<employee_id>/<domain>/.raw/<slug>.json``
+    - Personal: ``personal/<employee_id>/semantic/<domain>/.raw/<slug>.json``
     - Firm: ``firm/<domain>/.raw/<slug>.json``
 
     Raw sidecars preserve the complete API response with fetch timestamps
@@ -139,7 +165,7 @@ def raw_sidecar_path(
     preserves everything upstream handed us.
     """
     validate_domain(domain)
-    return plane_root(plane, employee_id) / domain / ".raw" / f"{slug}.json"
+    return curated_root(plane, employee_id) / domain / ".raw" / f"{slug}.json"
 
 
 def staging_source_dir(

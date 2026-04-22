@@ -50,6 +50,7 @@ from memory_mission.memory.salience import (
 from memory_mission.memory.schema import (
     CORE_DOMAINS,
     Plane,
+    curated_root,
     is_valid_domain,
     page_path,
     plane_root,
@@ -97,6 +98,7 @@ __all__ = [
     "TimelineEntry",
     "Triple",
     "cosine_similarity",
+    "curated_root",
     "is_valid_domain",
     "jaccard",
     "new_page",
