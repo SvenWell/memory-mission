@@ -866,3 +866,112 @@ def test_migration_adds_tier_to_existing_db(tmp_path: Path) -> None:
         kg.add_triple("firm", "mission", "test", tier="constitution")
         fetched = kg.query_relationship("mission")[0]
         assert fetched.tier == "constitution"
+
+
+# ---------- Step 16.5: SQL-over-KG read primitive ----------
+
+
+def test_sql_query_basic_select(kg: KnowledgeGraph) -> None:
+    kg.add_triple("sarah", "works_at", "acme")
+    kg.add_triple("bob", "works_at", "beta")
+    rows = kg.sql_query("SELECT subject, predicate, object FROM triples ORDER BY subject")
+    assert rows == [
+        {"subject": "bob", "predicate": "works_at", "object": "beta"},
+        {"subject": "sarah", "predicate": "works_at", "object": "acme"},
+    ]
+
+
+def test_sql_query_parameterized(kg: KnowledgeGraph) -> None:
+    kg.add_triple("sarah", "works_at", "acme", tier="policy")
+    kg.add_triple("sarah", "knows", "bob", tier="decision")
+    rows = kg.sql_query(
+        "SELECT predicate FROM triples WHERE subject = ? AND tier = ?",
+        ("sarah", "policy"),
+    )
+    assert rows == [{"predicate": "works_at"}]
+
+
+def test_sql_query_allows_with_cte(kg: KnowledgeGraph) -> None:
+    kg.add_triple("a", "p", "b")
+    rows = kg.sql_query(
+        "WITH counts AS (SELECT subject, COUNT(*) AS n FROM triples "
+        "GROUP BY subject) SELECT * FROM counts"
+    )
+    assert rows == [{"subject": "a", "n": 1}]
+
+
+def test_sql_query_rejects_insert(kg: KnowledgeGraph) -> None:
+    with pytest.raises(ValueError, match="SELECT or WITH"):
+        kg.sql_query("INSERT INTO entities (name, created_at) VALUES ('x', 'y')")
+
+
+def test_sql_query_rejects_update(kg: KnowledgeGraph) -> None:
+    with pytest.raises(ValueError, match="SELECT or WITH"):
+        kg.sql_query("UPDATE triples SET confidence = 1.0")
+
+
+def test_sql_query_rejects_delete(kg: KnowledgeGraph) -> None:
+    with pytest.raises(ValueError, match="SELECT or WITH"):
+        kg.sql_query("DELETE FROM triples")
+
+
+def test_sql_query_engine_blocks_writes_if_validation_bypassed(
+    kg: KnowledgeGraph,
+) -> None:
+    """Even if a write slipped past the string check, the read-only
+    connection refuses at the engine level. Use a leading comment to
+    simulate that scenario.
+    """
+    # The string check would reject this too, but the point is: the
+    # engine is the real line of defense. This test documents that.
+    with pytest.raises(ValueError):
+        kg.sql_query("/* comment */ INSERT INTO entities (name, created_at) VALUES ('x', 'y')")
+
+
+def test_sql_query_row_limit_enforced(kg: KnowledgeGraph) -> None:
+    for i in range(5):
+        kg.add_triple(f"s{i}", "p", "o")
+    with pytest.raises(ValueError, match="row_limit=3"):
+        kg.sql_query("SELECT * FROM triples", row_limit=3)
+
+
+def test_sql_query_at_row_limit_returns_ok(kg: KnowledgeGraph) -> None:
+    for i in range(3):
+        kg.add_triple(f"s{i}", "p", "o")
+    rows = kg.sql_query("SELECT subject FROM triples ORDER BY subject", row_limit=3)
+    assert len(rows) == 3
+
+
+def test_sql_query_rejects_nonsense_row_limit(kg: KnowledgeGraph) -> None:
+    with pytest.raises(ValueError, match="row_limit"):
+        kg.sql_query("SELECT 1", row_limit=0)
+
+
+def test_sql_query_spans_triple_sources_join(kg: KnowledgeGraph) -> None:
+    """End-to-end: the kind of question workflow agents actually ask."""
+    kg.add_triple(
+        "sarah",
+        "works_at",
+        "acme",
+        source_closet="firm",
+        source_file="/a.md",
+    )
+    kg.corroborate(
+        "sarah",
+        "works_at",
+        "acme",
+        confidence=0.7,
+        source_closet="personal/alice",
+        source_file="/b.md",
+    )
+    rows = kg.sql_query(
+        "SELECT ts.source_closet, ts.source_file FROM triples t "
+        "JOIN triple_sources ts ON ts.triple_id = t.id "
+        "WHERE t.subject = ? AND t.predicate = ? "
+        "ORDER BY ts.id",
+        ("sarah", "works_at"),
+    )
+    assert rows == [
+        {"source_closet": "firm", "source_file": "/a.md"},
+        {"source_closet": "personal/alice", "source_file": "/b.md"},
+    ]

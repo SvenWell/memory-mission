@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -583,6 +583,74 @@ class KnowledgeGraph:
                 )
             )
         return warnings
+
+    def sql_query(
+        self,
+        query: str,
+        params: Sequence[Any] = (),
+        *,
+        row_limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Read-only SQL over the KG's tables.
+
+        Exposes the full relational surface to workflow agents, eval
+        scripts, and debugging sessions without needing a new method
+        per question. Backed by a dedicated SQLite read-only
+        connection — the database engine itself rejects any write
+        statement, so even if the SELECT/WITH string check misses
+        something, no mutation can land.
+
+        Tables available (see ``_SCHEMA_SQL`` for column definitions):
+
+        - ``entities`` — canonical entity rows
+        - ``triples`` — subject/predicate/object + tier + confidence
+        - ``triple_sources`` — per-source provenance history
+        - ``entity_merges`` — audit log of ``merge_entities`` calls
+
+        Example::
+
+            rows = kg.sql_query(
+                "SELECT subject, COUNT(*) AS n FROM triples "
+                "WHERE tier = ? AND valid_to IS NULL GROUP BY subject",
+                ("doctrine",),
+            )
+
+        Args:
+            query: SELECT or WITH statement. Parameterize user/agent
+                input via ``?`` placeholders in the query + the
+                ``params`` tuple — do NOT f-string untrusted text.
+            params: Positional parameters for the query.
+            row_limit: Cap on returned rows. Default 1000. Raises if
+                the result would exceed this; raise the limit
+                deliberately (with a reason) when you need more.
+
+        Returns:
+            List of dicts, keys are column names from the SELECT.
+        """
+        stripped = query.strip()
+        upper = stripped.upper()
+        if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+            raise ValueError(
+                f"sql_query accepts only SELECT or WITH statements; got: {stripped[:60]!r}"
+            )
+        if row_limit < 1:
+            raise ValueError(f"row_limit must be >= 1, got {row_limit}")
+
+        # Dedicated read-only connection: even a malformed validation
+        # cannot land a write because the engine refuses.
+        ro_conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        ro_conn.row_factory = sqlite3.Row
+        try:
+            # Fetch one extra row so we can detect overflow.
+            rows = ro_conn.execute(query, params).fetchmany(row_limit + 1)
+        finally:
+            ro_conn.close()
+        if len(rows) > row_limit:
+            raise ValueError(
+                f"query returned more than row_limit={row_limit} rows; "
+                "add LIMIT to the query or pass a higher row_limit"
+            )
+        return [dict(row) for row in rows]
 
     def scan_triple_sources(
         self,
