@@ -31,9 +31,25 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
-from memory_mission.extraction.schema import ExtractionReport
+from memory_mission.extraction.schema import (
+    EventFact,
+    ExtractedFact,
+    ExtractionReport,
+    IdentityFact,
+    PreferenceFact,
+    RelationshipFact,
+    UpdateFact,
+)
+from memory_mission.identity import IdentityResolver
+from memory_mission.identity.base import EntityKind
 from memory_mission.ingestion.mentions import MentionTracker, Tier
 from memory_mission.memory.schema import Plane, plane_root, validate_employee_id
+
+# Canonical ``entity_type`` strings treated as organizations by the
+# identity resolver; everything else defaults to ``person``. Keep the
+# set small and explicit so new vocabulary doesn't silently flip the
+# default.
+_ORGANIZATION_TYPES = frozenset({"organization", "company", "firm", "org"})
 
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
 
@@ -168,20 +184,35 @@ def ingest_facts(
     *,
     wiki_root: Path,
     mention_tracker: MentionTracker | None = None,
+    identity_resolver: IdentityResolver | None = None,
 ) -> IngestResult:
-    """Persist a report to fact staging; optionally update mention counts.
+    """Persist a report to fact staging; optionally update mention counts
+    and canonicalize entity names via identity resolution (Step 14c).
 
     - Writes the report via a plane-scoped ``ExtractionWriter``.
+    - If ``identity_resolver`` is supplied, every ``IdentityFact`` with
+      a non-empty ``identifiers`` list is resolved to a stable entity
+      ID. Every fact in the report that references the same entity_name
+      is rewritten to use the resolved ID. The canonicalized report is
+      what lands in staging.
     - If ``mention_tracker`` is supplied, records one mention per
-      UNIQUE entity name in the report (one extraction ≠ one mention
-      per fact; we count the source-item level) and returns the tier
-      crossings caused by this ingest.
+      UNIQUE canonical entity name in the report (post-resolution) and
+      returns the tier crossings caused by this ingest.
 
     Returns an ``IngestResult`` the caller can use to decide what to
     surface for review. The ``TierCrossing.is_promotion`` check tells
     the review skill "this entity just crossed into a higher enrichment
     tier — worth flagging."
+
+    Identity resolution is best-effort: if an ``IdentityFact`` has no
+    ``identifiers``, its name flows through unchanged (backwards-
+    compatible with pre-Step-14 reports). Errors from the resolver
+    (``IdentityConflictError``) propagate — the caller decides whether
+    to abort or merge via ``KnowledgeGraph.merge_entities``.
     """
+    if identity_resolver is not None:
+        report = _canonicalize_report(report, identity_resolver)
+
     writer = ExtractionWriter(
         wiki_root=wiki_root,
         source=report.source,
@@ -202,6 +233,79 @@ def ingest_facts(
         entity_names=entity_names,
         tier_crossings=crossings,
     )
+
+
+# ---------- Identity canonicalization (Step 14c) ----------
+
+
+def _canonicalize_report(report: ExtractionReport, resolver: IdentityResolver) -> ExtractionReport:
+    """Replace entity names in ``report.facts`` with resolver-issued stable IDs.
+
+    Build a ``raw_name -> stable_id`` map from each ``IdentityFact`` that
+    carries identifiers, then copy every fact to use the resolved names.
+    Facts whose entity has no identifiers flow through unchanged, so
+    identity resolution is opt-in per-entity.
+    """
+    name_map: dict[str, str] = {}
+    for fact in report.facts:
+        if not isinstance(fact, IdentityFact):
+            continue
+        if not fact.identifiers:
+            continue
+        if fact.entity_name in name_map:
+            continue  # first IdentityFact for this name wins
+        entity_kind = _resolver_entity_kind(fact.entity_type)
+        canonical_name = fact.properties.get("canonical_name") or fact.entity_name
+        resolved_id = resolver.resolve(
+            set(fact.identifiers),
+            entity_type=entity_kind,
+            canonical_name=canonical_name,
+        )
+        name_map[fact.entity_name] = resolved_id
+
+    if not name_map:
+        return report
+
+    rewritten = [_rewrite_fact_names(f, name_map) for f in report.facts]
+    return report.model_copy(update={"facts": rewritten})
+
+
+def _rewrite_fact_names(fact: ExtractedFact, name_map: dict[str, str]) -> ExtractedFact:
+    """Return a copy of ``fact`` with any matched entity names replaced."""
+    updates: dict[str, str] = {}
+    if isinstance(fact, IdentityFact):
+        if fact.entity_name in name_map:
+            updates["entity_name"] = name_map[fact.entity_name]
+    elif isinstance(fact, RelationshipFact):
+        if fact.subject in name_map:
+            updates["subject"] = name_map[fact.subject]
+        if fact.object in name_map:
+            updates["object"] = name_map[fact.object]
+    elif isinstance(fact, PreferenceFact):
+        if fact.subject in name_map:
+            updates["subject"] = name_map[fact.subject]
+    elif isinstance(fact, EventFact):
+        if fact.entity_name in name_map:
+            updates["entity_name"] = name_map[fact.entity_name]
+    elif isinstance(fact, UpdateFact):
+        if fact.subject in name_map:
+            updates["subject"] = name_map[fact.subject]
+    # OpenQuestion: no entity names referenced, nothing to rewrite
+    if not updates:
+        return fact
+    return fact.model_copy(update=updates)
+
+
+def _resolver_entity_kind(entity_type: str) -> EntityKind:
+    """Map the extraction schema's free-form ``entity_type`` to the
+    resolver's narrower ``person`` / ``organization`` literal.
+
+    Conservative default: anything not in the explicit organization set
+    resolves as a person. Adjust ``_ORGANIZATION_TYPES`` above to extend.
+    """
+    if entity_type.lower() in _ORGANIZATION_TYPES:
+        return "organization"
+    return "person"
 
 
 def _validate_segment(value: str, *, name: str) -> None:

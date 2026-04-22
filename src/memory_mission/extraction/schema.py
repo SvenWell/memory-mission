@@ -46,12 +46,23 @@ class _FactBase(BaseModel):
 
 
 class IdentityFact(_FactBase):
-    """An entity is named or described."""
+    """An entity is named or described.
+
+    ``identifiers`` is the hook for identity resolution (Step 14c). When
+    present, ``ingest_facts`` asks the ``IdentityResolver`` to map them
+    to a stable ID, then rewrites every fact in the report that uses
+    this entity_name to use the resolved ID instead. Format is
+    ``type:value`` (``email:alice@acme.com``, ``linkedin:alice-s``,
+    ``domain:acme.com``). Empty list = no canonicalization; the raw
+    entity_name flows through unchanged (backwards-compatible with
+    pre-Step-14 reports).
+    """
 
     kind: Literal["identity"] = "identity"
     entity_name: str
     entity_type: str = "unknown"
     properties: dict[str, Any] = Field(default_factory=dict)
+    identifiers: list[str] = Field(default_factory=list)
 
 
 class RelationshipFact(_FactBase):

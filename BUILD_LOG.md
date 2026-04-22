@@ -1376,3 +1376,157 @@ entity keys — doing tier first would force a migration later when
 identity lands.
 
 ---
+
+## Step 14 — Identity resolution layer
+
+**Goal.** Stop the LLM's noisy entity names (`alice-smith`, `a-smith`,
+`alice-at-acme`) from fragmenting the KG. Anchor every person and org
+to a stable ID that persists across channels, job changes, and
+extractions from different sources. Unblocks Step 16 (federated
+detector must collapse Alice-via-Alice's-plane and Alice-via-Bob's-
+plane) and Step 17 (meeting-prep needs aggregated relationship
+history).
+
+Shipped as three atomic sub-commits.
+
+### 14a — IdentityResolver Protocol + LocalIdentityResolver
+
+**Files added:**
+- `src/memory_mission/identity/__init__.py` — package exports.
+- `src/memory_mission/identity/base.py` — ``IdentityResolver``
+  Protocol (``resolve`` / ``lookup`` / ``bindings`` /
+  ``get_identity``), ``Identity`` Pydantic model, ``EntityKind``
+  literal, ``IdentityConflictError``, ``parse_identifier`` helper,
+  ``make_entity_id`` (``p_<token>`` / ``o_<token>``).
+- `src/memory_mission/identity/local.py` — SQLite-backed
+  ``LocalIdentityResolver``. Two tables (``identities``,
+  ``identity_bindings``), per-firm isolation via DB path.
+- `tests/test_identity.py` — 27 tests: parse / make, happy-path
+  resolve, binding propagation, conflict detection + DB-unchanged-
+  on-conflict, persistence, per-firm isolation.
+
+**Policy:** exact match on ``type:value`` identifiers only
+(``email:...``, ``linkedin:...``, ``domain:...``, ``phone:...``,
+``twitter:...``). No fuzzy name matching in V1 — too easy to merge
+unrelated "John Smith" records. Conservative by design:
+false-negatives are recoverable via ``merge_entities`` (14b);
+false-positives are expensive to unwind.
+
+**Behavior:**
+- First resolve creates an identity and binds all given identifiers.
+- Later resolve with any overlapping identifier returns the same
+  ID and binds any new identifiers.
+- resolve with identifiers spanning different existing identities
+  raises ``IdentityConflictError`` — caller decides whether to
+  merge or abort.
+
+### 14b — KnowledgeGraph.merge_entities
+
+**Files modified:**
+- `src/memory_mission/memory/knowledge_graph.py`
+  - `MergeResult` Pydantic model.
+  - New `entity_merges` SQLite table with reviewer / rationale /
+    triples_rewritten audit fields.
+  - `merge_entities(source, target, *, reviewer_id, rationale)`
+    rewrites `triples.subject` and `triples.object` from source to
+    target, deletes the source entity row, records the event.
+    Atomic transaction.
+  - `merge_history(entity_name)` returns every merge where the entity
+    appears as source or target (oldest-first).
+- `src/memory_mission/memory/__init__.py` — exports `MergeResult`.
+- `tests/test_knowledge_graph.py` — 11 new tests: subject rewrites,
+  object rewrites, source deleted, provenance preserved, audit row,
+  empty rationale rejected, source==target rejected, persistence.
+
+**Notes:**
+- `triple_sources` provenance rows are UNTOUCHED by the rewrite.
+  They key by ``triple_id``, so the full source chain survives any
+  number of merges.
+- NO automatic dedup of triples that collapse into duplicates after
+  the rewrite (e.g., both source and target had ``works_at acme``).
+  Separate concern — can land later once federated detection
+  surfaces the volume.
+
+### 14c — Extraction-side canonicalization
+
+**Files modified:**
+- `src/memory_mission/extraction/schema.py`
+  - `IdentityFact.identifiers: list[str] = []` — opt-in hook for the
+    LLM to emit typed identifiers alongside each entity mention.
+- `src/memory_mission/extraction/ingest.py`
+  - `ingest_facts(..., identity_resolver=None)` new optional kwarg.
+  - When resolver is provided: `_canonicalize_report` builds a
+    `raw_name -> stable_id` map from each IdentityFact's identifiers,
+    then `_rewrite_fact_names` copies every fact in the report to use
+    the resolved IDs. The canonicalized report is what lands in
+    staging.
+  - `_resolver_entity_kind(entity_type)` maps the schema's free-form
+    `entity_type` to the resolver's `person` / `organization` literal.
+    Conservative default: anything outside `{organization, company,
+    firm, org}` resolves as person.
+- `tests/test_extraction.py` — 11 new tests + updated `_identity`
+  helper to forward `identifiers`. Covers: optional field, backcompat
+  (no resolver = no rewrite), IdentityFact rewrite, cross-fact
+  rewrite (relationship / preference / event / update), org prefix,
+  entities-without-identifiers stay raw, cross-report collapse to
+  same stable ID, mention tracker counts canonical ID.
+
+**Backwards compatibility:** Reports without `identifiers` on their
+IdentityFacts flow through untouched — canonicalization is opt-in per
+entity. Existing pre-Step-14 reports still work.
+
+### Combined numbers
+
+- `pytest` — 541/541 passed (49 new since Step 13):
+  27 identity + 11 merge_entities + 11 canonicalization
+- `ruff check` + `ruff format --check` clean
+- `mypy src/` strict, no issues in 60 source files
+
+### Architectural significance
+
+- **First identity layer in Memory Mission.** Until now every entity
+  mention the LLM emitted was a free string, and the same person
+  fragmented into multiple KG nodes. Step 14c makes the stable ID
+  the canonical name in the staged report, so the promotion
+  pipeline, corroboration, and federated detection all speak in
+  stable IDs from Step 14c onward.
+- **Adapter pattern held.** Same shape as Composio connectors: ship
+  the Protocol and a local default; Graph One / Clay / firm-custom
+  resolvers plug in by satisfying `IdentityResolver`. No external
+  SDK imports in our code.
+- **Reviewer gate on merge.** `merge_entities` requires rationale,
+  records reviewer — same discipline as `promote()`. Identity is
+  governed the same way knowledge is.
+- **Pairs with Step 13 (corroboration).** Before Step 14,
+  re-extracting "alice-smith" and "a-smith" as the same person
+  created two triples that corroboration couldn't collapse because
+  the subjects differed. With Step 14c, both resolve to the same
+  `p_<id>` and corroboration naturally aggregates evidence across
+  extractions.
+
+### Deferred (intentionally)
+
+- **Fuzzy name match.** Doable but risky. Ship when we have real
+  data and can measure false-positive rate.
+- **Graph One / Clay adapters.** Written as a Protocol so they slot
+  in cleanly when a pilot firm asks. No stub in V1 — adapter-pattern
+  precedent held without adding dead code.
+- **Auto-merge on corroboration.** When federated detection produces
+  high-confidence evidence that two existing entities are the same
+  person, the system could suggest a merge. Current flow requires
+  the human to call `merge_entities` directly. Ship the signal /
+  proposal shape later.
+- **Entity_type aliasing.** Only `organization`, `company`, `firm`,
+  `org` map to the resolver's `organization` kind. Add more terms to
+  `_ORGANIZATION_TYPES` as needed.
+
+**Next:** Step 15 — Doctrine tier + coherence check. Add
+`tier: Literal["constitution", "doctrine", "policy", "decision"]`
+(default `decision`) to `PageFrontmatter` and `Triple`. Advisory
+coherence check in `promote()` when a new fact touches an entity
+already described at a higher tier — warning surfaces in
+`decision_history`. `BrainEngine.query()` accepts optional
+`tier_floor`. Opt-in constitutional-mode flag in firm policy makes
+the coherence check blocking instead of advisory.
+
+---

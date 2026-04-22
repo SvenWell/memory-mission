@@ -34,6 +34,7 @@ def _identity(name: str, **kw) -> IdentityFact:
         entity_name=name,
         entity_type=kw.pop("entity_type", "person"),
         properties=kw.pop("properties", {}),
+        identifiers=kw.pop("identifiers", []),
     )
 
 
@@ -44,6 +45,35 @@ def _relationship(subj: str, pred: str, obj: str, **kw) -> RelationshipFact:
         subject=subj,
         predicate=pred,
         object=obj,
+    )
+
+
+def _preference(subj: str, pref: str, **kw) -> PreferenceFact:
+    return PreferenceFact(
+        confidence=kw.pop("confidence", 0.8),
+        support_quote=kw.pop("support_quote", f"{subj} prefers {pref}"),
+        subject=subj,
+        preference=pref,
+    )
+
+
+def _event(entity: str, when: date, description: str, **kw) -> EventFact:
+    return EventFact(
+        confidence=kw.pop("confidence", 0.85),
+        support_quote=kw.pop("support_quote", description),
+        entity_name=entity,
+        event_date=when,
+        description=description,
+    )
+
+
+def _update(subj: str, pred: str, new_obj: str, **kw) -> UpdateFact:
+    return UpdateFact(
+        confidence=kw.pop("confidence", 0.9),
+        support_quote=kw.pop("support_quote", f"{subj} {pred} now {new_obj}"),
+        subject=subj,
+        predicate=pred,
+        new_object=new_obj,
     )
 
 
@@ -558,3 +588,266 @@ def test_extraction_prompt_shows_venture_firm_example() -> None:
     """The worked example should be venture-flavored, not wealth-specific."""
     assert "Series B" in EXTRACTION_PROMPT
     assert "post-money" in EXTRACTION_PROMPT
+
+
+# ---------- Step 14c: identity resolution on ingest ----------
+
+
+def test_identity_fact_identifiers_default_empty() -> None:
+    """Field is backwards-compatible: pre-Step-14 reports don't carry it."""
+    fact = IdentityFact(
+        confidence=0.9,
+        support_quote="mention",
+        entity_name="alice",
+    )
+    assert fact.identifiers == []
+
+
+def test_identity_fact_carries_typed_identifiers() -> None:
+    fact = IdentityFact(
+        confidence=0.9,
+        support_quote="alice@acme.com",
+        entity_name="alice-smith",
+        identifiers=["email:alice@acme.com", "linkedin:alice-s"],
+    )
+    assert fact.identifiers == ["email:alice@acme.com", "linkedin:alice-s"]
+    # Round-trip through JSON
+    data = fact.model_dump_json()
+    loaded = IdentityFact.model_validate_json(data)
+    assert loaded.identifiers == fact.identifiers
+
+
+def test_ingest_without_resolver_leaves_names_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Pre-Step-14c backwards compat: no resolver = no rewrite."""
+    report = ExtractionReport(
+        source="gmail",
+        source_id="msg-001",
+        target_plane="personal",
+        employee_id="alice",
+        facts=[
+            _identity("alice-smith", identifiers=["email:alice@acme.com"]),
+            _relationship("alice-smith", "works_at", "acme-corp"),
+        ],
+    )
+    result = ingest_facts(report=report, wiki_root=tmp_path)
+    saved = ExtractionReport.model_validate_json(result.report_path.read_text())
+    assert saved.facts[0].entity_name == "alice-smith"
+    assert saved.facts[1].subject == "alice-smith"  # type: ignore[union-attr]
+
+
+def test_ingest_with_resolver_canonicalizes_identity_fact(
+    tmp_path: Path,
+) -> None:
+    from memory_mission.identity import LocalIdentityResolver
+
+    resolver = LocalIdentityResolver(tmp_path / "identity.sqlite3")
+    report = ExtractionReport(
+        source="gmail",
+        source_id="msg-001",
+        target_plane="personal",
+        employee_id="alice",
+        facts=[
+            _identity("alice-smith", identifiers=["email:alice@acme.com"]),
+        ],
+    )
+    result = ingest_facts(report=report, wiki_root=tmp_path, identity_resolver=resolver)
+    saved = ExtractionReport.model_validate_json(result.report_path.read_text())
+    resolved_name = saved.facts[0].entity_name  # type: ignore[union-attr]
+    assert resolved_name.startswith("p_")
+    # Mention tracker sees the resolved name, not the raw one
+    assert resolved_name in result.entity_names
+    assert "alice-smith" not in result.entity_names
+
+
+def test_ingest_rewrites_relationship_subjects_and_objects(
+    tmp_path: Path,
+) -> None:
+    from memory_mission.identity import LocalIdentityResolver
+
+    resolver = LocalIdentityResolver(tmp_path / "identity.sqlite3")
+    report = ExtractionReport(
+        source="gmail",
+        source_id="msg-002",
+        target_plane="firm",
+        facts=[
+            _identity("alice-smith", identifiers=["email:alice@acme.com"]),
+            _identity(
+                "acme-corp",
+                entity_type="organization",
+                identifiers=["domain:acme.com"],
+            ),
+            _relationship("alice-smith", "works_at", "acme-corp"),
+            _preference("alice-smith", "morning-meetings"),
+            _event("acme-corp", date(2026, 3, 1), "board meeting"),
+            _update("alice-smith", "title", "VP"),
+        ],
+    )
+    result = ingest_facts(report=report, wiki_root=tmp_path, identity_resolver=resolver)
+    saved = ExtractionReport.model_validate_json(result.report_path.read_text())
+    # Walk resolved facts
+    alice = resolver.lookup("email:alice@acme.com")
+    acme = resolver.lookup("domain:acme.com")
+    assert alice is not None and acme is not None
+
+    rel = next(f for f in saved.facts if f.kind == "relationship")
+    assert rel.subject == alice  # type: ignore[union-attr]
+    assert rel.object == acme  # type: ignore[union-attr]
+
+    pref = next(f for f in saved.facts if f.kind == "preference")
+    assert pref.subject == alice  # type: ignore[union-attr]
+
+    evt = next(f for f in saved.facts if f.kind == "event")
+    assert evt.entity_name == acme  # type: ignore[union-attr]
+
+    upd = next(f for f in saved.facts if f.kind == "update")
+    assert upd.subject == alice  # type: ignore[union-attr]
+
+
+def test_ingest_leaves_entities_without_identifiers_unchanged(
+    tmp_path: Path,
+) -> None:
+    """IdentityFact with no identifiers flows through as raw name."""
+    from memory_mission.identity import LocalIdentityResolver
+
+    resolver = LocalIdentityResolver(tmp_path / "identity.sqlite3")
+    report = ExtractionReport(
+        source="gmail",
+        source_id="msg-003",
+        target_plane="firm",
+        facts=[
+            _identity("alice-smith", identifiers=["email:alice@acme.com"]),
+            _identity("bob-notes"),  # no identifiers
+            _relationship("alice-smith", "knows", "bob-notes"),
+        ],
+    )
+    result = ingest_facts(report=report, wiki_root=tmp_path, identity_resolver=resolver)
+    saved = ExtractionReport.model_validate_json(result.report_path.read_text())
+    rel = next(f for f in saved.facts if f.kind == "relationship")
+    alice_id = resolver.lookup("email:alice@acme.com")
+    assert alice_id is not None
+    assert rel.subject == alice_id  # type: ignore[union-attr]
+    # bob-notes has no identifiers — stays raw
+    assert rel.object == "bob-notes"  # type: ignore[union-attr]
+
+
+def test_ingest_across_reports_collapses_to_same_stable_id(
+    tmp_path: Path,
+) -> None:
+    """Two extractions with different raw names but shared identifiers
+    resolve to the same stable ID — the core V1 win."""
+    from memory_mission.identity import LocalIdentityResolver
+
+    resolver = LocalIdentityResolver(tmp_path / "identity.sqlite3")
+    # Source 1: LLM emitted "alice-smith"
+    report_one = ExtractionReport(
+        source="gmail",
+        source_id="msg-a",
+        target_plane="firm",
+        facts=[_identity("alice-smith", identifiers=["email:alice@acme.com"])],
+    )
+    # Source 2: LLM emitted "a-smith" (different kebab-case)
+    report_two = ExtractionReport(
+        source="gmail",
+        source_id="msg-b",
+        target_plane="firm",
+        facts=[
+            _identity(
+                "a-smith",
+                identifiers=["email:alice@acme.com", "linkedin:alice-s"],
+            )
+        ],
+    )
+    r1 = ingest_facts(report=report_one, wiki_root=tmp_path, identity_resolver=resolver)
+    r2 = ingest_facts(report=report_two, wiki_root=tmp_path, identity_resolver=resolver)
+    # Both resolve to the same canonical name
+    saved1 = ExtractionReport.model_validate_json(r1.report_path.read_text())
+    saved2 = ExtractionReport.model_validate_json(r2.report_path.read_text())
+    assert saved1.facts[0].entity_name == saved2.facts[0].entity_name  # type: ignore[union-attr]
+    # Resolver bound the new identifier from report 2
+    assert resolver.lookup("linkedin:alice-s") == saved1.facts[0].entity_name  # type: ignore[union-attr]
+
+
+def test_ingest_mention_tracker_counts_canonical_id(
+    tmp_path: Path,
+) -> None:
+    """Mentions count post-resolution — two raw names for one person
+    become one mention, not two."""
+    from memory_mission.identity import LocalIdentityResolver
+
+    resolver = LocalIdentityResolver(tmp_path / "identity.sqlite3")
+    tracker = MentionTracker(tmp_path / "mentions.sqlite3")
+
+    r1 = ExtractionReport(
+        source="gmail",
+        source_id="msg-a",
+        target_plane="firm",
+        facts=[_identity("alice-smith", identifiers=["email:alice@acme.com"])],
+    )
+    r2 = ExtractionReport(
+        source="gmail",
+        source_id="msg-b",
+        target_plane="firm",
+        facts=[_identity("a-smith", identifiers=["email:alice@acme.com"])],
+    )
+    result1 = ingest_facts(
+        report=r1,
+        wiki_root=tmp_path,
+        mention_tracker=tracker,
+        identity_resolver=resolver,
+    )
+    result2 = ingest_facts(
+        report=r2,
+        wiki_root=tmp_path,
+        mention_tracker=tracker,
+        identity_resolver=resolver,
+    )
+    # Same stable ID, two mentions
+    stable_id = result1.entity_names[0]
+    assert stable_id == result2.entity_names[0]
+    record = tracker.get(stable_id)
+    assert record is not None
+    assert record.count == 2
+
+
+def test_ingest_organization_entity_type_uses_o_prefix(
+    tmp_path: Path,
+) -> None:
+    """IdentityFact.entity_type='organization' produces o_ IDs."""
+    from memory_mission.identity import LocalIdentityResolver
+
+    resolver = LocalIdentityResolver(tmp_path / "identity.sqlite3")
+    report = ExtractionReport(
+        source="gmail",
+        source_id="msg-o",
+        target_plane="firm",
+        facts=[
+            _identity(
+                "acme-corp",
+                entity_type="organization",
+                identifiers=["domain:acme.com"],
+            )
+        ],
+    )
+    result = ingest_facts(report=report, wiki_root=tmp_path, identity_resolver=resolver)
+    saved = ExtractionReport.model_validate_json(result.report_path.read_text())
+    assert saved.facts[0].entity_name.startswith("o_")  # type: ignore[union-attr]
+
+
+def test_ingest_organization_inferred_from_company_type(
+    tmp_path: Path,
+) -> None:
+    """``entity_type='company'`` is also treated as organization."""
+    from memory_mission.identity import LocalIdentityResolver
+
+    resolver = LocalIdentityResolver(tmp_path / "identity.sqlite3")
+    report = ExtractionReport(
+        source="gmail",
+        source_id="msg-c",
+        target_plane="firm",
+        facts=[_identity("acme", entity_type="company", identifiers=["domain:acme.com"])],
+    )
+    result = ingest_facts(report=report, wiki_root=tmp_path, identity_resolver=resolver)
+    saved = ExtractionReport.model_validate_json(result.report_path.read_text())
+    assert saved.facts[0].entity_name.startswith("o_")  # type: ignore[union-attr]
