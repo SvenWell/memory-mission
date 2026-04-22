@@ -406,7 +406,14 @@ def test_promote_raises_on_already_approved(
 def test_promote_provenance_carries_source_closet(
     store: ProposalStore, kg: KnowledgeGraph, tmp_path: Path
 ) -> None:
-    """Firm-plane promotion uses closet='firm'; personal uses 'personal/<emp>'."""
+    """Firm-plane promotion uses closet='firm'; personal uses 'personal/<emp>'.
+
+    Under Bayesian corroboration (Step 13), the second promotion of the
+    same triple does not insert a duplicate row — it bumps confidence on
+    the existing triple and appends its source to ``triple_sources``. So
+    both closets are present in the provenance history even though only
+    one triples row exists.
+    """
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         firm_proposal = _create_sample(store, target_plane="firm", source_report_path="/tmp/1.json")
         personal_proposal = _create_sample(
@@ -424,11 +431,14 @@ def test_promote_provenance_carries_source_closet(
             rationale="ok",
         )
 
-    # Both works_at triples landed, each with a different source_closet
+    # Second promotion corroborates, so exactly one triple row exists.
     triples = kg.query_relationship("works_at")
-    closets = {t.source_closet for t in triples}
-    assert "firm" in closets
-    assert "personal/alice" in closets
+    assert len(triples) == 1
+
+    # Both source closets live in the full provenance history.
+    sources = kg.triple_sources("sarah-chen", "works_at", "acme-corp")
+    closets = {s.source_closet for s in sources}
+    assert closets == {"firm", "personal/alice"}
 
 
 def test_promote_applies_update_fact_correctly(
@@ -725,3 +735,140 @@ def test_full_lifecycle_records_trace_across_events(
         "reopened",
         "approved",
     ]
+
+
+# ---------- Step 13: Bayesian corroboration in _apply_facts ----------
+
+
+def _second_sample_facts() -> list[IdentityFact | RelationshipFact]:
+    """Same relationship as ``_sample_facts`` — drives corroboration paths."""
+    return [
+        _identity("sarah-chen", "person"),
+        _identity("acme-corp", "company"),
+        _rel("sarah-chen", "works_at", "acme-corp"),
+    ]
+
+
+def test_promote_same_relationship_twice_corroborates(
+    store: ProposalStore, kg: KnowledgeGraph, tmp_path: Path
+) -> None:
+    """Re-promoting the same relationship bumps confidence instead of duplicating."""
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        p1 = _create_sample(store, source_report_path="/tmp/r1.json")
+        p2 = _create_sample(
+            store,
+            source_report_path="/tmp/r2.json",
+            proposer_employee_id="bob",
+        )
+        promote(store, kg, p1.proposal_id, reviewer_id="reviewer", rationale="first")
+        promote(store, kg, p2.proposal_id, reviewer_id="reviewer", rationale="second")
+
+    triples = kg.query_relationship("works_at")
+    assert len(triples) == 1
+    triple = triples[0]
+    # Initial 0.9 confidence from ``_rel``; second promote bumps via Noisy-OR
+    assert triple.confidence == pytest.approx(1.0 - (0.1 * 0.1))  # 0.99
+    assert triple.corroboration_count == 1
+    # Both source reports live in the provenance chain
+    sources = kg.triple_sources("sarah-chen", "works_at", "acme-corp")
+    files = {s.source_file for s in sources}
+    assert files == {"/tmp/r1.json", "/tmp/r2.json"}
+
+
+def test_promote_distinct_relationships_still_add_new_triples(
+    store: ProposalStore, kg: KnowledgeGraph, tmp_path: Path
+) -> None:
+    """Different objects do NOT collapse — corroboration is exact-match only."""
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        # First proposal: sarah works_at acme
+        p1 = _create_sample(store, source_report_path="/tmp/r1.json")
+        promote(store, kg, p1.proposal_id, reviewer_id="a", rationale="ok")
+
+        # Second proposal: sarah works_at beta (different object)
+        p2 = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="sarah-chen",
+            facts=[
+                _identity("sarah-chen", "person"),
+                _identity("beta-fund", "company"),
+                _rel("sarah-chen", "works_at", "beta-fund"),
+            ],
+            source_report_path="/tmp/r2.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="alice",
+        )
+        promote(store, kg, p2.proposal_id, reviewer_id="a", rationale="ok")
+
+    triples = kg.query_relationship("works_at")
+    # Both currently-true — Step 13 does not auto-invalidate on corroborate;
+    # that's the UpdateFact path (explicit supersedes).
+    assert len(triples) == 2
+    objects = {t.object for t in triples}
+    assert objects == {"acme-corp", "beta-fund"}
+
+
+def test_promote_corroborate_preserves_audit_trail(
+    store: ProposalStore, kg: KnowledgeGraph, tmp_path: Path
+) -> None:
+    """Each promote() still emits a ProposalDecidedEvent — corroboration is
+    orthogonal to the proposal lifecycle."""
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        p1 = _create_sample(store, source_report_path="/tmp/r1.json")
+        p2 = _create_sample(
+            store,
+            source_report_path="/tmp/r2.json",
+            proposer_employee_id="bob",
+        )
+        promote(store, kg, p1.proposal_id, reviewer_id="a", rationale="first")
+        promote(store, kg, p2.proposal_id, reviewer_id="a", rationale="second")
+
+    logger = ObservabilityLogger(observability_root=tmp_path, firm_id="acme")
+    decided = [e for e in logger.read_all() if isinstance(e, ProposalDecidedEvent)]
+    assert len(decided) == 2
+    assert all(e.decision == "approved" for e in decided)
+
+
+def test_promote_preference_corroborates(
+    store: ProposalStore, kg: KnowledgeGraph, tmp_path: Path
+) -> None:
+    """PreferenceFact runs through the corroborate path too."""
+    pref_facts = [
+        IdentityFact(
+            confidence=0.95,
+            support_quote="sarah mention",
+            entity_name="sarah-chen",
+            entity_type="person",
+        ),
+        PreferenceFact(
+            confidence=0.8,
+            support_quote="prefers morning meetings",
+            subject="sarah-chen",
+            preference="morning-meetings",
+        ),
+    ]
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        p1 = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="sarah-chen",
+            facts=pref_facts,
+            source_report_path="/tmp/r1.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="alice",
+        )
+        p2 = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="sarah-chen",
+            facts=pref_facts,
+            source_report_path="/tmp/r2.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="bob",
+        )
+        promote(store, kg, p1.proposal_id, reviewer_id="a", rationale="ok")
+        promote(store, kg, p2.proposal_id, reviewer_id="a", rationale="ok")
+
+    prefs = kg.query_relationship("prefers")
+    assert len(prefs) == 1
+    assert prefs[0].corroboration_count == 1

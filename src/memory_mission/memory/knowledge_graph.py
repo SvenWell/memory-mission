@@ -54,6 +54,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Direction = Literal["outgoing", "incoming", "both"]
 
+# Bayesian corroboration never reaches certainty without human override.
+# Confidence cap for corroborate(); initial add_triple() calls can still
+# start at 1.0 if the caller is explicit.
+CORROBORATION_CAP: float = 0.99
+
 
 # ---------- Models ----------
 
@@ -81,12 +86,20 @@ class Triple(BaseModel):
     confidence: float = 1.0
     source_closet: str | None = None
     source_file: str | None = None
+    corroboration_count: int = 0
 
     @field_validator("confidence")
     @classmethod
     def _confidence_range(cls, v: float) -> float:
         if not 0.0 <= v <= 1.0:
             raise ValueError(f"confidence must be in [0, 1], got {v}")
+        return v
+
+    @field_validator("corroboration_count")
+    @classmethod
+    def _count_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(f"corroboration_count must be >= 0, got {v}")
         return v
 
     def is_valid_at(self, as_of: date) -> bool:
@@ -100,6 +113,21 @@ class Triple(BaseModel):
         if self.valid_to is not None and as_of >= self.valid_to:
             return False
         return True
+
+
+class TripleSource(BaseModel):
+    """One source that contributed to a triple.
+
+    Every triple has at least one source (seeded on ``add_triple``). Each
+    corroboration appends one more, preserving full provenance history.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_closet: str | None = None
+    source_file: str | None = None
+    confidence_after: float
+    added_at: datetime
 
 
 class GraphStats(BaseModel):
@@ -134,7 +162,8 @@ CREATE TABLE IF NOT EXISTS triples (
     confidence REAL NOT NULL DEFAULT 1.0,
     source_closet TEXT,
     source_file TEXT,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    corroboration_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_triples_subject ON triples(subject);
@@ -142,6 +171,18 @@ CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
 CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object);
 CREATE INDEX IF NOT EXISTS idx_triples_currently_true
     ON triples(subject, predicate, object) WHERE valid_to IS NULL;
+
+CREATE TABLE IF NOT EXISTS triple_sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    triple_id INTEGER NOT NULL REFERENCES triples(id) ON DELETE CASCADE,
+    source_closet TEXT,
+    source_file TEXT,
+    confidence_after REAL NOT NULL,
+    added_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_triple_sources_triple_id
+    ON triple_sources(triple_id);
 """
 
 
@@ -160,7 +201,21 @@ class KnowledgeGraph:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA_SQL)
+        self._run_migrations()
         self._conn.commit()
+
+    def _run_migrations(self) -> None:
+        """Apply additive migrations for DBs created before this schema version.
+
+        SQLite lacks ``ALTER TABLE ADD COLUMN IF NOT EXISTS``, so we
+        introspect ``PRAGMA table_info`` and add missing columns. Safe on
+        fresh DBs because the schema already includes these columns.
+        """
+        triple_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(triples)")}
+        if "corroboration_count" not in triple_cols:
+            self._conn.execute(
+                "ALTER TABLE triples ADD COLUMN corroboration_count INTEGER NOT NULL DEFAULT 0"
+            )
 
     # ---------- Lifecycle ----------
 
@@ -243,6 +298,10 @@ class KnowledgeGraph:
     ) -> Triple:
         """Insert a new triple. Triples are append-only; use ``invalidate``
         to end the validity of an existing triple instead of overwriting.
+
+        Seeds ``triple_sources`` with the initial source row so every
+        triple has at least one provenance entry. Later corroborations
+        (see ``corroborate``) append additional rows.
         """
         triple = Triple(
             subject=subject,
@@ -260,8 +319,9 @@ class KnowledgeGraph:
                 """
                 INSERT INTO triples
                     (subject, predicate, object, valid_from, valid_to,
-                     confidence, source_closet, source_file, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     confidence, source_closet, source_file, created_at,
+                     corroboration_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
                     subject,
@@ -275,7 +335,156 @@ class KnowledgeGraph:
                     now,
                 ),
             )
+            triple_id = cur.lastrowid
+            cur.execute(
+                """
+                INSERT INTO triple_sources
+                    (triple_id, source_closet, source_file,
+                     confidence_after, added_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (triple_id, source_closet, source_file, confidence, now),
+            )
         return triple
+
+    def find_current_triple(
+        self,
+        subject: str,
+        predicate: str,
+        obj: str,
+    ) -> Triple | None:
+        """Return the currently-true triple matching (subject, predicate, obj).
+
+        "Currently true" = ``valid_to IS NULL``. Used by the promotion
+        pipeline to decide whether to corroborate an existing fact or
+        add a new one.
+        """
+        row = self._conn.execute(
+            """
+            SELECT * FROM triples
+            WHERE subject = ? AND predicate = ? AND object = ?
+              AND valid_to IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (subject, predicate, obj),
+        ).fetchone()
+        return None if row is None else _row_to_triple(row)
+
+    def corroborate(
+        self,
+        subject: str,
+        predicate: str,
+        obj: str,
+        *,
+        confidence: float,
+        source_closet: str | None = None,
+        source_file: str | None = None,
+    ) -> Triple | None:
+        """Bump confidence on a matching currently-true triple.
+
+        Uses the Noisy-OR (Bayesian independent-evidence) update:
+        ``new = 1 - (1 - old) * (1 - incoming)``, capped at
+        ``CORROBORATION_CAP`` (0.99). Appends the new source to
+        ``triple_sources`` and increments ``corroboration_count``.
+
+        Returns the updated ``Triple`` on success, or ``None`` if no
+        currently-true triple matches — the caller is expected to fall
+        back to ``add_triple`` in that case.
+
+        Rationale: re-extracting the same fact from a new source should
+        strengthen belief, not create a duplicate. The cap keeps
+        certainty (1.0) reachable only through explicit human override,
+        never via accumulated agent corroboration.
+        """
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError(f"confidence must be in [0, 1], got {confidence}")
+
+        row = self._conn.execute(
+            """
+            SELECT id, confidence, corroboration_count FROM triples
+            WHERE subject = ? AND predicate = ? AND object = ?
+              AND valid_to IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (subject, predicate, obj),
+        ).fetchone()
+        if row is None:
+            return None
+
+        triple_id = row["id"]
+        old_confidence = row["confidence"]
+        new_confidence = min(
+            CORROBORATION_CAP,
+            1.0 - (1.0 - old_confidence) * (1.0 - confidence),
+        )
+        now = _utcnow_iso()
+        with self._tx() as cur:
+            cur.execute(
+                """
+                UPDATE triples
+                SET confidence = ?,
+                    corroboration_count = corroboration_count + 1
+                WHERE id = ?
+                """,
+                (new_confidence, triple_id),
+            )
+            cur.execute(
+                """
+                INSERT INTO triple_sources
+                    (triple_id, source_closet, source_file,
+                     confidence_after, added_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (triple_id, source_closet, source_file, new_confidence, now),
+            )
+
+        updated = self._conn.execute("SELECT * FROM triples WHERE id = ?", (triple_id,)).fetchone()
+        return _row_to_triple(updated)
+
+    def triple_sources(
+        self,
+        subject: str,
+        predicate: str,
+        obj: str,
+    ) -> list[TripleSource]:
+        """Return the provenance history for the currently-true matching triple.
+
+        Returns an empty list if no currently-true triple matches. The
+        list is ordered oldest-first — the initial source seeded on
+        ``add_triple`` comes first, subsequent corroborations follow.
+        """
+        triple_row = self._conn.execute(
+            """
+            SELECT id FROM triples
+            WHERE subject = ? AND predicate = ? AND object = ?
+              AND valid_to IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (subject, predicate, obj),
+        ).fetchone()
+        if triple_row is None:
+            return []
+        rows = self._conn.execute(
+            """
+            SELECT source_closet, source_file, confidence_after, added_at
+            FROM triple_sources
+            WHERE triple_id = ?
+            ORDER BY id ASC
+            """,
+            (triple_row["id"],),
+        ).fetchall()
+        return [
+            TripleSource(
+                source_closet=r["source_closet"],
+                source_file=r["source_file"],
+                confidence_after=r["confidence_after"],
+                added_at=datetime.fromisoformat(r["added_at"]),
+            )
+            for r in rows
+        ]
 
     def invalidate(
         self,
@@ -432,6 +641,13 @@ class KnowledgeGraph:
 
 
 def _row_to_triple(row: sqlite3.Row) -> Triple:
+    # corroboration_count was added in a later schema version; existing
+    # DBs that predate the migration may lack the key at the row level
+    # when accessed via sqlite3.Row, so default to 0 defensively.
+    try:
+        count = row["corroboration_count"]
+    except (IndexError, KeyError):
+        count = 0
     return Triple(
         subject=row["subject"],
         predicate=row["predicate"],
@@ -441,6 +657,7 @@ def _row_to_triple(row: sqlite3.Row) -> Triple:
         confidence=row["confidence"],
         source_closet=row["source_closet"],
         source_file=row["source_file"],
+        corroboration_count=count if count is not None else 0,
     )
 
 

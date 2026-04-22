@@ -1,4 +1,8 @@
-"""Tests for the MemPalace-ported temporal knowledge graph (step 6b)."""
+"""Tests for the MemPalace-ported temporal knowledge graph (step 6b).
+
+Bayesian corroboration tests (``corroborate`` / ``find_current_triple`` /
+``triple_sources``) live at the bottom of the file, under Step 13.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +13,12 @@ import pytest
 from pydantic import ValidationError
 
 from memory_mission.memory import (
+    CORROBORATION_CAP,
     Entity,
     GraphStats,
     KnowledgeGraph,
     Triple,
+    TripleSource,
 )
 
 # ---------- Triple model ----------
@@ -376,3 +382,185 @@ def test_creates_parent_directory(tmp_path: Path) -> None:
     nested = tmp_path / "a" / "b" / "c" / "kg.sqlite3"
     KnowledgeGraph(nested).close()
     assert nested.exists()
+
+
+# ---------- Step 13: Bayesian corroboration ----------
+
+
+def test_triple_carries_corroboration_count_default_zero() -> None:
+    t = Triple(subject="a", predicate="p", object="b")
+    assert t.corroboration_count == 0
+
+
+def test_triple_corroboration_count_rejects_negative() -> None:
+    with pytest.raises(ValidationError, match="corroboration_count"):
+        Triple(subject="a", predicate="p", object="b", corroboration_count=-1)
+
+
+def test_add_triple_seeds_triple_sources_row(kg: KnowledgeGraph) -> None:
+    """Every ``add_triple`` creates exactly one ``triple_sources`` row."""
+    kg.add_triple(
+        "sarah",
+        "works_at",
+        "acme",
+        confidence=0.8,
+        source_closet="firm",
+        source_file="/tmp/evidence.json",
+    )
+    sources = kg.triple_sources("sarah", "works_at", "acme")
+    assert len(sources) == 1
+    s = sources[0]
+    assert isinstance(s, TripleSource)
+    assert s.source_closet == "firm"
+    assert s.source_file == "/tmp/evidence.json"
+    assert s.confidence_after == 0.8
+
+
+def test_find_current_triple_returns_matching(kg: KnowledgeGraph) -> None:
+    kg.add_triple("sarah", "works_at", "acme", confidence=0.7)
+    found = kg.find_current_triple("sarah", "works_at", "acme")
+    assert found is not None
+    assert found.confidence == 0.7
+
+
+def test_find_current_triple_returns_none_when_no_match(kg: KnowledgeGraph) -> None:
+    assert kg.find_current_triple("nobody", "noop", "nowhere") is None
+
+
+def test_find_current_triple_skips_invalidated(kg: KnowledgeGraph) -> None:
+    kg.add_triple("sarah", "works_at", "acme", valid_from=date(2020, 1, 1))
+    kg.invalidate("sarah", "works_at", "acme", ended=date(2024, 1, 1))
+    assert kg.find_current_triple("sarah", "works_at", "acme") is None
+
+
+def test_corroborate_applies_noisy_or(kg: KnowledgeGraph) -> None:
+    """``new = 1 - (1 - old) * (1 - incoming)`` — two independent sources."""
+    kg.add_triple("sarah", "works_at", "acme", confidence=0.6)
+    updated = kg.corroborate("sarah", "works_at", "acme", confidence=0.7, source_closet="firm")
+    assert updated is not None
+    assert updated.confidence == pytest.approx(1.0 - (0.4 * 0.3))  # 0.88
+    assert updated.corroboration_count == 1
+
+
+def test_corroborate_caps_at_099(kg: KnowledgeGraph) -> None:
+    """Accumulated evidence can never push confidence above 0.99."""
+    kg.add_triple("sarah", "works_at", "acme", confidence=0.95)
+    updated = kg.corroborate("sarah", "works_at", "acme", confidence=0.95)
+    assert updated is not None
+    assert updated.confidence == CORROBORATION_CAP
+    assert updated.confidence == 0.99
+
+
+def test_corroborate_cap_holds_with_initial_1_0(kg: KnowledgeGraph) -> None:
+    """Even starting at 1.0, corroborate result caps at 0.99 — no auto-certainty."""
+    kg.add_triple("sarah", "works_at", "acme", confidence=1.0)
+    updated = kg.corroborate("sarah", "works_at", "acme", confidence=0.5)
+    assert updated is not None
+    assert updated.confidence == CORROBORATION_CAP
+
+
+def test_corroborate_returns_none_when_no_match(kg: KnowledgeGraph) -> None:
+    result = kg.corroborate("nobody", "noop", "nowhere", confidence=0.9)
+    assert result is None
+
+
+def test_corroborate_skips_invalidated_triples(kg: KnowledgeGraph) -> None:
+    """Re-extracting an ended fact does NOT corroborate the historical row."""
+    kg.add_triple("sarah", "works_at", "acme", valid_from=date(2020, 1, 1))
+    kg.invalidate("sarah", "works_at", "acme", ended=date(2024, 1, 1))
+    result = kg.corroborate("sarah", "works_at", "acme", confidence=0.9)
+    assert result is None
+
+
+def test_corroborate_increments_count(kg: KnowledgeGraph) -> None:
+    kg.add_triple("sarah", "works_at", "acme", confidence=0.5)
+    kg.corroborate("sarah", "works_at", "acme", confidence=0.5)
+    kg.corroborate("sarah", "works_at", "acme", confidence=0.5)
+    kg.corroborate("sarah", "works_at", "acme", confidence=0.5)
+    current = kg.find_current_triple("sarah", "works_at", "acme")
+    assert current is not None
+    assert current.corroboration_count == 3
+
+
+def test_corroborate_preserves_triple_identity(kg: KnowledgeGraph) -> None:
+    """Corroboration updates in place — no duplicate rows."""
+    kg.add_triple("sarah", "works_at", "acme", confidence=0.6)
+    kg.corroborate("sarah", "works_at", "acme", confidence=0.7)
+    kg.corroborate("sarah", "works_at", "acme", confidence=0.5)
+    triples = kg.query_relationship("works_at")
+    assert len(triples) == 1
+
+
+def test_corroborate_accumulates_sources_in_order(kg: KnowledgeGraph) -> None:
+    """``triple_sources`` returns oldest-first with the full provenance chain."""
+    kg.add_triple(
+        "sarah",
+        "works_at",
+        "acme",
+        confidence=0.5,
+        source_closet="firm",
+        source_file="/tmp/first.json",
+    )
+    kg.corroborate(
+        "sarah",
+        "works_at",
+        "acme",
+        confidence=0.6,
+        source_closet="personal/alice",
+        source_file="/tmp/second.json",
+    )
+    kg.corroborate(
+        "sarah",
+        "works_at",
+        "acme",
+        confidence=0.7,
+        source_closet="personal/bob",
+        source_file="/tmp/third.json",
+    )
+    sources = kg.triple_sources("sarah", "works_at", "acme")
+    assert [s.source_closet for s in sources] == [
+        "firm",
+        "personal/alice",
+        "personal/bob",
+    ]
+    # Confidence climbs monotonically with each corroboration
+    confidences = [s.confidence_after for s in sources]
+    assert confidences == sorted(confidences)
+
+
+def test_corroborate_rejects_out_of_range_confidence(kg: KnowledgeGraph) -> None:
+    kg.add_triple("sarah", "works_at", "acme", confidence=0.5)
+    with pytest.raises(ValueError, match="confidence"):
+        kg.corroborate("sarah", "works_at", "acme", confidence=1.5)
+
+
+def test_triple_sources_returns_empty_list_when_no_match(kg: KnowledgeGraph) -> None:
+    assert kg.triple_sources("nobody", "noop", "nowhere") == []
+
+
+def test_corroborate_persists_across_sessions(tmp_path: Path) -> None:
+    """Confidence bump + sources survive close/reopen."""
+    db_path = tmp_path / "persist.kg.sqlite3"
+    with KnowledgeGraph(db_path) as kg1:
+        kg1.add_triple(
+            "sarah",
+            "works_at",
+            "acme",
+            confidence=0.6,
+            source_closet="firm",
+        )
+        kg1.corroborate(
+            "sarah",
+            "works_at",
+            "acme",
+            confidence=0.7,
+            source_closet="personal/alice",
+        )
+
+    with KnowledgeGraph(db_path) as kg2:
+        current = kg2.find_current_triple("sarah", "works_at", "acme")
+        assert current is not None
+        assert current.confidence == pytest.approx(0.88)
+        assert current.corroboration_count == 1
+        sources = kg2.triple_sources("sarah", "works_at", "acme")
+        assert len(sources) == 2

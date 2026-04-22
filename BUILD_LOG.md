@@ -1258,3 +1258,121 @@ Time-decay multiplier on old confidence using `salience_score`'s
 recency curve.
 
 ---
+
+## Step 13 — Bayesian corroboration
+
+**Goal.** Re-extracting the same fact from a new source should
+strengthen belief, not duplicate a row. The firm knowledge graph
+starts behaving like a Bayesian posterior over independent evidence,
+not an append-only claim log.
+
+**Files added:** none (extends existing modules).
+
+**Files modified:**
+- `src/memory_mission/memory/knowledge_graph.py`
+  - `CORROBORATION_CAP = 0.99` module constant — no auto-certainty
+  - `Triple.corroboration_count: int = 0` field on existing model
+  - `TripleSource` Pydantic model for provenance rows
+  - New `triple_sources` table with `ON DELETE CASCADE` on triples
+  - `add_triple` now seeds one `triple_sources` row per insert so
+    every triple has at least one provenance entry
+  - `find_current_triple(s, p, o)` helper — returns the matching
+    currently-true triple or `None`
+  - `corroborate(s, p, o, *, confidence, source_closet, source_file)`
+    applies Noisy-OR (`1 - (1 - old) * (1 - new)`), caps at 0.99,
+    appends to `triple_sources`, increments `corroboration_count`;
+    returns `None` when no currently-true match exists
+  - `triple_sources(s, p, o)` query returns full provenance history
+    oldest-first
+  - `_run_migrations()` adds the `corroboration_count` column to DBs
+    that predate this schema version
+  - `_row_to_triple` defends against the missing column when reading
+    pre-migration rows
+- `src/memory_mission/promotion/pipeline.py`
+  - `_add_or_corroborate()` helper — checks for match, corroborates
+    or adds
+  - `_apply_facts` now routes `RelationshipFact` / `PreferenceFact` /
+    `EventFact` / `UpdateFact` (new side) through the helper so
+    re-promotions bump confidence instead of duplicating
+  - `UpdateFact.supersedes_object` still invalidates the prior value
+    before the new-side corroboration check
+- `src/memory_mission/memory/__init__.py` — exports
+  `CORROBORATION_CAP` + `TripleSource`
+- `tests/test_knowledge_graph.py` — 17 new tests covering the
+  corroboration math, cap, source history, invalidate interaction,
+  persistence
+- `tests/test_promotion.py` — 4 new tests covering the pipeline
+  integration (same-fact-twice corroborates, distinct facts add,
+  preferences corroborate, audit trail preserved) + adapted
+  `test_promote_provenance_carries_source_closet` to the new
+  semantics (one triple, two sources in history)
+
+**Verification:**
+- [x] `pytest` — 493/493 passed (21 new since Step 12b)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 57 source files
+- [x] Two independent sources at 0.9 confidence combine via
+      Noisy-OR to 0.99 (the cap)
+- [x] Corroborate on invalidated (past) triple returns `None` — no
+      zombie updates
+- [x] Corroborate preserves triple row identity (no duplicates)
+- [x] `triple_sources` returns all sources oldest-first with
+      confidence-after-corroboration monotonically non-decreasing
+- [x] Migrations run on fresh and pre-migration DBs
+
+**Architectural significance.**
+
+- **First Bayesian primitive in the KG.** Until now a triple's
+  confidence was whatever the first extraction claimed. Now it
+  reflects accumulated independent evidence. Agents asking
+  "how sure is the firm?" get a meaningful answer.
+- **Preserves Emile's provenance-mandatory rule.** Every
+  corroboration appends to `triple_sources` — no confidence change
+  without a source. Every source file traceable back through
+  `ExtractionReport` → `Proposal` → `decision_history`.
+- **0.99 cap on agent-path corroboration.** The full-certainty
+  confidence (1.0) remains reachable only through a caller
+  explicitly passing `confidence=1.0` on `add_triple` (human-in-
+  the-loop override). Accumulated agent evidence never gets there.
+- **Unblocks Step 16 (federated detector).** When the detector
+  sees the same fact across N employees' planes, each detection
+  corroborates through the same pipeline — confidence climbs toward
+  the cap as evidence piles up, but never becomes silent truth.
+
+**Deferred (intentionally out of scope):**
+- Time-decay multiplier on old confidence (recency curve per
+  `salience_score`). Current implementation treats all independent
+  evidence equally. Worth adding once we have real staleness data,
+  not now.
+- Corroboration-aware `CoherenceWarningEvent` — lands naturally
+  with Step 15 tier work.
+- Multi-plane corroboration UI in `review-proposals` skill —
+  current skill already surfaces confidence; exposing the
+  corroboration history in chat review can be a small follow-up.
+
+**Pairs with Steps 14 / 15 / 16.**
+- Step 14 (identity resolution) makes corroboration *more*
+  accurate: stable person IDs collapse "alice@acme" and
+  "alice-smith" into one node, so the same fact extracted under
+  different entity strings actually corroborates instead of
+  fragmenting.
+- Step 15 (doctrine tier) composes: corroboration math runs at
+  every tier; a fact corroborated at `policy` tier may eventually
+  warrant promotion to `doctrine` — that's Step 18+'s legislative
+  cycle.
+- Step 16 (federated detector) is the volume source for
+  corroboration. N employees independently extracting the same
+  fact → N corroborations through the pipeline.
+
+**Next:** Step 14 — Identity resolution layer. `IdentityResolver`
+Protocol + `LocalIdentityResolver` default (email-based dedup + fuzzy
+name match) + `KnowledgeGraph.merge_entities(a, b)` with reviewer
+gate + extraction-side canonicalization so `ExtractedFact` subjects
+resolve to stable `PersonID` / `OrgID` at `ingest_facts` time. Same
+adapter pattern as Composio connectors: ship the Protocol + local
+impl, host agents wire Graph One / Clay / firm-custom resolvers
+later. Precedes Step 15 (tier) because tier pages depend on stable
+entity keys — doing tier first would force a migration later when
+identity lands.
+
+---

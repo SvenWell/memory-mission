@@ -26,11 +26,13 @@ from memory_mission.memory.engine import (
     SearchTier,
 )
 from memory_mission.memory.knowledge_graph import (
+    CORROBORATION_CAP,
     Direction,
     Entity,
     GraphStats,
     KnowledgeGraph,
     Triple,
+    TripleSource,
 )
 from memory_mission.memory.pages import (
     Page,
@@ -73,6 +75,7 @@ from memory_mission.memory.text import STOPWORDS, jaccard, word_set
 __all__ = [
     "COMPILED_TRUTH_BOOST",
     "CORE_DOMAINS",
+    "CORROBORATION_CAP",
     "MAX_RECENCY",
     "NEUTRAL_SCORE",
     "RECENCY_DECAY_PER_DAY",
@@ -97,6 +100,7 @@ __all__ = [
     "SearchTier",
     "TimelineEntry",
     "Triple",
+    "TripleSource",
     "cosine_similarity",
     "curated_root",
     "is_valid_domain",

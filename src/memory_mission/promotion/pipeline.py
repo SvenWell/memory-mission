@@ -34,7 +34,7 @@ provide the primitives.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from memory_mission.extraction.schema import (
     EventFact,
@@ -300,18 +300,24 @@ def _apply_facts(proposal: Proposal, kg: KnowledgeGraph) -> None:
 
     V1 policy:
     - identity → ``add_entity`` (idempotent upsert)
-    - relationship → ``add_triple``
-    - preference → ``add_triple`` with predicate ``prefers``
-    - event → ``add_triple`` with predicate ``event`` and
-      ``valid_from = event_date`` (event date carried on the triple)
+    - relationship → corroborate matching triple if one is currently
+      true, otherwise ``add_triple``
+    - preference → same pattern with predicate ``prefers``
+    - event → same pattern with predicate ``event``; ``valid_from``
+      carries the event date
     - update → ``invalidate`` prior triple if ``supersedes_object``
-      given, then ``add_triple`` for the new value
+      given, then corroborate-or-add for the new value
     - open_question → skipped (never promoted; must become a new fact
       to land in the KG)
 
+    Corroboration uses the Bayesian independent-evidence update
+    (Noisy-OR, capped at 0.99) so re-extracting the same fact from a
+    new source strengthens belief without creating duplicate rows.
+
     ``source_closet`` + ``source_file`` carry provenance: the closet
     is ``firm`` or ``personal/<employee_id>``; the file is the
-    ``ExtractionReport`` path that grounded this proposal.
+    ``ExtractionReport`` path that grounded this proposal. Every
+    corroboration appends its source to ``triple_sources``.
     """
     source_closet = _source_closet(proposal)
     source_file = proposal.source_report_path
@@ -327,7 +333,8 @@ def _apply_facts(proposal: Proposal, kg: KnowledgeGraph) -> None:
             # Ensure both endpoints exist as entities before linking.
             kg.add_entity(fact.subject)
             kg.add_entity(fact.object)
-            kg.add_triple(
+            _add_or_corroborate(
+                kg,
                 fact.subject,
                 fact.predicate,
                 fact.object,
@@ -337,7 +344,8 @@ def _apply_facts(proposal: Proposal, kg: KnowledgeGraph) -> None:
             )
         elif isinstance(fact, PreferenceFact):
             kg.add_entity(fact.subject)
-            kg.add_triple(
+            _add_or_corroborate(
+                kg,
                 fact.subject,
                 "prefers",
                 fact.preference,
@@ -347,7 +355,8 @@ def _apply_facts(proposal: Proposal, kg: KnowledgeGraph) -> None:
             )
         elif isinstance(fact, EventFact):
             kg.add_entity(fact.entity_name)
-            kg.add_triple(
+            _add_or_corroborate(
+                kg,
                 fact.entity_name,
                 "event",
                 fact.description,
@@ -365,7 +374,8 @@ def _apply_facts(proposal: Proposal, kg: KnowledgeGraph) -> None:
                     fact.supersedes_object,
                     ended=fact.effective_date,
                 )
-            kg.add_triple(
+            _add_or_corroborate(
+                kg,
                 fact.subject,
                 fact.predicate,
                 fact.new_object,
@@ -376,6 +386,45 @@ def _apply_facts(proposal: Proposal, kg: KnowledgeGraph) -> None:
             )
         elif isinstance(fact, OpenQuestion):
             continue  # open questions never promote
+
+
+def _add_or_corroborate(
+    kg: KnowledgeGraph,
+    subject: str,
+    predicate: str,
+    obj: str,
+    *,
+    valid_from: date | None = None,
+    confidence: float,
+    source_closet: str | None,
+    source_file: str | None,
+) -> None:
+    """Corroborate a matching currently-true triple, or add a new one.
+
+    Central injection point for the promotion-time Bayesian update.
+    If no currently-true match exists, falls back to ``add_triple`` so
+    the fact lands with its provenance seeded into ``triple_sources``.
+    """
+    existing = kg.find_current_triple(subject, predicate, obj)
+    if existing is not None:
+        kg.corroborate(
+            subject,
+            predicate,
+            obj,
+            confidence=confidence,
+            source_closet=source_closet,
+            source_file=source_file,
+        )
+        return
+    kg.add_triple(
+        subject,
+        predicate,
+        obj,
+        valid_from=valid_from,
+        confidence=confidence,
+        source_closet=source_closet,
+        source_file=source_file,
+    )
 
 
 def _source_closet(proposal: Proposal) -> str:
