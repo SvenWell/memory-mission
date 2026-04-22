@@ -1,0 +1,547 @@
+# Memory Mission — Abstractions
+
+*Every Pydantic model, every predicate, every tier, every event type in one place. Current as of commit `c5e3a28`-ish (Step 16.5 shipped). For code-level detail, see the module docstrings.*
+
+---
+
+## Design philosophy
+
+Memory Mission's abstractions are **convention-driven but typed**. Every field name and folder path has a well-defined meaning — and every one of them is enforced by a frozen Pydantic model, not a parse-and-pray heuristic. This makes the vault legible to humans, AI agents, and deterministic graders simultaneously.
+
+Three conventions compose:
+
+- **Frozen Pydantic everywhere.** `model_config = ConfigDict(frozen=True, extra="forbid")` on every model that crosses a module boundary. Accidental mutation is blocked; unknown fields raise at construct time.
+- **Discriminated unions for variants.** `ExtractedFact`, `Event` — one `kind` or `event_type` field discriminates which shape you get.
+- **Protocol + default + adapter slot.** Every external dependency (connector, embedder, resolver) is a runtime-checkable Protocol with a local default implementation and an adapter slot for external services.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md#design-principles) for the complete principles.
+
+---
+
+## Two planes + staging
+
+```
+<firm_root>/
+├── firm/
+│   └── <domain>/<slug>.md
+├── personal/
+│   └── <employee_id>/
+│       ├── working/WORKSPACE.md
+│       ├── episodic/AGENT_LEARNINGS.jsonl
+│       ├── semantic/<domain>/<slug>.md
+│       ├── preferences/PREFERENCES.md
+│       └── lessons/{lessons.jsonl, LESSONS.md}
+└── staging/
+    ├── firm/
+    │   └── <source>/<id>.md
+    │   └── .facts/<source>/<id>.json
+    └── personal/<employee_id>/
+        └── <source>/<id>.md
+        └── .facts/<source>/<id>.json
+```
+
+**Plane** is the fundamental axis: `Literal["personal", "firm"]`. Every write specifies which plane. Staging is the only path between them.
+
+---
+
+## Memory domain model
+
+### Page (`memory/pages.py`)
+
+A curated markdown document — compiled truth + timeline — representing what the firm currently believes about one entity.
+
+```python
+class PageFrontmatter(BaseModel):
+    slug: str                     # validated: [a-z0-9-], 1-128 chars
+    title: str
+    domain: str                   # one of CORE_DOMAINS
+    aliases: list[str]
+    sources: list[str]
+    valid_from: date | None
+    valid_to: date | None
+    confidence: float = 1.0       # 0.0-1.0
+    created: datetime | None
+    updated: datetime | None
+    tier: Tier = "decision"       # Step 15
+    # extra="allow" preserves unknown fields on round-trip
+```
+
+```python
+class Page(BaseModel):
+    frontmatter: PageFrontmatter
+    compiled_truth: str = ""      # body above the --- zone separator
+    timeline: list[TimelineEntry]  # newest-first below the separator
+```
+
+```python
+class TimelineEntry(BaseModel):
+    entry_date: date
+    source_id: str
+    text: str
+```
+
+**Render format:**
+
+```markdown
+---
+slug: sarah-chen
+title: Sarah Chen
+domain: people
+tier: policy
+confidence: 0.95
+---
+
+Sarah is the CEO of [[acme-corp]]. Prefers direct, numbers-heavy
+communication.
+
+---
+
+2026-04-15 [interaction-2]: Confirmed CEO role in board meeting
+2026-04-10 [interaction-1]: First mention as "CEO of Acme"
+```
+
+### Domain registry (`memory/schema.py`)
+
+```python
+CORE_DOMAINS: tuple[str, ...] = (
+    "people", "companies", "deals", "meetings",
+    "concepts", "sources", "inbox", "archive",
+)
+```
+
+Domain comes from the `domain:` frontmatter field, never inferred from folder position. Paths follow `<plane_root>/semantic/<domain>/<slug>.md` (personal) or `firm/<domain>/<slug>.md` (firm). Validated via `validate_domain()`.
+
+### Tiers (`memory/tiers.py`)
+
+```python
+Tier = Literal["constitution", "doctrine", "policy", "decision"]
+DEFAULT_TIER: Tier = "decision"
+```
+
+Ordinal authority: `constitution > doctrine > policy > decision`. Default is `decision` — everyday facts. Higher tiers require deliberate editorial acts. Helpers: `tier_level(t) -> int`, `is_above(a, b) -> bool`, `is_at_least(a, floor) -> bool`.
+
+| Tier | Meaning | Example |
+|---|---|---|
+| `constitution` | Hardest-to-amend truths | "Firm mission: preserve client capital" |
+| `doctrine` | Canonical operating beliefs | "We buy durable compounders" |
+| `policy` | Operational rules | "Review allocations quarterly" |
+| `decision` | Specific observed facts (default) | "Sarah mentioned the Q3 offsite" |
+
+---
+
+## Knowledge graph domain model (`memory/knowledge_graph.py`)
+
+### Entity
+
+```python
+class Entity(BaseModel):
+    name: str                     # stable ID or kebab-case label
+    entity_type: str = "unknown"  # "person", "company", "unknown", ...
+    properties: dict[str, Any]    # free-form
+```
+
+Post-Step-14, `name` is typically a resolver-issued stable ID: `p_<token>` for persons, `o_<token>` for organizations.
+
+### Triple
+
+```python
+class Triple(BaseModel):
+    subject: str
+    predicate: str
+    object: str
+    valid_from: date | None
+    valid_to: date | None             # None = currently true
+    confidence: float = 1.0           # 0.0-1.0, capped at 0.99 via corroborate()
+    source_closet: str | None         # "firm" or "personal/<emp>"
+    source_file: str | None           # path to the source report
+    corroboration_count: int = 0      # Step 13: times re-extracted
+    tier: Tier = "decision"           # Step 15
+```
+
+**Invariants:**
+- Append-only. Never deleted, only invalidated (`valid_to = <date>`).
+- `is_valid_at(as_of)` method honors both sides of the window; `valid_to` is **exclusive** ("ended on" means already over by that day).
+- `corroboration_count >= 0`.
+
+### TripleSource (Step 13)
+
+```python
+class TripleSource(BaseModel):
+    source_closet: str | None
+    source_file: str | None
+    confidence_after: float           # triple's confidence after this corroboration
+    added_at: datetime
+```
+
+Every `add_triple` seeds one row. Every `corroborate` appends one. The chain is the provenance history for the (subject, predicate, object) currently-true triple.
+
+### MergeResult (Step 14b)
+
+```python
+class MergeResult(BaseModel):
+    source_entity: str
+    target_entity: str
+    reviewer_id: str
+    rationale: str
+    merged_at: datetime
+    triples_rewritten: int
+```
+
+Audit record for every `merge_entities` call. Queryable via `kg.merge_history(entity_name)` — returns every merge where the entity appears as source or target, oldest-first.
+
+### CoherenceWarning (Step 15b)
+
+```python
+class CoherenceWarning(BaseModel):
+    subject: str
+    predicate: str
+    new_object: str
+    new_tier: Tier
+    conflicting_object: str
+    conflicting_tier: Tier
+    conflict_type: Literal["same_predicate_different_object"]
+    # computed: higher_tier, lower_tier
+```
+
+Emitted by `kg.check_coherence(subject, predicate, obj, *, new_tier)`. V1 detects only `same_predicate_different_object` — a new fact with a different object on a subject-predicate pair that already has a currently-true row. Open to extension.
+
+### GraphStats
+
+```python
+class GraphStats(BaseModel):
+    entity_count: int
+    triple_count: int
+    currently_true_triple_count: int
+```
+
+### Knowledge graph operations
+
+| Method | What it does |
+|---|---|
+| `add_entity(name, *, entity_type, properties)` | Idempotent upsert. |
+| `get_entity(name) -> Entity | None` | Lookup by name. |
+| `add_triple(s, p, o, *, valid_from, valid_to, confidence, source_closet, source_file, tier)` | Append a triple + seed `triple_sources`. |
+| `find_current_triple(s, p, o) -> Triple | None` | Step 13 helper for the promotion pipeline. |
+| `corroborate(s, p, o, *, confidence, source_closet, source_file) -> Triple | None` | Noisy-OR update, capped at 0.99, appends to `triple_sources`. Returns `None` if no currently-true match. |
+| `invalidate(s, p, o, *, ended) -> int` | Set `valid_to` on matching currently-true triples. |
+| `merge_entities(source, target, *, reviewer_id, rationale) -> MergeResult` | Rewrite triples, delete source entity row, audit the event. |
+| `merge_history(name) -> list[MergeResult]` | Audit trail. |
+| `check_coherence(s, p, o, *, new_tier) -> list[CoherenceWarning]` | Deterministic conflict detector. Empty list = no conflict. |
+| `triple_sources(s, p, o) -> list[TripleSource]` | Full provenance history, oldest-first. |
+| `scan_triple_sources(*, closet_prefix, currently_true_only)` | The join the federated detector needs, returned as list of dicts. |
+| `sql_query(query, params, *, row_limit) -> list[dict]` | Step 16.5 — read-only SQL over the KG's tables. Engine-enforced read-only. |
+| `query_entity(name, *, direction, as_of) -> list[Triple]` | "Everything involving this entity." |
+| `query_relationship(predicate, *, as_of) -> list[Triple]` | "Everything with this predicate." |
+| `timeline(entity_name) -> list[Triple]` | Chronological. |
+| `stats() -> GraphStats` | Shape snapshot. |
+
+### Canonical predicate vocabulary
+
+The promotion pipeline writes these predicates from extracted facts. New predicates can land — the KG is content-agnostic — but downstream tools assume the canonical ones:
+
+| Predicate | Source fact type | Shape |
+|---|---|---|
+| `<custom>` | `RelationshipFact` | Any LLM-emitted predicate (e.g., `works_at`, `reports_to`, `knows`) |
+| `prefers` | `PreferenceFact` | Subject + preference string as object |
+| `event` | `EventFact` | Subject + description as object, `valid_from = event_date` |
+| `<custom>` | `UpdateFact.predicate` | Same as RelationshipFact, with `invalidate` fired first if `supersedes_object` set |
+
+IdentityFact and OpenQuestion never write predicates.
+
+---
+
+## Extraction domain model (`extraction/schema.py`)
+
+### ExtractedFact — discriminated union
+
+```python
+class _FactBase(BaseModel):
+    confidence: float        # 0.0-1.0
+    support_quote: str       # non-empty — "no quote, no fact"
+```
+
+```python
+class IdentityFact(_FactBase):
+    kind: Literal["identity"]
+    entity_name: str
+    entity_type: str = "unknown"
+    properties: dict[str, Any]
+    identifiers: list[str]    # Step 14c — "email:x", "linkedin:y"
+```
+
+```python
+class RelationshipFact(_FactBase):
+    kind: Literal["relationship"]
+    subject: str
+    predicate: str
+    object: str
+```
+
+```python
+class PreferenceFact(_FactBase):
+    kind: Literal["preference"]
+    subject: str
+    preference: str
+```
+
+```python
+class EventFact(_FactBase):
+    kind: Literal["event"]
+    entity_name: str
+    event_date: date | None
+    description: str
+```
+
+```python
+class UpdateFact(_FactBase):
+    kind: Literal["update"]
+    subject: str
+    predicate: str
+    new_object: str
+    supersedes_object: str | None   # invalidates this currently-true triple first
+    effective_date: date | None
+```
+
+```python
+class OpenQuestion(_FactBase):
+    kind: Literal["open_question"]
+    question: str
+    hypothesis: str | None
+    # Never promotes — routes to human review instead
+```
+
+### ExtractionReport
+
+```python
+class ExtractionReport(BaseModel):
+    source: str
+    source_id: str
+    target_plane: Plane
+    employee_id: str | None         # required if target_plane == "personal"
+    extracted_at: datetime
+    facts: list[ExtractedFact]
+
+    def entity_names(self) -> list[str]: ...
+```
+
+Written to fact staging at `<wiki_root>/staging/<plane>/.facts/<source>/<source_id>.json`.
+
+---
+
+## Identity domain model (`identity/base.py`)
+
+```python
+EntityKind = Literal["person", "organization"]
+
+class Identity(BaseModel):
+    id: str                       # "p_<token>" or "o_<token>"
+    entity_type: EntityKind
+    canonical_name: str | None
+    created_at: datetime
+```
+
+### IdentityResolver Protocol
+
+```python
+@runtime_checkable
+class IdentityResolver(Protocol):
+    def resolve(
+        self,
+        identifiers: set[str],
+        *,
+        entity_type: EntityKind = "person",
+        canonical_name: str | None = None,
+    ) -> str: ...
+    def lookup(self, identifier: str) -> str | None: ...
+    def bindings(self, identity_id: str) -> list[str]: ...
+    def get_identity(self, identity_id: str) -> Identity | None: ...
+```
+
+### Identifier format
+
+Strings of the form `"type:value"`. Types are free-form so adapters can extend: `email:alice@acme.com`, `linkedin:alice-s`, `twitter:@alice`, `phone:+1234567890`, `domain:acme.com`, `name:Alice Smith`.
+
+### `IdentityConflictError`
+
+Raised when `resolve()` receives identifiers that map to multiple existing identities. Carries `identifiers` and `matched_ids` for the caller to route to `merge_entities`.
+
+---
+
+## Promotion domain model (`promotion/proposals.py`)
+
+### Proposal
+
+```python
+ProposalStatus = Literal["pending", "approved", "rejected"]
+
+class DecisionEntry(BaseModel):
+    decision: Literal["approved", "rejected", "reopened"]
+    reviewer_id: str
+    rationale: str                # non-empty — rubber-stamping blocked
+    at: datetime
+
+class Proposal(BaseModel):
+    proposal_id: str              # deterministic hash — re-extraction is idempotent
+    target_plane: Plane
+    target_employee_id: str | None
+    target_scope: str = "public"
+    target_entity: str
+    proposer_agent_id: str
+    proposer_employee_id: str
+    facts: list[ExtractedFact]
+    source_report_path: str       # "federated-detector://..." for Step 16 origin
+    status: ProposalStatus = "pending"
+    reviewer_id: str | None
+    rationale: str | None
+    decided_at: datetime | None
+    rejection_count: int = 0
+    decision_history: list[DecisionEntry]
+```
+
+### Pipeline operations
+
+| Function | Effect |
+|---|---|
+| `create_proposal(store, ...)` | Stage a pending proposal. Idempotent on `proposal_id`. Logs `ProposalCreatedEvent`. |
+| `promote(store, kg, id, *, reviewer_id, rationale, policy=None)` | Apply facts atomically. Runs coherence scan; emits `CoherenceWarningEvent`s; raises `CoherenceBlockedError` in strict mode. Logs `ProposalDecidedEvent(decision="approved")`. |
+| `reject(store, id, *, reviewer_id, rationale)` | Mark rejected. `rejection_count++`. |
+| `reopen(store, id, *, reviewer_id, rationale)` | Rejected → pending. |
+
+---
+
+## Permissions (`permissions/policy.py`)
+
+```python
+class Scope(BaseModel):
+    name: str
+    description: str = ""
+    parent: str | None = None
+
+class EmployeeEntry(BaseModel):
+    employee_id: str
+    scopes: frozenset[str]
+
+class Policy(BaseModel):
+    firm_id: str
+    scopes: dict[str, Scope]
+    employees: dict[str, EmployeeEntry]
+    default_scope: str = "public"
+    constitutional_mode: bool = False  # Step 15b
+```
+
+Rules: `can_read(policy, employee_id, page)` — default deny; public always allowed; unknown scope fails closed. `can_propose(policy, employee_id, target_scope)` — no-escalation: must have read access to the target scope.
+
+---
+
+## Federated detector domain model (`federated/detector.py`)
+
+```python
+class CandidateSource(BaseModel):
+    source_closet: str            # "personal/<employee_id>"
+    source_file: str
+    triple_id: int
+    confidence: float
+
+class FirmCandidate(BaseModel):
+    subject: str
+    predicate: str
+    object: str
+    tier: Tier = "decision"
+    distinct_employees: int
+    distinct_source_files: int
+    contributing_sources: list[CandidateSource]
+    confidence: float             # the triple's current corroborated value
+
+    @property
+    def employee_ids(self) -> list[str]: ...
+    def to_relationship_fact(self) -> RelationshipFact: ...
+```
+
+Returned by `detect_firm_candidates(kg, *, min_employees=3, min_sources=3)`. Thresholded on BOTH counts to defeat the shared-source failure mode.
+
+---
+
+## Observability (`observability/events.py`)
+
+All events share:
+
+```python
+class _EventBase(BaseModel):
+    schema_version: int = 1
+    event_id: UUID
+    timestamp: datetime
+    firm_id: str
+    employee_id: str | None
+    trace_id: UUID | None
+```
+
+Event types (discriminated by `event_type`):
+
+| Event | Fired by | Carries |
+|---|---|---|
+| `ExtractionEvent` | `ingest_facts` (via host) | source, facts, confidence, llm_provider, prompt_hash |
+| `PromotionEvent` | legacy — kept for compat | candidate fact, scores, gates, decision, reviewer |
+| `RetrievalEvent` | `BrainEngine.search/query` | query, tier, pages_loaded, token_budget, latency |
+| `DraftEvent` | workflow agents | workflow, context_pages, output_preview |
+| `ConnectorInvocationEvent` | `connectors.invoke` | connector_name, action, preview (PII-scrubbed), latency |
+| `ProposalCreatedEvent` | `create_proposal` | proposal_id, target_plane, fact_count, source_report_path |
+| `ProposalDecidedEvent` | `promote` / `reject` / `reopen` | proposal_id, decision, reviewer_id, rationale |
+| `CoherenceWarningEvent` | `_apply_facts` coherence scan (Step 15b) | proposal_id, subject, predicate, new_object, new_tier, conflicting_object, conflicting_tier, `blocked: bool` |
+
+---
+
+## Skills registry (`skills/`)
+
+Every skill is a directory with `SKILL.md` (frontmatter + body), registered in `skills/_index.md` (human-readable) and `skills/_manifest.jsonl` (machine-parsable, one line per skill).
+
+### SKILL.md frontmatter
+
+```yaml
+---
+name: <kebab-case-skill-name>
+version: "YYYY-MM-DD"
+triggers: ["natural phrases that should invoke this"]
+tools: [<list of tool names this skill calls>]
+preconditions:
+  - "what must be true before running"
+constraints:
+  - "what the skill must not do"
+category: <ingestion | governance | workflow | ...>
+---
+```
+
+### Shipped skills
+
+| Skill | Category | What it does |
+|---|---|---|
+| `backfill-gmail` | ingestion | Pull Gmail messages → personal staging |
+| `backfill-granola` | ingestion | Pull Granola transcripts → personal staging |
+| `backfill-firm-artefacts` | ingestion | Admin-only: pull Drive docs → firm staging |
+| `extract-from-staging` | ingestion | Host LLM extracts facts → fact staging |
+| `review-proposals` | governance | Surface pending proposals, human approves with rationale |
+| `detect-firm-candidates` | governance | Admin-only: scan personal planes, stage federated firm proposals |
+
+---
+
+## Constants
+
+| Constant | Value | Module | Meaning |
+|---|---|---|---|
+| `CORROBORATION_CAP` | `0.99` | `memory.knowledge_graph` | Max confidence via agent-path corroboration |
+| `DEFAULT_TIER` | `"decision"` | `memory.tiers` | Default tier on every Triple and PageFrontmatter |
+| `RRF_K` | `60` | `memory.search` | Reciprocal rank fusion constant |
+| `COMPILED_TRUTH_BOOST` | `2.0` | `memory.search` | Score multiplier for compiled-truth zone matches |
+| `VECTOR_RRF_BLEND` | `0.7` | `memory.search` | RRF weight in hybrid search final blend |
+| `DEFAULT_MIN_EMPLOYEES` | `3` | `federated.detector` | Default federated detector threshold |
+| `DEFAULT_MIN_SOURCES` | `3` | `federated.detector` | Same, for distinct source files |
+| `MAX_RECENCY` | Various | `memory.salience` | Salience formula (lifted from agentic-stack) |
+
+---
+
+## Non-abstractions (things we deliberately don't model)
+
+- **Roles.** No enum. Permissions are per-firm scopes, not hardcoded roles.
+- **Workflow state machines.** No generic workflow engine. Each skill is its own workflow in markdown.
+- **LLM message formats.** Host agent owns them.
+- **Vector embeddings as first-class models.** `EmbeddingProvider.embed(text) -> list[float]` and nothing else.
+- **Network transport.** Every module is a Python library; host agent provides IPC.
