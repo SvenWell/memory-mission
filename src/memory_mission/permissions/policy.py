@@ -65,7 +65,15 @@ class EmployeeEntry(BaseModel):
 
 
 class Policy(BaseModel):
-    """Per-firm access-control policy."""
+    """Per-firm access-control policy.
+
+    ``constitutional_mode`` is the opt-in strict-coherence flag
+    (Maciek frame, Step 15). When True, coherence warnings from
+    ``promote()`` BLOCK the promotion instead of surfacing advisory.
+    Firms that want legal-style governance enable it; firms that
+    want the lighter advisory model (default) leave it off. See
+    ``knowledge_graph.check_coherence`` for the detection logic.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -73,6 +81,7 @@ class Policy(BaseModel):
     scopes: dict[str, Scope] = Field(default_factory=dict)
     employees: dict[str, EmployeeEntry] = Field(default_factory=dict)
     default_scope: str = PUBLIC_SCOPE
+    constitutional_mode: bool = False
 
     def employee(self, employee_id: str) -> EmployeeEntry | None:
         return self.employees.get(employee_id)

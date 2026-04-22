@@ -19,6 +19,7 @@ from memory_mission.observability.context import (
     current_trace_id,
 )
 from memory_mission.observability.events import (
+    CoherenceWarningEvent,
     ConnectorInvocationEvent,
     DraftEvent,
     ExtractionEvent,
@@ -225,6 +226,43 @@ def log_proposal_decided(
         target_entity=target_entity,
         fact_count=fact_count,
         rejection_count=rejection_count,
+    )
+    current_logger().write(event)
+    return event
+
+
+def log_coherence_warning(
+    *,
+    proposal_id: str,
+    subject: str,
+    predicate: str,
+    new_object: str,
+    new_tier: Literal["constitution", "doctrine", "policy", "decision"],
+    conflicting_object: str,
+    conflicting_tier: Literal["constitution", "doctrine", "policy", "decision"],
+    conflict_type: Literal["same_predicate_different_object"],
+    blocked: bool,
+) -> CoherenceWarningEvent:
+    """Record a tier coherence conflict detected during ``promote()``.
+
+    Each warning lands as its own event so the observability log
+    becomes the eval corpus for doctrinal conflicts. Callers decide
+    whether the warning is advisory (``blocked=False``) or blocked the
+    promotion (``blocked=True``, firm in constitutional mode).
+    """
+    event = CoherenceWarningEvent(
+        firm_id=current_firm_id(),
+        employee_id=current_employee_id(),
+        trace_id=current_trace_id(),
+        proposal_id=proposal_id,
+        subject=subject,
+        predicate=predicate,
+        new_object=new_object,
+        new_tier=new_tier,
+        conflicting_object=conflicting_object,
+        conflicting_tier=conflicting_tier,
+        conflict_type=conflict_type,
+        blocked=blocked,
     )
     current_logger().write(event)
     return event

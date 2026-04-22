@@ -83,6 +83,18 @@ Loop:
   supersession, reject as conflict, or flag as open question?"
   (The proposal's `UpdateFact` should already carry
   `supersedes_object`; if it doesn't, surface the mismatch.)
+- **Coherence warning (Step 15):** Before presenting a proposal,
+  read the observability log for recent `CoherenceWarningEvent`
+  rows on the current `trace_id` / proposal id. If any surface,
+  include the conflicting fact + its tier (constitution / doctrine
+  / policy / decision) in the summary you show the reviewer. Sample
+  phrasing: "This proposal says `firm thesis = buy-momentum`. A
+  currently-true `doctrine`-tier fact says `firm thesis =
+  buy-durable-compounders`. Approve as supersession (new doctrine),
+  approve as decision-level addition, reject, or request a
+  supersession update?" If the firm is in `constitutional_mode`,
+  `promote()` will block on this conflict — the reviewer MUST
+  resolve the conflict explicitly before the proposal can land.
 - **Permission uplift warning:** "Source was personal plane; this
   proposal targets firm + scope `partner-only`. Reviewer, confirm
   you want to expose this to the `partner-only` audience?"
@@ -102,6 +114,10 @@ Approve:
   source_file)
 - Proposal status → `approved`, rationale + reviewer_id recorded
 - `ProposalDecidedEvent` logged to observability
+- If any coherence conflicts were detected, one
+  `CoherenceWarningEvent` per conflict lands too (advisory by
+  default; `blocked=True` and `CoherenceBlockedError` raised when the
+  firm is in `constitutional_mode`)
 
 Reject:
 - Proposal status → `rejected`, `rejection_count` incremented

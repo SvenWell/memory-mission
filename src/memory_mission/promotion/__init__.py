@@ -16,6 +16,7 @@ Public surface:
 """
 
 from memory_mission.promotion.pipeline import (
+    CoherenceBlockedError,
     ProposalStateError,
     create_proposal,
     promote,
@@ -31,6 +32,7 @@ from memory_mission.promotion.proposals import (
 )
 
 __all__ = [
+    "CoherenceBlockedError",
     "DecisionEntry",
     "Proposal",
     "ProposalStateError",

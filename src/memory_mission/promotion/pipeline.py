@@ -45,12 +45,15 @@ from memory_mission.extraction.schema import (
     RelationshipFact,
     UpdateFact,
 )
-from memory_mission.memory.knowledge_graph import KnowledgeGraph
+from memory_mission.memory.knowledge_graph import CoherenceWarning, KnowledgeGraph
 from memory_mission.memory.schema import Plane
+from memory_mission.memory.tiers import DEFAULT_TIER, Tier
 from memory_mission.observability.api import (
+    log_coherence_warning,
     log_proposal_created,
     log_proposal_decided,
 )
+from memory_mission.permissions.policy import Policy
 from memory_mission.promotion.proposals import (
     DecisionEntry,
     Proposal,
@@ -61,6 +64,29 @@ from memory_mission.promotion.proposals import (
 
 class ProposalStateError(Exception):
     """Raised when an operation is attempted on a proposal in the wrong status."""
+
+
+class CoherenceBlockedError(Exception):
+    """Raised by ``promote()`` when firm policy blocks on coherence warnings.
+
+    Set when ``Policy.constitutional_mode`` is True and at least one
+    ``CoherenceWarning`` surfaces during ``_apply_facts``. The proposal
+    stays pending; the reviewer must either resolve the conflict (e.g.,
+    merge entities, retire the conflicting triple, or change the
+    proposal) or switch the firm off constitutional mode.
+
+    The structured ``warnings`` field carries the full list so
+    reviewer UIs can display them verbatim.
+    """
+
+    def __init__(self, warnings: list[CoherenceWarning]) -> None:
+        self.warnings = warnings
+        summary = "; ".join(
+            f"{w.subject} {w.predicate} {w.conflicting_object} "
+            f"({w.conflicting_tier}) vs new {w.new_object} ({w.new_tier})"
+            for w in warnings
+        )
+        super().__init__(f"promotion blocked by {len(warnings)} coherence warning(s): {summary}")
 
 
 def create_proposal(
@@ -129,18 +155,27 @@ def promote(
     *,
     reviewer_id: str,
     rationale: str,
+    policy: Policy | None = None,
 ) -> Proposal:
     """Approve a pending proposal: apply its facts to the KG and record the decision.
 
     Atomic on success. Raises ``ProposalStateError`` if the proposal
     doesn't exist or isn't in the ``pending`` state. Requires a
     non-empty rationale — empty strings are structurally blocked.
+
+    Coherence (Step 15): before applying facts, each triple-like fact
+    is checked against currently-true triples on the same
+    ``(subject, predicate)``. Conflicts (different object) surface as
+    ``CoherenceWarning`` events on the observability log. If ``policy``
+    is supplied and ``policy.constitutional_mode`` is True, any
+    warning raises ``CoherenceBlockedError`` and the proposal stays
+    pending. Advisory mode logs the warnings and proceeds.
     """
     proposal = _require_pending(store, proposal_id)
     _require_rationale(rationale)
 
     # Apply facts FIRST so we don't mark approved on a failed write.
-    _apply_facts(proposal, knowledge_graph)
+    _apply_facts(proposal, knowledge_graph, policy=policy)
 
     now = datetime.now(UTC)
     approved = proposal.model_copy(
@@ -295,7 +330,12 @@ def _require_rationale(rationale: str) -> None:
         raise ValueError("rationale is required on every decision")
 
 
-def _apply_facts(proposal: Proposal, kg: KnowledgeGraph) -> None:
+def _apply_facts(
+    proposal: Proposal,
+    kg: KnowledgeGraph,
+    *,
+    policy: Policy | None = None,
+) -> None:
     """Apply a proposal's facts to the KG. All-or-nothing on success.
 
     V1 policy:
@@ -314,6 +354,15 @@ def _apply_facts(proposal: Proposal, kg: KnowledgeGraph) -> None:
     (Noisy-OR, capped at 0.99) so re-extracting the same fact from a
     new source strengthens belief without creating duplicate rows.
 
+    Coherence (Step 15): before each triple-like fact lands, the KG
+    is asked whether the new (subject, predicate, object) conflicts
+    with any currently-true triple on the same (subject, predicate)
+    but a different object. Each conflict surfaces as a
+    ``CoherenceWarning`` logged via ``log_coherence_warning``. If
+    ``policy.constitutional_mode`` is True, the collected warnings
+    raise ``CoherenceBlockedError`` BEFORE any write, leaving the KG
+    untouched and the proposal pending.
+
     ``source_closet`` + ``source_file`` carry provenance: the closet
     is ``firm`` or ``personal/<employee_id>``; the file is the
     ``ExtractionReport`` path that grounded this proposal. Every
@@ -321,7 +370,27 @@ def _apply_facts(proposal: Proposal, kg: KnowledgeGraph) -> None:
     """
     source_closet = _source_closet(proposal)
     source_file = proposal.source_report_path
+    strict = bool(policy is not None and policy.constitutional_mode)
 
+    # Pass 1: coherence scan. Collect every warning, log each one, and
+    # raise before applying anything if the firm is in strict mode.
+    warnings = _coherence_scan(proposal, kg)
+    for warning in warnings:
+        log_coherence_warning(
+            proposal_id=proposal.proposal_id,
+            subject=warning.subject,
+            predicate=warning.predicate,
+            new_object=warning.new_object,
+            new_tier=warning.new_tier,
+            conflicting_object=warning.conflicting_object,
+            conflicting_tier=warning.conflicting_tier,
+            conflict_type=warning.conflict_type,
+            blocked=strict,
+        )
+    if strict and warnings:
+        raise CoherenceBlockedError(warnings)
+
+    # Pass 2: apply facts. This only runs if we didn't block above.
     for fact in proposal.facts:
         if isinstance(fact, IdentityFact):
             kg.add_entity(
@@ -388,6 +457,56 @@ def _apply_facts(proposal: Proposal, kg: KnowledgeGraph) -> None:
             continue  # open questions never promote
 
 
+def _coherence_scan(proposal: Proposal, kg: KnowledgeGraph) -> list[CoherenceWarning]:
+    """Collect every coherence warning this proposal's facts would produce.
+
+    Only triple-like facts participate — IdentityFact and OpenQuestion
+    are never subject to tier coherence checks. Each fact contributes
+    zero or more warnings; the function returns the flat list.
+    """
+    warnings: list[CoherenceWarning] = []
+    for fact in proposal.facts:
+        if isinstance(fact, RelationshipFact):
+            warnings.extend(
+                kg.check_coherence(
+                    fact.subject,
+                    fact.predicate,
+                    fact.object,
+                    new_tier=DEFAULT_TIER,
+                )
+            )
+        elif isinstance(fact, PreferenceFact):
+            warnings.extend(
+                kg.check_coherence(fact.subject, "prefers", fact.preference, new_tier=DEFAULT_TIER)
+            )
+        elif isinstance(fact, EventFact):
+            warnings.extend(
+                kg.check_coherence(
+                    fact.entity_name,
+                    "event",
+                    fact.description,
+                    new_tier=DEFAULT_TIER,
+                )
+            )
+        elif isinstance(fact, UpdateFact):
+            # UpdateFact invalidates the prior object before adding the new
+            # one, so the only coherence concern is any OTHER currently-true
+            # triple on the same (subject, predicate) that isn't the one
+            # being superseded.
+            subj_warnings = kg.check_coherence(
+                fact.subject,
+                fact.predicate,
+                fact.new_object,
+                new_tier=DEFAULT_TIER,
+            )
+            if fact.supersedes_object:
+                subj_warnings = [
+                    w for w in subj_warnings if w.conflicting_object != fact.supersedes_object
+                ]
+            warnings.extend(subj_warnings)
+    return warnings
+
+
 def _add_or_corroborate(
     kg: KnowledgeGraph,
     subject: str,
@@ -398,6 +517,7 @@ def _add_or_corroborate(
     confidence: float,
     source_closet: str | None,
     source_file: str | None,
+    tier: Tier = DEFAULT_TIER,
 ) -> None:
     """Corroborate a matching currently-true triple, or add a new one.
 
@@ -424,6 +544,7 @@ def _add_or_corroborate(
         confidence=confidence,
         source_closet=source_closet,
         source_file=source_file,
+        tier=tier,
     )
 
 

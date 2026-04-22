@@ -1530,3 +1530,177 @@ already described at a higher tier — warning surfaces in
 the coherence check blocking instead of advisory.
 
 ---
+
+## Step 15 — Doctrine tier + coherence check
+
+**Goal.** Maciek's constitutional frame as infrastructure: every
+fact in the KG (and every Page in the vault) now carries a
+doctrinal tier, and the promotion pipeline surfaces warnings when
+a new fact contradicts existing doctrine. Advisory by default;
+firms that want stricter governance opt into blocking mode via a
+firm-policy flag.
+
+Shipped as two atomic sub-commits.
+
+### 15a — Tier storage + filtering
+
+**Files added:**
+- `src/memory_mission/memory/tiers.py` — new module with
+  `Tier = Literal["constitution", "doctrine", "policy", "decision"]`,
+  ordinal helpers (`tier_level`, `is_above`, `is_at_least`), and
+  `DEFAULT_TIER = "decision"`.
+
+**Files modified:**
+- `src/memory_mission/memory/pages.py` — `PageFrontmatter.tier` field
+  (default `"decision"`). `new_page()` accepts an optional `tier`.
+- `src/memory_mission/memory/knowledge_graph.py`:
+  - `Triple.tier` Pydantic field (default `"decision"`).
+  - New `tier TEXT NOT NULL DEFAULT 'decision'` column on the
+    `triples` table, with migration hook in `_run_migrations()`.
+  - `add_triple` accepts an explicit `tier` kwarg; default is
+    decision so every existing call site continues to work.
+  - `_row_to_triple` reads the column defensively — rows from
+    pre-migration DBs fall back to "decision".
+- `src/memory_mission/memory/engine.py` — `BrainEngine.search` and
+  `BrainEngine.query` accept optional `tier_floor`. Filter uses
+  `is_at_least(page.frontmatter.tier, tier_floor)`. `None` (the
+  default) keeps backwards-compatible behavior.
+- `src/memory_mission/memory/__init__.py` — exports tier types +
+  helpers.
+- `tests/test_knowledge_graph.py` — 10 new tests: tier ordering,
+  helpers, default triple tier, explicit tier persisted, corroborate
+  preserves tier, merge preserves tier, migration adds column.
+- `tests/test_memory.py` — 4 new tests: PageFrontmatter default,
+  `new_page` accepts tier, render/parse round-trip preserves tier,
+  `query(tier_floor=...)` filters correctly, `search(tier_floor=...)`
+  filters correctly.
+
+**Semantics:**
+- **Default is `decision`.** Every existing call site — connectors,
+  extraction, promotion, tests — continues unchanged.
+- **Corroboration preserves tier.** Re-extracting a decision from
+  three sources bumps confidence; it never silently promotes to
+  doctrine. Tier changes must be deliberate editorial acts.
+- **Merge preserves tier.** `merge_entities` rewrites
+  subject/object strings; it does not touch tier.
+
+### 15b — Coherence warnings + observability + policy flag
+
+**Files added:**
+- `tests/test_coherence.py` — 15 new tests. Covers the deterministic
+  layer (`KnowledgeGraph.check_coherence`), the advisory promotion
+  path (warning logged, facts still apply), and constitutional-mode
+  blocking (CoherenceBlockedError, proposal stays pending, KG
+  untouched). UpdateFact's `supersedes_object` is correctly
+  excluded from the scan.
+
+**Files modified:**
+- `src/memory_mission/memory/knowledge_graph.py`:
+  - `CoherenceWarning` Pydantic model with structured fields:
+    `subject` / `predicate` / `new_object` / `new_tier` /
+    `conflicting_object` / `conflicting_tier` / `conflict_type`.
+    `higher_tier` and `lower_tier` computed properties.
+  - `check_coherence(subject, predicate, obj, *, new_tier)` method
+    returns `list[CoherenceWarning]`. Deterministic — no LLM.
+    Finds currently-true triples on the same `(subject, predicate)`
+    with a different `object`. Ignores invalidated triples. Returns
+    empty list for corroboration (same object).
+- `src/memory_mission/memory/__init__.py` — exports
+  `CoherenceWarning`.
+- `src/memory_mission/observability/events.py`:
+  - New `CoherenceWarningEvent` type joined to the discriminated
+    `Event` union. Fields mirror `CoherenceWarning` plus
+    `proposal_id` and `blocked: bool`.
+- `src/memory_mission/observability/api.py`:
+  - `log_coherence_warning()` helper that writes the event under
+    the current observability scope.
+- `src/memory_mission/observability/__init__.py` — exports the new
+  event type and log helper.
+- `src/memory_mission/permissions/policy.py`:
+  - `Policy.constitutional_mode: bool = False` flag. Off by default;
+    firms that want strict doctrinal governance opt in.
+- `src/memory_mission/promotion/pipeline.py`:
+  - New `CoherenceBlockedError` exception carrying the full
+    `warnings: list[CoherenceWarning]` list for UI display.
+  - `promote()` accepts an optional `policy: Policy | None` kwarg.
+  - `_apply_facts` now runs a two-pass scan: (1) `_coherence_scan`
+    collects every warning via `kg.check_coherence`, each one logs
+    via `log_coherence_warning`; (2) if `policy.constitutional_mode`
+    is True and warnings exist, raise `CoherenceBlockedError` BEFORE
+    writing anything (KG stays untouched, proposal stays pending).
+    Advisory path logs warnings and proceeds with the writes.
+  - `UpdateFact`'s `supersedes_object` is filtered from the scan so
+    a valid supersession does not fire a false coherence warning.
+- `src/memory_mission/promotion/__init__.py` — exports
+  `CoherenceBlockedError`.
+- `skills/review-proposals/SKILL.md` — new forcing-question entry
+  for coherence warnings and a line under the "where state changes"
+  section documenting the `CoherenceWarningEvent` log row.
+
+**Verification:**
+- [x] `pytest` — 570/570 passed (29 new since Step 14c):
+  14 tier storage + 15 coherence
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 61 source files
+- [x] Same (subject, predicate, object) is corroboration, not
+      conflict — no warning fires
+- [x] Invalidated triples never produce a warning
+- [x] Multiple currently-true triples on the same (subject,
+      predicate) each produce their own warning
+- [x] Advisory mode: warning is logged, facts still land, both
+      conflicting rows remain currently true (reviewer cleanup is
+      a deliberate follow-up)
+- [x] Constitutional mode: `CoherenceBlockedError` raised, KG
+      untouched, proposal stays pending
+- [x] `UpdateFact` with `supersedes_object` does not fire a
+      coherence warning on the replaced value
+- [x] PreferenceFact and RelationshipFact both participate in the
+      check (predicate `prefers` / arbitrary predicate)
+
+**Architectural significance.**
+
+- **Structured, deterministic, eval-friendly.** `CoherenceWarning`
+  is a Pydantic record; `CoherenceWarningEvent` is a first-class
+  observability event. The stream of warnings is the corpus
+  section 2.7 of `docs/EVALS.md` asks for — no LLM judge, no
+  Likert, binary yes/no per (subject, predicate, new_object) pair.
+- **Default safe, opt-in strict.** `constitutional_mode=False` is
+  the default, so every existing test and every firm that hasn't
+  opted in keeps the same promotion behavior. Firms that want
+  Maciek-style legal governance flip the flag.
+- **Block before write.** When strict mode triggers, `_apply_facts`
+  raises BEFORE any KG write. No partial state; the proposal is
+  still available for the reviewer to resolve.
+- **Pairs with Step 14 (identity resolution).** Coherence checks
+  run on stable IDs post-canonicalization, so "alice-smith works_at
+  acme" and "a-smith works_at beta" correctly surface as a conflict
+  on the same resolved Person ID rather than slipping past the scan
+  as two unrelated subjects.
+- **Pairs with Step 13 (corroboration).** Corroboration is the
+  same-object path; coherence is the different-object path. Every
+  triple-like fact takes exactly one of the two branches.
+
+**Deferred (intentionally out of scope):**
+- **Tier promotion op.** A dedicated `retier_triple` with reviewer
+  gate lets a human promote a `decision` to `policy` / `doctrine`.
+  Not needed in V1 — reviewers can add a new triple at a higher
+  tier directly.
+- **Distillation coherence** (eval doc 2.7's LLM-judge layer) —
+  this is Step 17 territory, once `compile_agent_context()` ships.
+- **Automatic conflict resolution** (e.g., "higher tier wins, auto-
+  invalidate lower") — too opinionated for V1. Advisory warnings +
+  reviewer judgment is the safer starting point.
+- **Tier-aware `review-proposals` ranking** — currently the skill
+  ranks by rejection_count / enrichment tier; a follow-up can add
+  "constitution-tier conflicts first." Documented in the
+  self-rewrite footer.
+
+**Next:** Step 16 — Federated cross-employee pattern detector.
+Admin-only skill that scans personal planes, collapses across
+resolved person IDs (thanks to Step 14), and produces tier-aware
+firm proposals when N ≥ threshold employees independently assert
+the same fact. Coherence checks from Step 15 run on every
+detector-generated proposal, so cross-plane aggregation cannot
+silently overwrite firm doctrine.
+
+---

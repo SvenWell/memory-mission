@@ -156,6 +156,52 @@ class MergeResult(BaseModel):
     triples_rewritten: int
 
 
+class CoherenceWarning(BaseModel):
+    """A proposed fact conflicts with an existing currently-true fact.
+
+    Emitted by ``KnowledgeGraph.check_coherence`` when a new triple
+    would contradict a currently-true triple on the same
+    ``(subject, predicate)`` with a different ``object``.
+
+    Structured so downstream tools (reviewers, observability, future
+    eval sets) can reason about it without parsing text. Eval-friendly:
+    the fields are the labels (same subject-predicate, different
+    object, tier delta), and the set of warnings observed in production
+    becomes the labeled corpus for section 2.7 of ``docs/EVALS.md``.
+
+    ``conflict_type`` is extensible — V1 only ships
+    ``same_predicate_different_object`` (the only case
+    ``check_coherence`` detects today). Future work may add
+    ``subsumed_by_higher_tier`` or ``contradicts_by_negation``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    subject: str
+    predicate: str
+    new_object: str
+    new_tier: Tier
+    conflicting_object: str
+    conflicting_tier: Tier
+    conflict_type: Literal["same_predicate_different_object"] = "same_predicate_different_object"
+
+    @property
+    def higher_tier(self) -> Tier:
+        """Whichever of ``new_tier`` / ``conflicting_tier`` has more authority."""
+        from memory_mission.memory.tiers import is_above
+
+        return (
+            self.conflicting_tier
+            if is_above(self.conflicting_tier, self.new_tier)
+            else self.new_tier
+        )
+
+    @property
+    def lower_tier(self) -> Tier:
+        """Whichever of the two has less authority."""
+        return self.new_tier if self.higher_tier == self.conflicting_tier else self.conflicting_tier
+
+
 # ---------- Store ----------
 
 
@@ -488,6 +534,55 @@ class KnowledgeGraph:
 
         updated = self._conn.execute("SELECT * FROM triples WHERE id = ?", (triple_id,)).fetchone()
         return _row_to_triple(updated)
+
+    def check_coherence(
+        self,
+        subject: str,
+        predicate: str,
+        obj: str,
+        *,
+        new_tier: Tier = DEFAULT_TIER,
+    ) -> list[CoherenceWarning]:
+        """Return warnings for currently-true triples that contradict
+        ``(subject, predicate, obj)`` at tier ``new_tier``.
+
+        V1 detection: one warning per currently-true triple that shares
+        ``(subject, predicate)`` with a different ``object``. "Currently
+        true" = ``valid_to IS NULL``. Corroboration (same subject +
+        predicate + object) is NOT a conflict and never surfaces here.
+
+        Deterministic: no LLM, no fuzzy matching. That's intentional —
+        per ``docs/EVALS.md`` P7, prefer deterministic graders when
+        possible. Structured output makes the set of warnings a natural
+        labeled corpus for eval 2.7 when distillation lands.
+
+        Returns ``[]`` if no conflict is detected. Callers decide
+        whether to log (advisory) or raise (blocking, constitutional
+        mode) — this method has no side effects.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT object, tier FROM triples
+            WHERE subject = ? AND predicate = ? AND valid_to IS NULL
+              AND object != ?
+            ORDER BY id ASC
+            """,
+            (subject, predicate, obj),
+        ).fetchall()
+        warnings: list[CoherenceWarning] = []
+        for row in rows:
+            existing_tier = row["tier"] if row["tier"] else DEFAULT_TIER
+            warnings.append(
+                CoherenceWarning(
+                    subject=subject,
+                    predicate=predicate,
+                    new_object=obj,
+                    new_tier=new_tier,
+                    conflicting_object=row["object"],
+                    conflicting_tier=existing_tier,
+                )
+            )
+        return warnings
 
     def triple_sources(
         self,

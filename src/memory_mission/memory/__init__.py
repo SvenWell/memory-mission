@@ -27,6 +27,7 @@ from memory_mission.memory.engine import (
 )
 from memory_mission.memory.knowledge_graph import (
     CORROBORATION_CAP,
+    CoherenceWarning,
     Direction,
     Entity,
     GraphStats,
@@ -95,6 +96,7 @@ __all__ = [
     "STOPWORDS",
     "VECTOR_RRF_BLEND",
     "BrainEngine",
+    "CoherenceWarning",
     "Direction",
     "EmbeddingProvider",
     "EngineStats",

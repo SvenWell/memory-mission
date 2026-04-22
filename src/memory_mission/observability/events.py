@@ -162,6 +162,34 @@ class ProposalDecidedEvent(_EventBase):
     rejection_count: int
 
 
+class CoherenceWarningEvent(_EventBase):
+    """``promote()`` detected a tier coherence conflict (Step 15).
+
+    Logged whenever ``KnowledgeGraph.check_coherence`` returns a
+    non-empty list during ``_apply_facts``. Advisory by default;
+    becomes blocking when firm policy has ``constitutional_mode=True``
+    (in that case a ``CoherenceBlockedError`` also fires and the
+    proposal stays pending). Either way, the event lands here so
+    the stream of warnings is the eval corpus (see
+    ``docs/EVALS.md`` 2.7).
+
+    Structured fields — ``subject`` / ``predicate`` / ``new_object`` /
+    ``conflicting_object`` + their tiers — are the eval labels.
+    ``blocked`` distinguishes the blocking and advisory cases.
+    """
+
+    event_type: Literal["coherence_warning"] = "coherence_warning"
+    proposal_id: str
+    subject: str
+    predicate: str
+    new_object: str
+    new_tier: Literal["constitution", "doctrine", "policy", "decision"]
+    conflicting_object: str
+    conflicting_tier: Literal["constitution", "doctrine", "policy", "decision"]
+    conflict_type: Literal["same_predicate_different_object"]
+    blocked: bool
+
+
 # Pydantic discriminated union — lets us serialize/parse any event type.
 Event = Annotated[
     ExtractionEvent
@@ -170,6 +198,7 @@ Event = Annotated[
     | DraftEvent
     | ConnectorInvocationEvent
     | ProposalCreatedEvent
-    | ProposalDecidedEvent,
+    | ProposalDecidedEvent
+    | CoherenceWarningEvent,
     Field(discriminator="event_type"),
 ]
