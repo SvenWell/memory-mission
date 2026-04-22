@@ -851,3 +851,97 @@ its own LLM with our prompt, returns parsed output, calls
 `ingest_facts`. No LLM SDK imports in our code.
 
 ---
+
+## Step 9: Extraction Agent (host-run LLM, our schema + ingest) — DONE (2026-04-22)
+
+**Goal:** Ship the extraction *interface* — prompt template, output
+schema, ingest function, skill file — so any host agent (Claude Code,
+Hermes, Codex sub-agent) can run its own LLM with our prompt and hand
+back structured facts. Memory Mission imports no LLM SDK.
+
+**Files created:**
+- `src/memory_mission/extraction/schema.py` — the six-bucket taxonomy
+  as a Pydantic discriminated union:
+  - `IdentityFact` → maps to `KnowledgeGraph.add_entity`
+  - `RelationshipFact` → maps to `KnowledgeGraph.add_triple`
+  - `PreferenceFact` → triple with `prefers_*` predicate
+  - `EventFact` → `TimelineEntry` append
+  - `UpdateFact` → `invalidate` + `add_triple` pair on promotion
+  - `OpenQuestion` → flagged for human review; never auto-promoted
+  - `ExtractionReport` — all facts from one source item plus the
+    `source` / `source_id` / `target_plane` / `employee_id` /
+    `extracted_at` metadata the promotion pipeline needs
+  - Every fact requires `support_quote` (non-empty) — "no quote, no
+    fact" is the extraction rule.
+- `src/memory_mission/extraction/ingest.py`:
+  - `ExtractionWriter` — per-plane, per-source writer for fact staging
+    at `<wiki_root>/staging/<plane_root>/.facts/<source>/<source_id>.json`
+  - `ingest_facts(report, wiki_root, mention_tracker=None)` — persists
+    report + records one mention per unique entity (not per fact) +
+    returns `IngestResult` with `TierCrossing` entries
+  - `TierCrossing.is_promotion` — `new_tier > previous_tier` in the
+    none → stub → enrich → full order. Review skill uses this to
+    decide what to surface for human attention.
+- `src/memory_mission/extraction/prompts.py` — `EXTRACTION_PROMPT`:
+  - Markdown template with all six fact-kind schemas
+  - Venture-firm worked example (partner meeting notes → facts JSON)
+  - Rules section: `support_quote` required, confidence honesty,
+    kebab-case entity names, stable snake_case predicates,
+    open-question fallback on uncertainty
+- `skills/extract-from-staging/SKILL.md` — orchestration workflow
+  for the host agent. Reads source staging, runs host LLM with the
+  prompt, validates output, calls `ingest_facts`. Forcing questions
+  surface entity-match ambiguity, low-confidence facts, tier crossings,
+  validation failures — never guesses.
+- `tests/test_extraction.py` — 33 tests
+
+**Files updated:**
+- `skills/_index.md` — new skill entry
+- `skills/_manifest.jsonl` — new skill entry
+
+**Key invariants enforced by tests:**
+- Every fact has `confidence ∈ [0, 1]`, non-empty `support_quote`,
+  frozen model, `extra="forbid"`
+- Discriminated union parses all six kinds by `kind` field; unknown
+  kind rejected
+- Firm-plane reports allow `employee_id=None`; personal reports
+  require it
+- `ExtractionReport.entity_names()` dedupes across facts — same
+  entity in 5 facts counts as one mention per ingest call
+- `OpenQuestion` contributes no entity names (no promotion signal)
+- `ExtractionWriter` validates source / target_plane / employee_id
+  match the report being written (catches the "wrong writer for this
+  report" mistake)
+- Atomic writes via temp file + rename
+- `ingest_facts` with no tracker → zero crossings; with tracker →
+  one crossing per unique entity, `is_promotion` reflects the tier
+  jump
+- Third mention of an entity crosses stub → enrich (`is_promotion`
+  True); second mention stays at stub (False)
+- `EXTRACTION_PROMPT` contains all six kind names, the "No quote, no
+  fact" rule, and venture-firm example (`Series B`, `post-money`)
+
+**Verification:**
+- [x] `pytest` — 401/401 passed (33 new + 368 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 48 files
+- [x] Registry-integrity tests still green with the new skill
+- [x] No `import anthropic` / `import openai` / `import google` — the
+  host agent owns the LLM call
+
+**Deferred:**
+- Promotion from staged reports into curated pages (Step 10 —
+  `Proposal` + `promote` / `reject` / `reopen`)
+- Retrieval paths (workflow agents consume firm + personal pages;
+  Step 13+)
+- Live LLM integration — the host agent brings that
+
+**Next:** Step 10 — Promotion Pipeline. `Proposal` Pydantic model
+(bundles `Claim` / `Update` entries from an `ExtractionReport`),
+`ProposalStore` (per-firm SQLite), `promote()` / `reject()` /
+`reopen()` with rationale required. `skills/review-proposals/SKILL.md`
+surfaces thresholded proposals via forcing questions; human approves
+in chat; skill calls `promote()` → writes to firm plane with full
+provenance + `PromotionEvent`. This is V1's centerpiece.
+
+---
