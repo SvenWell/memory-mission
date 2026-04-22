@@ -84,3 +84,21 @@ Constraints: rationale required on every decision (rubber-stamping
 structurally blocked), one proposal at a time (no batch approval),
 honor the permissions policy (skip proposals the reviewer can't
 decide), stop on error during promote (don't cascade failures).
+
+## detect-firm-candidates
+
+Federated cross-employee pattern detector: scan the firm's
+`KnowledgeGraph` for personal-plane triples that appear across
+N≥3 employees via N≥3 distinct source documents, and stage a
+pending firm-plane `Proposal` for each qualifying pattern. The
+`review-proposals` skill then surfaces each proposal to a human
+reviewer. Independence enforced by distinct-source-file threshold
+— three employees sharing one Granola transcript does NOT fire.
+
+Triggers: "detect firm candidates", "find cross-employee patterns",
+"federated detection", "what do employees agree on",
+"scan for firm truth"
+
+Constraints: administrator-run only, no direct KG writes (proposals
+only), no auto-promotion, independence check must pass, stop on
+error (don't cascade).

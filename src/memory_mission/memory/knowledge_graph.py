@@ -584,6 +584,55 @@ class KnowledgeGraph:
             )
         return warnings
 
+    def scan_triple_sources(
+        self,
+        *,
+        closet_prefix: str | None = None,
+        currently_true_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Cross-triple scan joining ``triples`` and ``triple_sources``.
+
+        Used by the federated detector (Step 16) to aggregate evidence
+        across employees' personal planes: pass
+        ``closet_prefix="personal/"`` to see only personal-plane
+        provenance rows. Each returned dict carries the fields a
+        downstream clustering step needs — ``subject``, ``predicate``,
+        ``object``, ``tier``, ``confidence``, ``corroboration_count``,
+        ``source_closet``, ``source_file``, ``triple_id``.
+
+        Keep this as a list-of-dicts (not Pydantic) so detectors can
+        group with cheap dict ops. One row per ``triple_sources`` entry
+        — a triple with three corroborations produces three rows.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if currently_true_only:
+            clauses.append("t.valid_to IS NULL")
+        if closet_prefix is not None:
+            clauses.append("ts.source_closet LIKE ?")
+            params.append(f"{closet_prefix}%")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"""
+            SELECT
+                t.id AS triple_id,
+                t.subject AS subject,
+                t.predicate AS predicate,
+                t.object AS object,
+                t.tier AS tier,
+                t.confidence AS confidence,
+                t.corroboration_count AS corroboration_count,
+                ts.source_closet AS source_closet,
+                ts.source_file AS source_file
+            FROM triples t
+            JOIN triple_sources ts ON ts.triple_id = t.id
+            {where}
+            ORDER BY t.id ASC, ts.id ASC
+            """,  # noqa: S608
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def triple_sources(
         self,
         subject: str,

@@ -1704,3 +1704,136 @@ detector-generated proposal, so cross-plane aggregation cannot
 silently overwrite firm doctrine.
 
 ---
+
+## Step 16 — Federated cross-employee pattern detector
+
+**Goal.** When N employees independently arrive at the same fact,
+it is high-signal evidence the fact belongs to the firm, not just
+to each individual. Close the federated loop by detecting these
+patterns across personal planes and feeding them through the same
+PR-model review that governs every other firm-plane write.
+
+**The dominant failure mode** (per `docs/EVALS.md` 2.6): firing
+on three employees ingesting THE SAME Granola transcript. The
+detector defends with an independence check — N distinct
+`source_file` values required, not just N distinct employees.
+
+**Files added:**
+- `src/memory_mission/federated/__init__.py` — package exports.
+- `src/memory_mission/federated/detector.py` — core logic:
+  - `CandidateSource` Pydantic record (source_closet, source_file,
+    triple_id, confidence).
+  - `FirmCandidate` Pydantic record (subject, predicate, object,
+    tier, distinct_employees, distinct_source_files,
+    contributing_sources, confidence). `to_relationship_fact()`
+    helper that builds a reviewer-readable `RelationshipFact` with
+    a structured support_quote.
+  - `detect_firm_candidates(kg, *, min_employees=3, min_sources=3)`
+    — deterministic SQL-backed scan. Filters by
+    `source_closet LIKE 'personal/%'`, groups by triple, thresholds
+    on BOTH distinct employees AND distinct source files. Result is
+    sorted `(-distinct_employees, -confidence, subject, predicate,
+    object)` so reviewers see strongest signals first.
+  - `propose_firm_candidate(candidate, *, store, ...)` — turns a
+    candidate into a pending `Proposal` via the normal
+    `create_proposal` path. Idempotent (deterministic proposal_id
+    means re-running the scan is a no-op on previously-staged
+    candidates). Source path is `federated-detector://` so the
+    origin is visible in the audit log.
+  - `aggregate_noisy_or(confidences)` utility — matches the KG's
+    `CORROBORATION_CAP` (0.99) semantics; exposed for tests and
+    future callers but NOT used inside the detector (the triple's
+    current confidence already reflects corroboration).
+- `skills/detect-firm-candidates/SKILL.md` — admin-only workflow
+  skill with forcing questions for threshold changes, identity
+  confidence, already-firm fact, and high rejection churn.
+- `tests/test_federated.py` — 21 new tests covering the eval
+  doc's scenario categories: true firm pattern fires,
+  shared-single-source does NOT fire, below-threshold does NOT
+  fire, distinct groups ranked independently, firm-plane triples
+  excluded, invalidated triples excluded, end-to-end
+  detect→propose→promote path corroborates with firm source, and
+  constitutional-mode blocks contradictions.
+
+**Files modified:**
+- `src/memory_mission/memory/knowledge_graph.py` — new
+  `scan_triple_sources(*, closet_prefix, currently_true_only)`
+  method that joins `triples` with `triple_sources` and returns
+  plain dicts. Kept as list-of-dicts (not Pydantic) so detectors
+  can group with cheap dict ops.
+- `skills/_index.md` and `skills/_manifest.jsonl` — registry entry
+  for the new skill.
+
+**Verification:**
+- [x] `pytest` — 591/591 passed (21 new in `test_federated.py`)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 63 source files
+- [x] Three employees on one `source_file` → detector returns
+      empty list (independence check holds)
+- [x] Three employees on three source_files → candidate fires
+      with correct distinct counts
+- [x] Two employees → no fire regardless of source count
+- [x] Multiple groups in one scan → each independently evaluated;
+      candidates ranked by distinct_employees desc, confidence
+      desc
+- [x] `propose_firm_candidate` is idempotent — re-running returns
+      the same pending proposal instead of duplicating
+- [x] End-to-end detect→propose→promote path corroborates the
+      existing personal-plane triple with `source_closet='firm'`,
+      bumping confidence (no duplicate triple row)
+- [x] Constitutional-mode firm: federated proposal conflicting
+      with existing firm doctrine raises `CoherenceBlockedError`,
+      proposal stays pending
+
+**Architectural significance.**
+
+- **The federated learning loop is now concrete in code.** Three
+  employees independently assert a fact via three different source
+  documents → detector surfaces a candidate → admin proposes →
+  reviewer approves → firm-plane corroboration with full
+  provenance. No employee's agent unilaterally speaks for the firm.
+- **Step 14 + 15 compose cleanly.** Identity resolution
+  canonicalizes the entity names the detector groups by (so
+  `alice-smith` and `a-smith` collapse before thresholding). The
+  coherence check on the generated proposal means
+  cross-employee aggregation cannot silently overwrite firm
+  doctrine in constitutional-mode firms.
+- **Deterministic grader per `docs/EVALS.md` P7.** The detector is
+  pure SQL + Python set ops. The tests double as the seed corpus
+  for the section-2.6 eval recipe; adding more scenarios is a
+  copy-paste of a test function.
+- **Admin-boundary respected.** The skill declares `administrator-
+  run only` in its frontmatter; the module itself is a pure
+  library. Permission enforcement is host-agent responsibility.
+
+**Deferred (intentionally):**
+- **Threshold auto-tuning.** Per eval doc: monitor the precision
+  of approved-vs-total federated proposals; if it drops, raise
+  the threshold. Ship once we have real rejection signals.
+- **Tier inference beyond max.** The detector uses the highest
+  tier seen across contributing personal-plane triples. A future
+  refinement could weight by recency or confidence delta.
+- **50-scenario eval harness.** Test fixtures today cover the
+  key categories. The full 50-case eval per section 2.6
+  recipe lands as a follow-up, ideally against real anonymized
+  production-like data.
+- **Cross-firm patterns.** Detector is strictly per-firm. Firm-
+  of-firms aggregation (e.g., "all our portfolio companies
+  believe X") is out of V1 scope.
+
+**Pairs with Step 17 (meeting-prep).** Once cross-employee
+patterns are corroborated to firm plane, meeting-prep's
+`compile_agent_context` can pull authoritative firm doctrine +
+corroborated decisions for any attendee, using the stable
+person IDs identity resolution produced.
+
+**Next:** Step 17 — Meeting-prep workflow agent. Closes the V1
+synthesis loop. `compile_agent_context(role="meeting-prep",
+task=<client>)` builds a distilled doctrine package: constitution
++ relevant doctrine + relevant policy + matched decisions, scoped
+to the attendees via stable person IDs. Skill wraps it. This is
+the first workflow-level consumer of the whole stack — extraction
+→ promotion → corroboration → identity → tier → federated
+detection all contribute to what the brief says.
+
+---
