@@ -240,19 +240,45 @@ def test_validate_domain_raises_for_unknown() -> None:
         validate_domain("foobar")
 
 
-def test_page_path_is_posix_and_under_domain() -> None:
-    p = page_path("companies", "acme-corp")
-    assert str(p) == "companies/acme-corp.md"
+def test_page_path_firm_plane() -> None:
+    p = page_path("firm", "companies", "acme-corp")
+    assert str(p) == "firm/companies/acme-corp.md"
 
 
-def test_raw_sidecar_path_lives_in_dot_raw() -> None:
-    p = raw_sidecar_path("people", "sarah-chen")
-    assert str(p) == "people/.raw/sarah-chen.json"
+def test_page_path_personal_plane() -> None:
+    p = page_path("personal", "people", "sarah-chen", employee_id="sarah")
+    assert str(p) == "personal/sarah/people/sarah-chen.md"
+
+
+def test_page_path_personal_requires_employee_id() -> None:
+    with pytest.raises(ValueError, match="personal plane requires employee_id"):
+        page_path("personal", "people", "sarah-chen")
+
+
+def test_page_path_firm_rejects_employee_id() -> None:
+    with pytest.raises(ValueError, match="firm plane must not carry"):
+        page_path("firm", "people", "sarah-chen", employee_id="sarah")
+
+
+def test_raw_sidecar_path_firm_plane() -> None:
+    p = raw_sidecar_path("firm", "people", "sarah-chen")
+    assert str(p) == "firm/people/.raw/sarah-chen.json"
+
+
+def test_raw_sidecar_path_personal_plane() -> None:
+    p = raw_sidecar_path("personal", "people", "sarah-chen", employee_id="sarah")
+    assert str(p) == "personal/sarah/people/.raw/sarah-chen.json"
 
 
 def test_page_path_rejects_unknown_domain() -> None:
     with pytest.raises(ValueError, match="Unknown domain"):
-        page_path("not-a-domain", "x")
+        page_path("firm", "not-a-domain", "x")
+
+
+def test_page_path_rejects_bad_employee_id() -> None:
+    for bad in ["", "../escape", "with space", "/abs"]:
+        with pytest.raises(ValueError):
+            page_path("personal", "people", "x", employee_id=bad)
 
 
 # ---------- InMemoryEngine ----------
@@ -273,16 +299,18 @@ def test_in_memory_satisfies_brain_engine_protocol() -> None:
     assert isinstance(InMemoryEngine(), BrainEngine)
 
 
-def test_put_and_get_page() -> None:
+# ---------- Firm plane CRUD ----------
+
+
+def test_put_and_get_page_firm_plane() -> None:
     engine = InMemoryEngine()
     page = _sample_page()
-    engine.put_page(page)
-    assert engine.get_page("sarah-chen") == page
+    engine.put_page(page, plane="firm")
+    assert engine.get_page("sarah-chen", plane="firm") == page
 
 
 def test_get_page_missing_returns_none() -> None:
-    engine = InMemoryEngine()
-    assert engine.get_page("nobody") is None
+    assert InMemoryEngine().get_page("nobody", plane="firm") is None
 
 
 def test_put_page_rejects_unknown_domain() -> None:
@@ -291,33 +319,122 @@ def test_put_page_rejects_unknown_domain() -> None:
         frontmatter=PageFrontmatter(slug="x", title="X", domain="invalid"),
     )
     with pytest.raises(ValueError, match="Unknown domain"):
-        engine.put_page(bad)
+        engine.put_page(bad, plane="firm")
 
 
 def test_delete_page_idempotent() -> None:
     engine = InMemoryEngine()
-    engine.put_page(_sample_page())
-    engine.delete_page("sarah-chen")
-    engine.delete_page("sarah-chen")  # second call must not raise
-    assert engine.get_page("sarah-chen") is None
+    engine.put_page(_sample_page(), plane="firm")
+    engine.delete_page("sarah-chen", plane="firm")
+    engine.delete_page("sarah-chen", plane="firm")  # second call must not raise
+    assert engine.get_page("sarah-chen", plane="firm") is None
+
+
+# ---------- Personal plane CRUD + isolation ----------
+
+
+def test_personal_plane_requires_employee_id_on_put() -> None:
+    engine = InMemoryEngine()
+    with pytest.raises(ValueError, match="personal plane requires employee_id"):
+        engine.put_page(_sample_page(), plane="personal")
+
+
+def test_firm_plane_rejects_employee_id_on_put() -> None:
+    engine = InMemoryEngine()
+    with pytest.raises(ValueError, match="firm plane must not carry"):
+        engine.put_page(_sample_page(), plane="firm", employee_id="sarah")
+
+
+def test_personal_pages_are_isolated_across_employees() -> None:
+    """Same slug in different employees' personal planes stays separate."""
+    engine = InMemoryEngine()
+    alice_note = _sample_page("note-1", "concepts", "Alice's private note")
+    bob_note = _sample_page("note-1", "concepts", "Bob's private note")
+    engine.put_page(alice_note, plane="personal", employee_id="alice")
+    engine.put_page(bob_note, plane="personal", employee_id="bob")
+
+    fetched_a = engine.get_page("note-1", plane="personal", employee_id="alice")
+    fetched_b = engine.get_page("note-1", plane="personal", employee_id="bob")
+    assert fetched_a is not None and "Alice" in fetched_a.compiled_truth
+    assert fetched_b is not None and "Bob" in fetched_b.compiled_truth
+
+
+def test_same_slug_coexists_across_planes() -> None:
+    """Firm, Alice-personal, Bob-personal can all hold slug='acme' simultaneously."""
+    engine = InMemoryEngine()
+    engine.put_page(_sample_page("acme", "companies", "Firm canonical page"), plane="firm")
+    engine.put_page(
+        _sample_page("acme", "companies", "Alice's notes"),
+        plane="personal",
+        employee_id="alice",
+    )
+    engine.put_page(
+        _sample_page("acme", "companies", "Bob's notes"),
+        plane="personal",
+        employee_id="bob",
+    )
+
+    firm = engine.get_page("acme", plane="firm")
+    alice = engine.get_page("acme", plane="personal", employee_id="alice")
+    bob = engine.get_page("acme", plane="personal", employee_id="bob")
+    assert firm is not None and "canonical" in firm.compiled_truth
+    assert alice is not None and "Alice" in alice.compiled_truth
+    assert bob is not None and "Bob" in bob.compiled_truth
+
+
+def test_delete_on_one_plane_doesnt_affect_other() -> None:
+    engine = InMemoryEngine()
+    engine.put_page(_sample_page("x"), plane="firm")
+    engine.put_page(_sample_page("x"), plane="personal", employee_id="alice")
+    engine.delete_page("x", plane="firm")
+    assert engine.get_page("x", plane="firm") is None
+    assert engine.get_page("x", plane="personal", employee_id="alice") is not None
+
+
+# ---------- List pages ----------
+
+
+def test_list_pages_filters_by_plane() -> None:
+    engine = InMemoryEngine()
+    engine.put_page(_sample_page("a"), plane="firm")
+    engine.put_page(_sample_page("b"), plane="personal", employee_id="alice")
+    engine.put_page(_sample_page("c"), plane="personal", employee_id="bob")
+
+    firm_slugs = {p.slug for p in engine.list_pages(plane="firm")}
+    assert firm_slugs == {"a"}
+
+    alice_slugs = {p.slug for p in engine.list_pages(plane="personal", employee_id="alice")}
+    assert alice_slugs == {"b"}
 
 
 def test_list_pages_filters_by_domain() -> None:
     engine = InMemoryEngine()
-    engine.put_page(_sample_page("sarah-chen", "people"))
-    engine.put_page(_sample_page("acme-corp", "companies"))
-    engine.put_page(_sample_page("bob", "people"))
-    assert {p.slug for p in engine.list_pages("people")} == {"sarah-chen", "bob"}
-    assert {p.slug for p in engine.list_pages()} == {
-        "sarah-chen",
-        "acme-corp",
-        "bob",
-    }
+    engine.put_page(_sample_page("sarah-chen", "people"), plane="firm")
+    engine.put_page(_sample_page("acme-corp", "companies"), plane="firm")
+    engine.put_page(_sample_page("bob", "people"), plane="firm")
+    all_slugs = {p.slug for p in engine.list_pages()}
+    assert all_slugs == {"sarah-chen", "acme-corp", "bob"}
+    people_slugs = {p.slug for p in engine.list_pages(domain="people")}
+    assert people_slugs == {"sarah-chen", "bob"}
+
+
+def test_list_pages_combines_plane_and_domain_filters() -> None:
+    engine = InMemoryEngine()
+    engine.put_page(_sample_page("sarah-chen", "people"), plane="firm")
+    engine.put_page(_sample_page("bob", "people"), plane="personal", employee_id="alice")
+    engine.put_page(_sample_page("acme-corp", "companies"), plane="firm")
+    result = engine.list_pages(plane="firm", domain="people")
+    assert {p.slug for p in result} == {"sarah-chen"}
 
 
 def test_list_pages_unknown_domain_raises() -> None:
     with pytest.raises(ValueError, match="Unknown domain"):
-        InMemoryEngine().list_pages("invalid")
+        InMemoryEngine().list_pages(domain="invalid")
+
+
+def test_list_pages_employee_id_without_plane_raises() -> None:
+    with pytest.raises(ValueError, match="only meaningful when plane"):
+        InMemoryEngine().list_pages(employee_id="alice")
 
 
 # ---------- Engine search ----------
@@ -325,8 +442,8 @@ def test_list_pages_unknown_domain_raises() -> None:
 
 def test_search_matches_title_and_compiled_truth(tmp_path: Path) -> None:
     engine = InMemoryEngine()
-    engine.put_page(_sample_page("sarah-chen", "people", "Leads revenue strategy"))
-    engine.put_page(_sample_page("acme-corp", "companies", "Struggling revenue"))
+    engine.put_page(_sample_page("sarah-chen", "people", "Leads revenue strategy"), plane="firm")
+    engine.put_page(_sample_page("acme-corp", "companies", "Struggling revenue"), plane="firm")
 
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         hits = engine.search("revenue")
@@ -334,16 +451,55 @@ def test_search_matches_title_and_compiled_truth(tmp_path: Path) -> None:
     assert {h.slug for h in hits} == {"sarah-chen", "acme-corp"}
 
 
+def test_search_scope_filter_isolates_planes(tmp_path: Path) -> None:
+    """Searching plane='firm' must not surface personal pages, and vice versa."""
+    engine = InMemoryEngine()
+    engine.put_page(_sample_page("firm-page", "concepts", "shared keyword"), plane="firm")
+    engine.put_page(
+        _sample_page("alice-page", "concepts", "shared keyword"),
+        plane="personal",
+        employee_id="alice",
+    )
+
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        firm_hits = engine.search("keyword", plane="firm")
+        alice_hits = engine.search("keyword", plane="personal", employee_id="alice")
+        global_hits = engine.search("keyword")
+
+    assert {h.slug for h in firm_hits} == {"firm-page"}
+    assert {h.slug for h in alice_hits} == {"alice-page"}
+    assert {h.slug for h in global_hits} == {"firm-page", "alice-page"}
+
+
+def test_search_personal_scope_isolates_across_employees(tmp_path: Path) -> None:
+    engine = InMemoryEngine()
+    engine.put_page(
+        _sample_page("p1", "concepts", "secret keyword"),
+        plane="personal",
+        employee_id="alice",
+    )
+    engine.put_page(
+        _sample_page("p2", "concepts", "secret keyword"),
+        plane="personal",
+        employee_id="bob",
+    )
+
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        alice_only = engine.search("keyword", plane="personal", employee_id="alice")
+
+    assert {h.slug for h in alice_only} == {"p1"}
+
+
 def test_search_empty_query_returns_no_hits(tmp_path: Path) -> None:
     engine = InMemoryEngine()
-    engine.put_page(_sample_page())
+    engine.put_page(_sample_page(), plane="firm")
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         assert engine.search("   ") == []
 
 
 def test_search_logs_retrieval_event(tmp_path: Path) -> None:
     engine = InMemoryEngine()
-    engine.put_page(_sample_page("sarah-chen", "people", "CEO of Acme"))
+    engine.put_page(_sample_page("sarah-chen", "people", "CEO of Acme"), plane="firm")
 
     with observability_scope(observability_root=tmp_path, firm_id="acme", employee_id="sarah"):
         engine.search("Acme", tier="navigate")
@@ -360,7 +516,10 @@ def test_search_logs_retrieval_event(tmp_path: Path) -> None:
 def test_search_limit_respected(tmp_path: Path) -> None:
     engine = InMemoryEngine()
     for i in range(5):
-        engine.put_page(_sample_page(f"page-{i}", "concepts", "shared keyword here"))
+        engine.put_page(
+            _sample_page(f"page-{i}", "concepts", "shared keyword here"),
+            plane="firm",
+        )
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         hits = engine.search("keyword", limit=2)
     assert len(hits) == 2
@@ -368,23 +527,37 @@ def test_search_limit_respected(tmp_path: Path) -> None:
 
 def test_search_ranks_truth_matches_above_title_matches(tmp_path: Path) -> None:
     engine = InMemoryEngine()
-    # Title-only match (no truth match).
     engine.put_page(
         Page(
             frontmatter=PageFrontmatter(slug="foo-page", title="Revenue Notes", domain="concepts"),
             compiled_truth="unrelated body",
-        )
+        ),
+        plane="firm",
     )
-    # Truth match (no title match).
     engine.put_page(
         Page(
             frontmatter=PageFrontmatter(slug="bar-page", title="Topic", domain="concepts"),
             compiled_truth="revenue revenue revenue",
-        )
+        ),
+        plane="firm",
     )
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         hits = engine.search("revenue")
     assert hits[0].slug == "bar-page"
+
+
+def test_search_hit_carries_plane_and_employee_id(tmp_path: Path) -> None:
+    engine = InMemoryEngine()
+    engine.put_page(
+        _sample_page("p", "concepts", "hello world"),
+        plane="personal",
+        employee_id="alice",
+    )
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        hits = engine.search("hello")
+    assert len(hits) == 1
+    assert hits[0].plane == "personal"
+    assert hits[0].employee_id == "alice"
 
 
 # ---------- Graph ----------
@@ -397,23 +570,46 @@ def test_links_from_returns_wikilinks_of_page() -> None:
             "sarah-chen",
             "people",
             "CEO of [[acme-corp]] and board member at [[beta-fund]].",
-        )
+        ),
+        plane="firm",
     )
-    assert sorted(engine.links_from("sarah-chen")) == ["acme-corp", "beta-fund"]
+    assert sorted(engine.links_from("sarah-chen", plane="firm")) == [
+        "acme-corp",
+        "beta-fund",
+    ]
 
 
 def test_links_from_missing_page_returns_empty() -> None:
-    assert InMemoryEngine().links_from("nobody") == []
+    assert InMemoryEngine().links_from("nobody", plane="firm") == []
 
 
-def test_links_to_finds_incoming_links() -> None:
+def test_links_to_finds_incoming_links_within_same_scope() -> None:
     engine = InMemoryEngine()
-    engine.put_page(_sample_page("sarah-chen", "people", "Runs [[acme-corp]] product org."))
-    engine.put_page(_sample_page("acme-corp", "companies"))
-    engine.put_page(_sample_page("bob", "people", "Friends with [[sarah-chen]]."))
-    assert engine.links_to("sarah-chen") == ["bob"]
-    assert engine.links_to("acme-corp") == ["sarah-chen"]
-    assert engine.links_to("nobody") == []
+    engine.put_page(
+        _sample_page("sarah-chen", "people", "Runs [[acme-corp]] product org."),
+        plane="firm",
+    )
+    engine.put_page(_sample_page("acme-corp", "companies"), plane="firm")
+    engine.put_page(
+        _sample_page("bob", "people", "Friends with [[sarah-chen]]."),
+        plane="firm",
+    )
+    assert engine.links_to("sarah-chen", plane="firm") == ["bob"]
+    assert engine.links_to("acme-corp", plane="firm") == ["sarah-chen"]
+    assert engine.links_to("nobody", plane="firm") == []
+
+
+def test_links_to_does_not_cross_planes() -> None:
+    """A personal-plane wikilink must not surface as an incoming link on the firm plane."""
+    engine = InMemoryEngine()
+    engine.put_page(_sample_page("acme-corp", "companies"), plane="firm")
+    engine.put_page(
+        _sample_page("alice-private", "concepts", "Refers to [[acme-corp]]."),
+        plane="personal",
+        employee_id="alice",
+    )
+    assert engine.links_to("acme-corp", plane="firm") == []
+    assert engine.links_to("acme-corp", plane="personal", employee_id="alice") == ["alice-private"]
 
 
 # ---------- Lifecycle + stats ----------
@@ -428,11 +624,12 @@ def test_connect_disconnect_toggles_state() -> None:
     assert engine.stats().connected is False
 
 
-def test_stats_counts_pages_by_domain() -> None:
+def test_stats_counts_pages_by_plane_and_domain() -> None:
     engine = InMemoryEngine()
-    engine.put_page(_sample_page("a", "people"))
-    engine.put_page(_sample_page("b", "people"))
-    engine.put_page(_sample_page("c", "companies"))
+    engine.put_page(_sample_page("a", "people"), plane="firm")
+    engine.put_page(_sample_page("b", "people"), plane="firm")
+    engine.put_page(_sample_page("c", "companies"), plane="personal", employee_id="alice")
     stats = engine.stats()
     assert stats.page_count == 3
     assert stats.pages_by_domain == {"people": 2, "companies": 1}
+    assert stats.pages_by_plane == {"firm": 2, "personal": 1}

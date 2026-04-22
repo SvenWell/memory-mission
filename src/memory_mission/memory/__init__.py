@@ -21,6 +21,7 @@ from memory_mission.memory.engine import (
     BrainEngine,
     EngineStats,
     InMemoryEngine,
+    PageKey,
     SearchHit,
     SearchTier,
 )
@@ -48,10 +49,14 @@ from memory_mission.memory.salience import (
 )
 from memory_mission.memory.schema import (
     CORE_DOMAINS,
+    Plane,
     is_valid_domain,
     page_path,
+    plane_root,
     raw_sidecar_path,
+    staging_source_dir,
     validate_domain,
+    validate_employee_id,
 )
 from memory_mission.memory.search import (
     COMPILED_TRUTH_BOOST,
@@ -85,6 +90,8 @@ __all__ = [
     "KnowledgeGraph",
     "Page",
     "PageFrontmatter",
+    "PageKey",
+    "Plane",
     "SearchHit",
     "SearchTier",
     "TimelineEntry",
@@ -95,10 +102,13 @@ __all__ = [
     "new_page",
     "page_path",
     "parse_page",
+    "plane_root",
     "raw_sidecar_path",
     "render_page",
     "rrf_fuse",
     "salience_score",
+    "staging_source_dir",
     "validate_domain",
+    "validate_employee_id",
     "word_set",
 ]

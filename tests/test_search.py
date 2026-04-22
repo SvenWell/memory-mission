@@ -145,8 +145,11 @@ def _page(slug: str, title: str, truth: str) -> Page:
 
 def test_query_without_embedder_falls_back_to_keyword(tmp_path: Path) -> None:
     engine = InMemoryEngine()  # no embedder
-    engine.put_page(_page("p1", "Revenue Notes", "Discusses revenue targets for Q3"))
-    engine.put_page(_page("p2", "Unrelated", "Nothing relevant here"))
+    engine.put_page(
+        _page("p1", "Revenue Notes", "Discusses revenue targets for Q3"),
+        plane="firm",
+    )
+    engine.put_page(_page("p2", "Unrelated", "Nothing relevant here"), plane="firm")
 
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         hits = engine.query("revenue")
@@ -156,7 +159,7 @@ def test_query_without_embedder_falls_back_to_keyword(tmp_path: Path) -> None:
 
 def test_query_returns_empty_for_blank_question(tmp_path: Path) -> None:
     engine = InMemoryEngine()
-    engine.put_page(_page("p", "t", "body"))
+    engine.put_page(_page("p", "t", "body"), plane="firm")
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         assert engine.query("   ") == []
 
@@ -165,7 +168,7 @@ def test_query_logs_retrieval_event_with_cascade_tier_by_default(
     tmp_path: Path,
 ) -> None:
     engine = InMemoryEngine()
-    engine.put_page(_page("p", "title", "body mentioning widget"))
+    engine.put_page(_page("p", "title", "body mentioning widget"), plane="firm")
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         engine.query("widget")
 
@@ -187,14 +190,16 @@ def test_query_applies_compiled_truth_boost(tmp_path: Path) -> None:
         Page(
             frontmatter=PageFrontmatter(slug="title-only", title="Widget Notes", domain="concepts"),
             compiled_truth="unrelated body",
-        )
+        ),
+        plane="firm",
     )
     # Truth match only
     engine.put_page(
         Page(
             frontmatter=PageFrontmatter(slug="truth-only", title="Topic", domain="concepts"),
             compiled_truth="This is about widget internals.",
-        )
+        ),
+        plane="firm",
     )
 
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
@@ -213,13 +218,15 @@ def test_query_truth_boost_is_exactly_compiled_truth_boost_factor(
         Page(
             frontmatter=PageFrontmatter(slug="title-only", title="Widget Notes", domain="concepts"),
             compiled_truth="unrelated body",
-        )
+        ),
+        plane="firm",
     )
     engine.put_page(
         Page(
             frontmatter=PageFrontmatter(slug="truth-only", title="Topic", domain="concepts"),
             compiled_truth="widget appears here",
-        )
+        ),
+        plane="firm",
     )
 
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
@@ -237,20 +244,24 @@ def test_query_truth_boost_is_exactly_compiled_truth_boost_factor(
 
 def test_put_page_embeds_when_embedder_attached() -> None:
     engine = InMemoryEngine(embedder=HashEmbedder(dimension=16))
-    engine.put_page(_page("p1", "t1", "body one"))
-    engine.put_page(_page("p2", "t2", "body two"))
+    engine.put_page(_page("p1", "t1", "body one"), plane="firm")
+    engine.put_page(_page("p2", "t2", "body two"), plane="firm")
     # Embeddings are stored (we can't peek at private state, but query
     # returns vector hits, which proves the side effect).
     # Delete one and verify it drops out.
-    engine.delete_page("p1")
-    assert engine.get_page("p1") is None
+    engine.delete_page("p1", plane="firm")
+    assert engine.get_page("p1", plane="firm") is None
 
 
 def test_query_uses_vector_pass_when_embedder_attached(tmp_path: Path) -> None:
     """A page with no keyword match still surfaces via vector similarity."""
     engine = InMemoryEngine(embedder=HashEmbedder(dimension=64))
-    engine.put_page(_page("doc-a", "Alpha", "apple banana cherry"))  # shares tokens with query
-    engine.put_page(_page("doc-b", "Beta", "zucchini xylophone yak"))  # shares nothing
+    engine.put_page(
+        _page("doc-a", "Alpha", "apple banana cherry"), plane="firm"
+    )  # shares tokens with query
+    engine.put_page(
+        _page("doc-b", "Beta", "zucchini xylophone yak"), plane="firm"
+    )  # shares nothing
 
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         hits = engine.query("apple banana")
@@ -271,7 +282,7 @@ def test_query_blends_rrf_and_cosine_when_vector_available(
     engine = InMemoryEngine(embedder=embedder)
     title = "Title"
     truth = "only body words here exactly"
-    engine.put_page(_page("p", title, truth))
+    engine.put_page(_page("p", title, truth), plane="firm")
 
     question = "only body words here exactly"
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
@@ -291,7 +302,7 @@ def test_query_blends_rrf_and_cosine_when_vector_available(
 def test_query_without_embedder_skips_cosine_blend(tmp_path: Path) -> None:
     """With no embedder, final score is pure RRF (no cosine term)."""
     engine = InMemoryEngine()
-    engine.put_page(_page("p", "Widget", "Widget content here"))
+    engine.put_page(_page("p", "Widget", "Widget content here"), plane="firm")
 
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         hits = engine.query("widget")
@@ -303,9 +314,9 @@ def test_query_without_embedder_skips_cosine_blend(tmp_path: Path) -> None:
 
 def test_delete_page_also_drops_embedding(tmp_path: Path) -> None:
     engine = InMemoryEngine(embedder=HashEmbedder(dimension=16))
-    engine.put_page(_page("p1", "t1", "apple"))
-    engine.put_page(_page("p2", "t2", "banana"))
-    engine.delete_page("p1")
+    engine.put_page(_page("p1", "t1", "apple"), plane="firm")
+    engine.put_page(_page("p2", "t2", "banana"), plane="firm")
+    engine.delete_page("p1", plane="firm")
 
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         hits = engine.query("apple")
@@ -319,7 +330,7 @@ def test_delete_page_also_drops_embedding(tmp_path: Path) -> None:
 def test_query_limit_respected(tmp_path: Path) -> None:
     engine = InMemoryEngine(embedder=HashEmbedder(dimension=32))
     for i in range(10):
-        engine.put_page(_page(f"p-{i}", f"Title {i}", "shared keyword here"))
+        engine.put_page(_page(f"p-{i}", f"Title {i}", "shared keyword here"), plane="firm")
 
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         hits = engine.query("keyword", limit=3)
@@ -330,7 +341,7 @@ def test_query_limit_respected(tmp_path: Path) -> None:
 def test_query_result_contains_snippet(tmp_path: Path) -> None:
     engine = InMemoryEngine()
     long_truth = "x" * 200 + " widget here " + "y" * 200
-    engine.put_page(_page("p", "Title", long_truth))
+    engine.put_page(_page("p", "Title", long_truth), plane="firm")
 
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         hits = engine.query("widget")
@@ -342,15 +353,15 @@ def test_query_result_contains_snippet(tmp_path: Path) -> None:
 
 
 def test_search_hit_is_frozen() -> None:
-    hit = SearchHit(slug="p", score=1.0)
+    hit = SearchHit(slug="p", plane="firm", score=1.0)
     with pytest.raises(Exception):  # noqa: B017
         hit.score = 2.0  # type: ignore[misc]
 
 
 def test_engine_query_logs_pages_loaded(tmp_path: Path) -> None:
     engine = InMemoryEngine(embedder=HashEmbedder(dimension=32))
-    engine.put_page(_page("p1", "title one", "apple content"))
-    engine.put_page(_page("p2", "title two", "banana content"))
+    engine.put_page(_page("p1", "title one", "apple content"), plane="firm")
+    engine.put_page(_page("p2", "title two", "banana content"), plane="firm")
 
     with observability_scope(observability_root=tmp_path, firm_id="acme"):
         hits = engine.query("apple")

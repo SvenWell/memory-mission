@@ -7,11 +7,25 @@ early dogfood, and for Workflow agents to build against. Production backends
 (pgvector via Postgres, SQLite + sqlite-vec) plug in behind the same
 Protocol without touching callers.
 
+Pages live on one of two planes (Step 8 onwards):
+
+- ``personal/<employee_id>`` — private to one employee
+- ``firm`` — shared institutional truth (only via PR-model promotion)
+
+Every page op takes the plane (and employee_id for personal) so cross-plane
+leakage is impossible by construction. The same slug can coexist as a
+personal page for Alice, a personal page for Bob, AND a firm page; they're
+distinct pages with distinct histories.
+
 Three search modes:
 
 - ``search(query)`` — keyword only, fastest, no embeddings required
 - ``query(question)`` — hybrid (keyword + vector, RRF-fused, cosine-blended)
 - ``get_page(slug)`` — direct retrieval by known slug
+
+All retrieval methods accept an optional plane filter so workflow agents
+can say "search only the firm plane" (drafting an external-facing
+summary) or "search only my personal plane" (scratchpad).
 
 Every search / query call logs a ``RetrievalEvent`` to the active
 ``observability_scope`` so retrievals show up in the audit trail alongside
@@ -27,7 +41,11 @@ from typing import Literal, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field
 
 from memory_mission.memory.pages import Page
-from memory_mission.memory.schema import validate_domain
+from memory_mission.memory.schema import (
+    Plane,
+    validate_domain,
+    validate_employee_id,
+)
 from memory_mission.memory.search import (
     COMPILED_TRUTH_BOOST,
     RRF_K,
@@ -41,12 +59,27 @@ from memory_mission.observability.api import log_retrieval
 SearchTier = Literal["navigate", "cascade", "discover"]
 
 
+class PageKey(BaseModel):
+    """Composite key identifying a page's location in the two-plane model."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    plane: Plane
+    slug: str
+    employee_id: str | None = None
+
+    def __hash__(self) -> int:
+        return hash((self.plane, self.slug, self.employee_id))
+
+
 class SearchHit(BaseModel):
     """One match from a keyword or hybrid search."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     slug: str
+    plane: Plane
+    employee_id: str | None = None
     score: float
     snippet: str = ""
 
@@ -57,8 +90,21 @@ class EngineStats(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     page_count: int
+    pages_by_plane: dict[Plane, int] = Field(default_factory=dict)
     pages_by_domain: dict[str, int] = Field(default_factory=dict)
     connected: bool
+
+
+def _validate_plane_args(plane: Plane, employee_id: str | None) -> None:
+    if plane == "personal":
+        if not employee_id:
+            raise ValueError("personal plane requires employee_id")
+        validate_employee_id(employee_id)
+    elif plane == "firm":
+        if employee_id is not None:
+            raise ValueError("firm plane must not carry an employee_id")
+    else:
+        raise ValueError(f"unknown plane: {plane!r}")
 
 
 @runtime_checkable
@@ -71,20 +117,50 @@ class BrainEngine(Protocol):
     def disconnect(self) -> None:  # pragma: no cover
         ...
 
-    def get_page(self, slug: str) -> Page | None:  # pragma: no cover
+    def get_page(
+        self,
+        slug: str,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> Page | None:  # pragma: no cover
         ...
 
-    def put_page(self, page: Page) -> None:  # pragma: no cover
+    def put_page(
+        self,
+        page: Page,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> None:  # pragma: no cover
         ...
 
-    def delete_page(self, slug: str) -> None:  # pragma: no cover
+    def delete_page(
+        self,
+        slug: str,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> None:  # pragma: no cover
         ...
 
-    def list_pages(self, domain: str | None = None) -> list[Page]:  # pragma: no cover
+    def list_pages(
+        self,
+        *,
+        plane: Plane | None = None,
+        employee_id: str | None = None,
+        domain: str | None = None,
+    ) -> list[Page]:  # pragma: no cover
         ...
 
     def search(
-        self, query: str, *, limit: int = 10, tier: SearchTier = "discover"
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        tier: SearchTier = "discover",
+        plane: Plane | None = None,
+        employee_id: str | None = None,
     ) -> list[SearchHit]:  # pragma: no cover
         ...
 
@@ -94,13 +170,27 @@ class BrainEngine(Protocol):
         *,
         limit: int = 10,
         tier: SearchTier = "cascade",
+        plane: Plane | None = None,
+        employee_id: str | None = None,
     ) -> list[SearchHit]:  # pragma: no cover
         ...
 
-    def links_from(self, slug: str) -> list[str]:  # pragma: no cover
+    def links_from(
+        self,
+        slug: str,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> list[str]:  # pragma: no cover
         ...
 
-    def links_to(self, slug: str) -> list[str]:  # pragma: no cover
+    def links_to(
+        self,
+        slug: str,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> list[str]:  # pragma: no cover
         ...
 
     def stats(self) -> EngineStats:  # pragma: no cover
@@ -110,21 +200,20 @@ class BrainEngine(Protocol):
 class InMemoryEngine:
     """Dict-backed engine. Good for tests, early dogfood, small brains.
 
-    All state lives in a single process. Thread-safe for the simple read /
-    write patterns used in tests; NOT safe for multi-process use. Swap to a
-    DB-backed engine when you need concurrency or persistence.
+    State lives in a single process, keyed by ``PageKey(plane, slug,
+    employee_id)`` so the same slug can exist independently across
+    employees and the firm plane.
 
     Pass ``embedder`` to enable the vector pass in ``query()``. Pages are
     embedded eagerly on ``put_page`` using the title + compiled truth, and
     the embedding is stored alongside the page. When no embedder is
-    attached, ``query()`` falls back to keyword-only (equivalent to
-    ``search()``) with the same RRF + compiled-truth-boost shape so the
-    scoring path stays uniform.
+    attached, ``query()`` falls back to keyword-only via the same RRF +
+    compiled-truth-boost scaffolding.
     """
 
     def __init__(self, *, embedder: EmbeddingProvider | None = None) -> None:
-        self._pages: dict[str, Page] = {}
-        self._embeddings: dict[str, list[float]] = {}
+        self._pages: dict[PageKey, Page] = {}
+        self._embeddings: dict[PageKey, list[float]] = {}
         self._embedder = embedder
         self._connected = False
 
@@ -138,25 +227,66 @@ class InMemoryEngine:
 
     # ---------- Page CRUD ----------
 
-    def get_page(self, slug: str) -> Page | None:
-        return self._pages.get(slug)
+    def get_page(
+        self,
+        slug: str,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> Page | None:
+        _validate_plane_args(plane, employee_id)
+        return self._pages.get(PageKey(plane=plane, slug=slug, employee_id=employee_id))
 
-    def put_page(self, page: Page) -> None:
+    def put_page(
+        self,
+        page: Page,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> None:
+        _validate_plane_args(plane, employee_id)
         validate_domain(page.domain)
-        self._pages[page.slug] = page
+        key = PageKey(plane=plane, slug=page.slug, employee_id=employee_id)
+        self._pages[key] = page
         if self._embedder is not None:
             text = f"{page.frontmatter.title}\n{page.compiled_truth}"
-            self._embeddings[page.slug] = self._embedder.embed(text)
+            self._embeddings[key] = self._embedder.embed(text)
 
-    def delete_page(self, slug: str) -> None:
-        self._pages.pop(slug, None)
-        self._embeddings.pop(slug, None)
+    def delete_page(
+        self,
+        slug: str,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> None:
+        _validate_plane_args(plane, employee_id)
+        key = PageKey(plane=plane, slug=slug, employee_id=employee_id)
+        self._pages.pop(key, None)
+        self._embeddings.pop(key, None)
 
-    def list_pages(self, domain: str | None = None) -> list[Page]:
-        if domain is None:
-            return list(self._pages.values())
-        validate_domain(domain)
-        return [p for p in self._pages.values() if p.domain == domain]
+    def list_pages(
+        self,
+        *,
+        plane: Plane | None = None,
+        employee_id: str | None = None,
+        domain: str | None = None,
+    ) -> list[Page]:
+        if plane is not None:
+            _validate_plane_args(plane, employee_id)
+        elif employee_id is not None:
+            raise ValueError("employee_id only meaningful when plane is also given")
+        if domain is not None:
+            validate_domain(domain)
+        out: list[Page] = []
+        for key, page in self._pages.items():
+            if plane is not None and key.plane != plane:
+                continue
+            if plane == "personal" and key.employee_id != employee_id:
+                continue
+            if domain is not None and page.domain != domain:
+                continue
+            out.append(page)
+        return out
 
     # ---------- Search ----------
 
@@ -166,39 +296,37 @@ class InMemoryEngine:
         *,
         limit: int = 10,
         tier: SearchTier = "discover",
+        plane: Plane | None = None,
+        employee_id: str | None = None,
     ) -> list[SearchHit]:
         """Naive substring search over title + compiled_truth.
 
         Logs a ``RetrievalEvent`` with the query, tier, loaded pages, and
-        measured latency. A real hybrid search replaces this body in Step 6b;
-        the Protocol stays stable.
+        measured latency. An optional ``plane`` filter restricts the search
+        to one plane (with ``employee_id`` for personal).
         """
+        _validate_scope_filter(plane, employee_id)
         q = query.strip().lower()
         started = time.perf_counter()
         hits: list[SearchHit] = []
         if q:
-            for page in self._pages.values():
+            for key, page in self._pages.items():
+                if not _in_scope(key, plane, employee_id):
+                    continue
                 score = _keyword_score(page, q)
                 if score > 0:
                     hits.append(
                         SearchHit(
                             slug=page.slug,
+                            plane=key.plane,
+                            employee_id=key.employee_id,
                             score=score,
                             snippet=_snippet(page.compiled_truth, q),
                         )
                     )
         hits.sort(key=lambda h: h.score, reverse=True)
         top = hits[:limit]
-        latency_ms = int((time.perf_counter() - started) * 1000)
-        log_retrieval(
-            query=query,
-            tier=tier,
-            pages_loaded=[h.slug for h in top],
-            token_budget=0,
-            tokens_used=0,
-            latency_ms=latency_ms,
-        )
-        return top
+        return self._log_and_return(top, query, tier, started)
 
     def query(
         self,
@@ -206,6 +334,8 @@ class InMemoryEngine:
         *,
         limit: int = 10,
         tier: SearchTier = "cascade",
+        plane: Plane | None = None,
+        employee_id: str | None = None,
     ) -> list[SearchHit]:
         """Hybrid search: keyword + vector, RRF-fused with compiled-truth boost.
 
@@ -220,85 +350,124 @@ class InMemoryEngine:
         5. When vector scores are present, final = 0.7 * RRF + 0.3 * cosine.
         6. Top ``limit`` pages returned, event logged.
 
-        With no embedder attached the pipeline degrades to keyword-only via
-        the same RRF scaffolding — same code path, same boost, no vector
-        contribution. That's the "starter mode" until a real embedding
-        provider plugs in.
+        Optional ``plane`` / ``employee_id`` restrict the search scope.
         """
+        _validate_scope_filter(plane, employee_id)
         q = question.strip().lower()
         started = time.perf_counter()
         if not q:
             return self._log_and_return([], question, tier, started)
 
-        # Keyword pass: rank by current keyword score.
-        keyword_scored = [(page.slug, _keyword_score(page, q)) for page in self._pages.values()]
-        keyword_scored = [(s, sc) for s, sc in keyword_scored if sc > 0]
-        keyword_scored.sort(key=lambda pair: pair[1], reverse=True)
-        keyword_ranked = [slug for slug, _ in keyword_scored]
+        in_scope = {
+            key: page for key, page in self._pages.items() if _in_scope(key, plane, employee_id)
+        }
 
-        # Vector pass: cosine similarity vs page embeddings.
-        vector_similarity: dict[str, float] = {}
-        vector_ranked: list[str] = []
-        if self._embedder is not None and self._embeddings:
-            query_vec = self._embedder.embed(question)
-            scored = [
-                (slug, cosine_similarity(query_vec, vec)) for slug, vec in self._embeddings.items()
-            ]
-            scored.sort(key=lambda pair: pair[1], reverse=True)
-            vector_ranked = [slug for slug, _ in scored]
-            vector_similarity = dict(scored)
+        keyword_scored: list[tuple[PageKey, float]] = [
+            (key, _keyword_score(page, q)) for key, page in in_scope.items()
+        ]
+        keyword_scored = [(k, sc) for k, sc in keyword_scored if sc > 0]
+        keyword_scored.sort(key=lambda pair: pair[1], reverse=True)
+        keyword_ranked = [k for k, _ in keyword_scored]
+
+        vector_similarity: dict[PageKey, float] = {}
+        vector_ranked: list[PageKey] = []
+        if self._embedder is not None and in_scope:
+            scoped_embeddings = {k: v for k, v in self._embeddings.items() if k in in_scope}
+            if scoped_embeddings:
+                query_vec = self._embedder.embed(question)
+                scored = [
+                    (k, cosine_similarity(query_vec, vec)) for k, vec in scoped_embeddings.items()
+                ]
+                scored.sort(key=lambda pair: pair[1], reverse=True)
+                vector_ranked = [k for k, _ in scored]
+                vector_similarity = dict(scored)
 
         ranked_lists = [lst for lst in (keyword_ranked, vector_ranked) if lst]
         if not ranked_lists:
             return self._log_and_return([], question, tier, started)
 
-        fused = rrf_fuse(ranked_lists, k=RRF_K)
+        # RRF takes sequences of string-ish ids; convert key to a stable
+        # token + back-map for lookup after fusion.
+        key_token: dict[str, PageKey] = {_key_token(k): k for k in in_scope}
+        ranked_token_lists = [[_key_token(k) for k in lst] for lst in ranked_lists]
+        fused_tokens = rrf_fuse(ranked_token_lists, k=RRF_K)
+        fused: dict[PageKey, float] = {key_token[t]: score for t, score in fused_tokens.items()}
 
         # Compiled truth boost: pages whose TRUTH zone contains the query.
-        for slug in list(fused):
-            page = self._pages.get(slug)
-            if page is not None and q in page.compiled_truth.lower():
-                fused[slug] *= COMPILED_TRUTH_BOOST
+        for key in list(fused):
+            page = in_scope[key]
+            if q in page.compiled_truth.lower():
+                fused[key] *= COMPILED_TRUTH_BOOST
 
         # Cosine blend — only meaningful when we actually ran the vector pass.
         if vector_similarity:
-            for slug in list(fused):
-                cos = vector_similarity.get(slug, 0.0)
-                fused[slug] = VECTOR_RRF_BLEND * fused[slug] + (1.0 - VECTOR_RRF_BLEND) * cos
+            for key in list(fused):
+                cos = vector_similarity.get(key, 0.0)
+                fused[key] = VECTOR_RRF_BLEND * fused[key] + (1.0 - VECTOR_RRF_BLEND) * cos
 
         hits = [
             SearchHit(
-                slug=slug,
+                slug=key.slug,
+                plane=key.plane,
+                employee_id=key.employee_id,
                 score=score,
-                snippet=_snippet(self._pages[slug].compiled_truth, q),
+                snippet=_snippet(in_scope[key].compiled_truth, q),
             )
-            for slug, score in fused.items()
+            for key, score in fused.items()
         ]
         hits.sort(key=lambda h: h.score, reverse=True)
         return self._log_and_return(hits[:limit], question, tier, started)
 
     # ---------- Graph ----------
 
-    def links_from(self, slug: str) -> list[str]:
-        """Outgoing wikilinks from the page at ``slug``."""
-        page = self._pages.get(slug)
+    def links_from(
+        self,
+        slug: str,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> list[str]:
+        """Outgoing wikilinks from the page at ``(plane, slug)``."""
+        _validate_plane_args(plane, employee_id)
+        page = self._pages.get(PageKey(plane=plane, slug=slug, employee_id=employee_id))
         return page.wikilinks() if page is not None else []
 
-    def links_to(self, slug: str) -> list[str]:
-        """Slugs of pages whose compiled truth links TO ``slug``."""
+    def links_to(
+        self,
+        slug: str,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> list[str]:
+        """Slugs of pages in the SAME scope whose compiled truth links to ``slug``.
+
+        Wikilinks are scope-local — a firm-plane page's links resolve to
+        other firm-plane slugs; a personal page's links resolve within that
+        employee's plane. Cross-plane linking is out of scope for V1.
+        """
+        _validate_plane_args(plane, employee_id)
         return sorted(
-            {p.slug for p in self._pages.values() if slug in p.wikilinks() and p.slug != slug}
+            {
+                key.slug
+                for key, page in self._pages.items()
+                if _in_scope(key, plane, employee_id)
+                and slug in page.wikilinks()
+                and key.slug != slug
+            }
         )
 
     # ---------- Stats ----------
 
     def stats(self) -> EngineStats:
-        counts: dict[str, int] = defaultdict(int)
-        for p in self._pages.values():
-            counts[p.domain] += 1
+        by_plane: dict[Plane, int] = defaultdict(int)
+        by_domain: dict[str, int] = defaultdict(int)
+        for key, page in self._pages.items():
+            by_plane[key.plane] += 1
+            by_domain[page.domain] += 1
         return EngineStats(
             page_count=len(self._pages),
-            pages_by_domain=dict(counts),
+            pages_by_plane=dict(by_plane),
+            pages_by_domain=dict(by_domain),
             connected=self._connected,
         )
 
@@ -321,6 +490,29 @@ class InMemoryEngine:
             latency_ms=latency_ms,
         )
         return hits
+
+
+def _validate_scope_filter(plane: Plane | None, employee_id: str | None) -> None:
+    if plane is None and employee_id is not None:
+        raise ValueError("employee_id only meaningful when plane is also given")
+    if plane is not None:
+        _validate_plane_args(plane, employee_id)
+
+
+def _in_scope(key: PageKey, plane: Plane | None, employee_id: str | None) -> bool:
+    if plane is None:
+        return True
+    if key.plane != plane:
+        return False
+    if plane == "personal" and key.employee_id != employee_id:
+        return False
+    return True
+
+
+def _key_token(key: PageKey) -> str:
+    """Stringify a ``PageKey`` for RRF fusion + back-mapping."""
+    emp = key.employee_id or ""
+    return f"{key.plane}\0{emp}\0{key.slug}"
 
 
 def _keyword_score(page: Page, query_lower: str) -> float:

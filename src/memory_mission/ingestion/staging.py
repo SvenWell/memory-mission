@@ -2,17 +2,24 @@
 
 Backfill loops, real-time extraction, and any future "pull from external"
 agent writes to staging FIRST. A reviewer (human or curator agent) decides
-later whether to promote a staged item into the firm wiki proper.
+later whether to promote a staged item into a memory plane.
 
-Layout (per source):
+Layout (per source + target plane):
 
-    <wiki_root>/staging/<source>/.raw/<item_id>.json   # connector raw payload
-    <wiki_root>/staging/<source>/<item_id>.md           # distilled markdown
+    <wiki_root>/staging/personal/<employee_id>/<source>/.raw/<item_id>.json
+    <wiki_root>/staging/personal/<employee_id>/<source>/<item_id>.md
+    <wiki_root>/staging/firm/<source>/.raw/<item_id>.json
+    <wiki_root>/staging/firm/<source>/<item_id>.md
+
+``target_plane`` tells the writer where a promoted item would live. Personal
+staging belongs to one employee; firm staging is shared. The promotion
+pipeline (Step 10) reads from these directories and uses ``target_plane``
+to pick the destination root.
 
 The raw sidecar preserves the connector response verbatim. The markdown
-file carries minimal frontmatter (source, source_id, ingested_at, plus
-caller-supplied extras) and the body the agent extracted from the raw
-payload.
+file carries minimal frontmatter (source, source_id, ingested_at,
+target_plane, plus caller-supplied extras) and the body the agent
+extracted from the raw payload.
 
 Why a separate `staging` zone instead of writing directly into MECE
 domains: staged items don't have a canonical home yet (an email might be
@@ -37,6 +44,12 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+from memory_mission.memory.schema import (
+    Plane,
+    staging_source_dir,
+    validate_employee_id,
+)
+
 # Same shape as observability's firm-id regex: alnum + ._- with a length
 # bound, no path separators or NUL bytes. Source labels and item ids share
 # this surface because both become path segments.
@@ -50,6 +63,8 @@ class StagedItem(BaseModel):
 
     item_id: str
     source: str
+    target_plane: Plane
+    employee_id: str | None
     raw_path: Path
     markdown_path: Path
 
@@ -63,24 +78,54 @@ def _validate_segment(value: str, *, name: str) -> None:
 
 
 class StagingWriter:
-    """Writes pulled items to ``<wiki_root>/staging/<source>/`` for review.
+    """Writes pulled items to the staging zone for review.
 
-    One ``StagingWriter`` instance is scoped to a single ``source`` label
-    (``"gmail"``, ``"granola"``, etc.). The ``wiki_root`` directory is
-    treated as the firm's content root — staging lives alongside the
-    eventual curated pages.
+    Scoped to a single ``source`` label (``"gmail"``, ``"granola"``, etc.)
+    and a single ``target_plane``. For personal targets, the writer is
+    also scoped to one ``employee_id``. The ``wiki_root`` directory is the
+    firm's content root — staging lives alongside the eventual curated
+    pages.
     """
 
-    def __init__(self, *, wiki_root: Path, source: str) -> None:
+    def __init__(
+        self,
+        *,
+        wiki_root: Path,
+        source: str,
+        target_plane: Plane,
+        employee_id: str | None = None,
+    ) -> None:
         _validate_segment(source, name="source")
+        if target_plane == "personal":
+            if not employee_id:
+                raise ValueError("personal target_plane requires employee_id")
+            validate_employee_id(employee_id)
+        elif target_plane == "firm":
+            if employee_id is not None:
+                raise ValueError("firm target_plane must not carry an employee_id")
+        else:
+            raise ValueError(f"unknown target_plane: {target_plane!r}")
+
         self._source = source
+        self._target_plane: Plane = target_plane
+        self._employee_id = employee_id
         self._wiki_root = Path(wiki_root)
-        self._source_dir = self._wiki_root / "staging" / source
+        self._source_dir = self._wiki_root / staging_source_dir(
+            target_plane=target_plane, source=source, employee_id=employee_id
+        )
         self._raw_dir = self._source_dir / ".raw"
 
     @property
     def source(self) -> str:
         return self._source
+
+    @property
+    def target_plane(self) -> Plane:
+        return self._target_plane
+
+    @property
+    def employee_id(self) -> str | None:
+        return self._employee_id
 
     @property
     def source_dir(self) -> Path:
@@ -113,17 +158,14 @@ class StagingWriter:
             _render_staging_markdown(
                 source=self._source,
                 item_id=item_id,
+                target_plane=self._target_plane,
+                employee_id=self._employee_id,
                 body=markdown_body,
                 extras=frontmatter_extras or {},
             ),
         )
 
-        return StagedItem(
-            item_id=item_id,
-            source=self._source,
-            raw_path=raw_path,
-            markdown_path=md_path,
-        )
+        return self._make_staged_item(item_id, raw_path, md_path)
 
     def get(self, item_id: str) -> StagedItem | None:
         """Return a pointer to the staged item if both files exist."""
@@ -132,12 +174,7 @@ class StagingWriter:
         md_path = self._source_dir / f"{item_id}.md"
         if not raw_path.exists() or not md_path.exists():
             return None
-        return StagedItem(
-            item_id=item_id,
-            source=self._source,
-            raw_path=raw_path,
-            markdown_path=md_path,
-        )
+        return self._make_staged_item(item_id, raw_path, md_path)
 
     def list_pending(self) -> list[StagedItem]:
         """List currently-staged items for this source, sorted by item_id."""
@@ -148,14 +185,7 @@ class StagingWriter:
             item_id = md_path.stem
             raw_path = self._raw_dir / f"{item_id}.json"
             if raw_path.exists():
-                items.append(
-                    StagedItem(
-                        item_id=item_id,
-                        source=self._source,
-                        raw_path=raw_path,
-                        markdown_path=md_path,
-                    )
-                )
+                items.append(self._make_staged_item(item_id, raw_path, md_path))
         return items
 
     def remove(self, item_id: str) -> bool:
@@ -176,6 +206,16 @@ class StagingWriter:
             with staged.raw_path.open() as f:
                 yield staged.item_id, json.load(f)
 
+    def _make_staged_item(self, item_id: str, raw_path: Path, md_path: Path) -> StagedItem:
+        return StagedItem(
+            item_id=item_id,
+            source=self._source,
+            target_plane=self._target_plane,
+            employee_id=self._employee_id,
+            raw_path=raw_path,
+            markdown_path=md_path,
+        )
+
 
 # ---------- Helpers ----------
 
@@ -184,6 +224,8 @@ def _render_staging_markdown(
     *,
     source: str,
     item_id: str,
+    target_plane: Plane,
+    employee_id: str | None,
     body: str,
     extras: dict[str, Any],
 ) -> str:
@@ -191,11 +233,14 @@ def _render_staging_markdown(
     fm: dict[str, Any] = {
         "source": source,
         "source_id": item_id,
+        "target_plane": target_plane,
         "ingested_at": datetime.now(UTC).isoformat(),
     }
+    if employee_id is not None:
+        fm["employee_id"] = employee_id
     for key, value in extras.items():
         if key in fm:
-            continue  # caller can't override the canonical fields
+            continue  # caller can't override canonical fields
         fm[key] = value
     fm_yaml = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True).rstrip()
     return f"---\n{fm_yaml}\n---\n\n{body.rstrip()}\n"
