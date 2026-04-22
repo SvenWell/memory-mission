@@ -7,13 +7,15 @@ triggers match the current task. Machine-readable equivalent:
 ## backfill-gmail
 
 Pull historical email through the Gmail connector (Composio-backed) into
-the firm's staging area for human review. Each message becomes a
-checkpointed step under a durable run, so a crash mid-loop resumes from
-the last processed message. No LLM calls, no extraction — extraction
-agents (Step 8+) consume what this skill stages.
+the **employee's personal staging plane**
+(`<wiki_root>/staging/personal/<employee_id>/gmail/`) for the extraction
+agent (Step 9) to consume. Each message becomes a checkpointed step
+under a durable run, so a crash mid-loop resumes from the last processed
+message. No LLM calls, no extraction, no firm-plane writes.
 
 Triggers: "backfill gmail", "import email history", "sync gmail mailbox",
 "pull historical email"
 
-Constraints: stages only (no writes to wiki MECE domains), no LLM
-inside the loop, every fetch flows through the connector harness.
+Constraints: personal plane only (never firm staging), no writes to
+curated wiki pages, no LLM inside the loop, every fetch flows through
+the connector harness.

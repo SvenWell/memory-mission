@@ -733,3 +733,121 @@ each entity seen, surfaces tier crossings to a stage-2 enrichment
 queue.
 
 ---
+
+## Step 8: Two Memory Planes + Permissions Layer — DONE (2026-04-22)
+
+**Goal:** Bake Emile's governance principles into the architecture
+before any more workflow code lands. Split storage into personal
+(per-employee private) + firm (shared, governed) planes, and add a
+native access-control policy layer. Plan reshape
+(`to-be-the-agents-enchanted-petal.md`) promoted this ahead of Step 9
+extraction because the retrofit cost grows fast if we ship extraction
+into the flat layout first.
+
+Three sub-commits, each fully verified:
+
+### Step 8a — plane-aware data model (commit `6a59483`)
+
+- `src/memory_mission/memory/schema.py`:
+  - `Plane = Literal["personal", "firm"]`
+  - `plane_root()` — resolves plane + employee_id to posix path prefix
+  - `validate_employee_id()` with same safety shape as observability
+    firm-id regex (alnum + ._-, length bound, no traversal)
+  - Plane-aware `page_path()` / `raw_sidecar_path()` take plane + opt
+    employee_id
+  - `staging_source_dir()` for the staging zone layout
+- `src/memory_mission/memory/engine.py`:
+  - `PageKey(plane, slug, employee_id)` composite key — same slug
+    coexists across Alice's personal, Bob's personal, and firm plane
+  - `BrainEngine` Protocol: `put_page` / `get_page` / `delete_page` /
+    `links_from` / `links_to` take `plane=` required + optional
+    `employee_id=`
+  - `list_pages` / `search` / `query` take optional plane + employee_id
+    filter for scoped retrieval
+  - `SearchHit` gains `plane` + `employee_id` fields
+  - `EngineStats` reports `pages_by_plane`
+  - Cross-plane leakage impossible by construction (links_to is
+    scope-local)
+- `src/memory_mission/ingestion/staging.py`:
+  - `StagingWriter(target_plane=, employee_id=None)` required
+  - Layout: `staging/personal/<emp>/<source>/` or `staging/firm/<source>/`
+  - `StagedItem` gains `target_plane` + `employee_id`
+  - Frontmatter records both; canonical fields locked against caller
+    spoofing
+
+### Step 8b — permissions layer (commit `9597c5b`)
+
+- `src/memory_mission/permissions/policy.py`:
+  - `Policy`, `Scope`, `EmployeeEntry` Pydantic models (frozen)
+  - `can_read(policy, employee_id, page)` — default deny on unknown
+    employee; public always allowed; restricted scope must be in
+    employee's allowed set; unknown scope fails closed
+  - `can_propose(policy, employee_id, proposed_scope)` — no-escalation
+    rule: can only propose into scopes you already have read access to
+  - `parse_policy_markdown()` — typed object from markdown source
+  - `load_policy(path)` — convenience
+  - `page_scope(page)` — reads `scope:` from frontmatter extras, falls
+    back to policy default
+- `protocols/permissions.md.template` — per-firm template demonstrating
+  three access tiers (public / partner-only / client-confidential /
+  deal-team) + three employees across them
+- Pure library — no engine integration. Host-agent skills call
+  `can_read` / `can_propose` as utility functions before returning
+  results or staging proposals. Same check lands in both retrieval and
+  proposal paths without tight coupling.
+
+### Step 8c — migrate backfill-gmail skill to plane-aware paths (this commit)
+
+- `skills/backfill-gmail/SKILL.md` — updated constraints to require
+  `target_plane="personal"` + employee_id; updated paths in "Where the
+  data lands" section; added explicit "firm-plane staging comes from
+  `skills/backfill-firm-artefacts` (Step 11), not this skill"
+- `skills/_manifest.jsonl` — regenerated frontmatter
+- `skills/_index.md` — updated summary to reflect personal-plane
+  destination
+
+**Verification (across all sub-commits):**
+- [x] `pytest` — 368/368 passed (25 new permissions tests + 24 new
+  plane-isolation tests + 319 previous)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 44 files
+- [x] Registry integrity tests still green after skill migration
+- [x] Plane isolation tests: personal pages don't leak across employees;
+  same slug coexists across planes; delete on one plane doesn't affect
+  others; `links_to` doesn't cross planes
+- [x] Permission tests: scope enforcement, public always allowed,
+  unknown-scope fail-closed, no-escalation on `can_propose`, template
+  round-trip parse
+
+**Key invariants enforced by tests:**
+- `Plane = Literal["personal", "firm"]` — staging is a zone, not a plane
+- Personal plane requires employee_id; firm plane rejects it
+- `PageKey` hashes across all three fields — plane isolation at the
+  data-structure level
+- `SearchHit` carries plane + employee_id so downstream callers know
+  where the hit came from
+- Permission `can_read` defaults deny on unknown employee, public
+  always-allowed, scope must match, unknown scope fails closed
+- Permission `can_propose` enforces no-escalation — can only propose
+  into scopes you already have read access to
+
+**Deferred:**
+- `BrainEngine` integration with `PolicyLoader` (V1 uses can_read /
+  can_propose as utility functions at the skill layer, which is
+  sufficient given host agents orchestrate retrieval)
+- Scope-based glob matching (V1 uses explicit `scope:` frontmatter
+  field per page; glob-driven default scoping can land when a firm
+  wants path-prefix rules)
+- Administrator UX for editing permissions.md (manual file edit is
+  fine for V1 pilot)
+
+**Next:** Step 9 — Extraction Agent. `ExtractedFact` Pydantic schema
+(6 buckets: Identity / Relationship / Preference / Event / Update /
+Open question). `EXTRACTION_PROMPT` markdown template with
+venture-firm examples. `ingest_facts(facts, source_id, source,
+employee_id)` writes `Claim` / `Update` entries to staging (not direct
+to KG yet). `skills/extract-from-staging/SKILL.md` — host agent runs
+its own LLM with our prompt, returns parsed output, calls
+`ingest_facts`. No LLM SDK imports in our code.
+
+---
