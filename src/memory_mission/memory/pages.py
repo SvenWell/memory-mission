@@ -46,6 +46,8 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from memory_mission.memory.tiers import DEFAULT_TIER, Tier
+
 # Regex that matches a line of exactly three dashes (zone separator). The
 # page-level separator must be a LINE by itself so frontmatter parsing
 # doesn't collide with it.
@@ -93,6 +95,7 @@ class PageFrontmatter(BaseModel):
     confidence: float = 1.0
     created: datetime | None = None
     updated: datetime | None = None
+    tier: Tier = DEFAULT_TIER
 
     @field_validator("confidence")
     @classmethod
@@ -289,6 +292,7 @@ def new_page(
     valid_from: date | None = None,
     valid_to: date | None = None,
     confidence: float = 1.0,
+    tier: Tier = DEFAULT_TIER,
 ) -> Page:
     """Convenience constructor that stamps ``created`` / ``updated`` now."""
     now = datetime.now(UTC)
@@ -303,6 +307,7 @@ def new_page(
         confidence=confidence,
         created=now,
         updated=now,
+        tier=tier,
     )
     return Page(
         frontmatter=fm,

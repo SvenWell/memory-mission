@@ -72,11 +72,21 @@ from memory_mission.memory.search import (
     rrf_fuse,
 )
 from memory_mission.memory.text import STOPWORDS, jaccard, word_set
+from memory_mission.memory.tiers import (
+    ALL_TIERS,
+    DEFAULT_TIER,
+    Tier,
+    is_above,
+    is_at_least,
+    tier_level,
+)
 
 __all__ = [
+    "ALL_TIERS",
     "COMPILED_TRUTH_BOOST",
     "CORE_DOMAINS",
     "CORROBORATION_CAP",
+    "DEFAULT_TIER",
     "MAX_RECENCY",
     "NEUTRAL_SCORE",
     "RECENCY_DECAY_PER_DAY",
@@ -100,11 +110,14 @@ __all__ = [
     "Plane",
     "SearchHit",
     "SearchTier",
+    "Tier",
     "TimelineEntry",
     "Triple",
     "TripleSource",
     "cosine_similarity",
     "curated_root",
+    "is_above",
+    "is_at_least",
     "is_valid_domain",
     "jaccard",
     "new_page",
@@ -116,6 +129,7 @@ __all__ = [
     "rrf_fuse",
     "salience_score",
     "staging_source_dir",
+    "tier_level",
     "validate_domain",
     "validate_employee_id",
     "word_set",

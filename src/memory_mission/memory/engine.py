@@ -54,6 +54,7 @@ from memory_mission.memory.search import (
     cosine_similarity,
     rrf_fuse,
 )
+from memory_mission.memory.tiers import Tier, is_at_least
 from memory_mission.observability.api import log_retrieval
 
 SearchTier = Literal["navigate", "cascade", "discover"]
@@ -161,6 +162,7 @@ class BrainEngine(Protocol):
         tier: SearchTier = "discover",
         plane: Plane | None = None,
         employee_id: str | None = None,
+        tier_floor: Tier | None = None,
     ) -> list[SearchHit]:  # pragma: no cover
         ...
 
@@ -172,6 +174,7 @@ class BrainEngine(Protocol):
         tier: SearchTier = "cascade",
         plane: Plane | None = None,
         employee_id: str | None = None,
+        tier_floor: Tier | None = None,
     ) -> list[SearchHit]:  # pragma: no cover
         ...
 
@@ -298,12 +301,18 @@ class InMemoryEngine:
         tier: SearchTier = "discover",
         plane: Plane | None = None,
         employee_id: str | None = None,
+        tier_floor: Tier | None = None,
     ) -> list[SearchHit]:
         """Naive substring search over title + compiled_truth.
 
         Logs a ``RetrievalEvent`` with the query, tier, loaded pages, and
         measured latency. An optional ``plane`` filter restricts the search
         to one plane (with ``employee_id`` for personal).
+
+        ``tier_floor`` restricts results to pages at or above the given
+        tier. E.g., ``tier_floor="doctrine"`` returns only constitution +
+        doctrine pages, hiding policy + decision. Leave ``None`` to
+        return every tier (backwards-compatible default).
         """
         _validate_scope_filter(plane, employee_id)
         q = query.strip().lower()
@@ -312,6 +321,8 @@ class InMemoryEngine:
         if q:
             for key, page in self._pages.items():
                 if not _in_scope(key, plane, employee_id):
+                    continue
+                if not _in_tier(page, tier_floor):
                     continue
                 score = _keyword_score(page, q)
                 if score > 0:
@@ -336,6 +347,7 @@ class InMemoryEngine:
         tier: SearchTier = "cascade",
         plane: Plane | None = None,
         employee_id: str | None = None,
+        tier_floor: Tier | None = None,
     ) -> list[SearchHit]:
         """Hybrid search: keyword + vector, RRF-fused with compiled-truth boost.
 
@@ -351,6 +363,10 @@ class InMemoryEngine:
         6. Top ``limit`` pages returned, event logged.
 
         Optional ``plane`` / ``employee_id`` restrict the search scope.
+        Optional ``tier_floor`` restricts results to pages at or above
+        the given doctrinal tier (Step 15). Useful for workflow agents
+        that only want authoritative pages — meeting-prep might ask for
+        ``tier_floor="policy"`` to skip low-authority decisions.
         """
         _validate_scope_filter(plane, employee_id)
         q = question.strip().lower()
@@ -359,7 +375,9 @@ class InMemoryEngine:
             return self._log_and_return([], question, tier, started)
 
         in_scope = {
-            key: page for key, page in self._pages.items() if _in_scope(key, plane, employee_id)
+            key: page
+            for key, page in self._pages.items()
+            if _in_scope(key, plane, employee_id) and _in_tier(page, tier_floor)
         }
 
         keyword_scored: list[tuple[PageKey, float]] = [
@@ -507,6 +525,13 @@ def _in_scope(key: PageKey, plane: Plane | None, employee_id: str | None) -> boo
     if plane == "personal" and key.employee_id != employee_id:
         return False
     return True
+
+
+def _in_tier(page: Page, tier_floor: Tier | None) -> bool:
+    """``None`` means no filter; otherwise require page tier at or above floor."""
+    if tier_floor is None:
+        return True
+    return is_at_least(page.frontmatter.tier, tier_floor)
 
 
 def _key_token(key: PageKey) -> str:

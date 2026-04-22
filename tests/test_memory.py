@@ -649,3 +649,122 @@ def test_stats_counts_pages_by_plane_and_domain() -> None:
     assert stats.page_count == 3
     assert stats.pages_by_domain == {"people": 2, "companies": 1}
     assert stats.pages_by_plane == {"firm": 2, "personal": 1}
+
+
+# ---------- Step 15a: Tier on PageFrontmatter + query tier_floor ----------
+
+
+def test_page_frontmatter_defaults_to_decision_tier() -> None:
+    fm = PageFrontmatter(slug="t", title="T", domain="people")
+    assert fm.tier == "decision"
+
+
+def test_new_page_accepts_tier() -> None:
+    page = new_page(slug="mission", title="Mission", domain="concepts", tier="constitution")
+    assert page.frontmatter.tier == "constitution"
+
+
+def test_page_roundtrip_preserves_tier() -> None:
+    """render -> parse keeps the tier field intact."""
+    page = new_page(
+        slug="mission",
+        title="Mission",
+        domain="concepts",
+        compiled_truth="Preserve client capital.",
+        tier="constitution",
+    )
+    rendered = page.render()
+    parsed = parse_page(rendered)
+    assert parsed.frontmatter.tier == "constitution"
+
+
+def test_engine_query_tier_floor_filters_by_authority() -> None:
+    """``tier_floor='doctrine'`` returns only constitution + doctrine pages."""
+    engine = InMemoryEngine()
+    engine.put_page(
+        new_page(
+            slug="mission",
+            title="Mission",
+            domain="concepts",
+            compiled_truth="Preserve client capital over generations.",
+            tier="constitution",
+        ),
+        plane="firm",
+    )
+    engine.put_page(
+        new_page(
+            slug="thesis",
+            title="Investment thesis",
+            domain="concepts",
+            compiled_truth="We buy durable compounders.",
+            tier="doctrine",
+        ),
+        plane="firm",
+    )
+    engine.put_page(
+        new_page(
+            slug="review-cadence",
+            title="Allocation review cadence",
+            domain="concepts",
+            compiled_truth="Review allocations every quarter.",
+            tier="policy",
+        ),
+        plane="firm",
+    )
+    engine.put_page(
+        new_page(
+            slug="sarah",
+            title="Sarah Chen",
+            domain="people",
+            compiled_truth="Sarah joined the ops team.",
+            tier="decision",
+        ),
+        plane="firm",
+    )
+
+    # Tier floor doctrine: only constitution + doctrine match
+    with observability_scope(observability_root=Path("/tmp/test-obs-tier"), firm_id="acme"):
+        hits = engine.query("capital", tier_floor="doctrine")
+    slugs = {h.slug for h in hits}
+    assert slugs == {"mission"}  # only this page matches "capital" + tier floor
+
+    # Tier floor policy: constitution + doctrine + policy (no decision)
+    with observability_scope(observability_root=Path("/tmp/test-obs-tier"), firm_id="acme"):
+        hits = engine.query("review", tier_floor="policy")
+    slugs = {h.slug for h in hits}
+    assert "review-cadence" in slugs
+
+    # No tier floor: default behavior, every tier included
+    with observability_scope(observability_root=Path("/tmp/test-obs-tier"), firm_id="acme"):
+        hits = engine.query("sarah")
+    slugs = {h.slug for h in hits}
+    assert "sarah" in slugs
+
+
+def test_engine_search_tier_floor_filters_by_authority() -> None:
+    engine = InMemoryEngine()
+    engine.put_page(
+        new_page(
+            slug="mission",
+            title="Mission",
+            domain="concepts",
+            compiled_truth="capital",
+            tier="constitution",
+        ),
+        plane="firm",
+    )
+    engine.put_page(
+        new_page(
+            slug="low",
+            title="Low page",
+            domain="concepts",
+            compiled_truth="capital",
+            tier="decision",
+        ),
+        plane="firm",
+    )
+    with observability_scope(observability_root=Path("/tmp/test-obs-tier-search"), firm_id="acme"):
+        hits_all = engine.search("capital")
+        hits_doctrine = engine.search("capital", tier_floor="doctrine")
+    assert {h.slug for h in hits_all} == {"mission", "low"}
+    assert {h.slug for h in hits_doctrine} == {"mission"}

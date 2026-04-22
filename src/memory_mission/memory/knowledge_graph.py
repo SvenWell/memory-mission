@@ -52,6 +52,8 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from memory_mission.memory.tiers import DEFAULT_TIER, Tier
+
 Direction = Literal["outgoing", "incoming", "both"]
 
 # Bayesian corroboration never reaches certainty without human override.
@@ -87,6 +89,7 @@ class Triple(BaseModel):
     source_closet: str | None = None
     source_file: str | None = None
     corroboration_count: int = 0
+    tier: Tier = DEFAULT_TIER
 
     @field_validator("confidence")
     @classmethod
@@ -176,7 +179,8 @@ CREATE TABLE IF NOT EXISTS triples (
     source_closet TEXT,
     source_file TEXT,
     created_at TEXT NOT NULL,
-    corroboration_count INTEGER NOT NULL DEFAULT 0
+    corroboration_count INTEGER NOT NULL DEFAULT 0,
+    tier TEXT NOT NULL DEFAULT 'decision'
 );
 
 CREATE INDEX IF NOT EXISTS idx_triples_subject ON triples(subject);
@@ -243,6 +247,10 @@ class KnowledgeGraph:
         if "corroboration_count" not in triple_cols:
             self._conn.execute(
                 "ALTER TABLE triples ADD COLUMN corroboration_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "tier" not in triple_cols:
+            self._conn.execute(
+                "ALTER TABLE triples ADD COLUMN tier TEXT NOT NULL DEFAULT 'decision'"
             )
 
     # ---------- Lifecycle ----------
@@ -323,6 +331,7 @@ class KnowledgeGraph:
         confidence: float = 1.0,
         source_closet: str | None = None,
         source_file: str | None = None,
+        tier: Tier = DEFAULT_TIER,
     ) -> Triple:
         """Insert a new triple. Triples are append-only; use ``invalidate``
         to end the validity of an existing triple instead of overwriting.
@@ -330,6 +339,13 @@ class KnowledgeGraph:
         Seeds ``triple_sources`` with the initial source row so every
         triple has at least one provenance entry. Later corroborations
         (see ``corroborate``) append additional rows.
+
+        ``tier`` tags the fact with its authority level (see
+        ``memory.tiers``). Default ``decision`` means "specific observed
+        fact" and has the lowest authority. Promoting to ``policy`` /
+        ``doctrine`` / ``constitution`` is a deliberate editorial act by
+        the reviewer; the default makes most everyday extractions
+        land safely as decisions that higher tiers can override.
         """
         triple = Triple(
             subject=subject,
@@ -340,6 +356,7 @@ class KnowledgeGraph:
             confidence=confidence,
             source_closet=source_closet,
             source_file=source_file,
+            tier=tier,
         )
         now = _utcnow_iso()
         with self._tx() as cur:
@@ -348,8 +365,8 @@ class KnowledgeGraph:
                 INSERT INTO triples
                     (subject, predicate, object, valid_from, valid_to,
                      confidence, source_closet, source_file, created_at,
-                     corroboration_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                     corroboration_count, tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
                 """,
                 (
                     subject,
@@ -361,6 +378,7 @@ class KnowledgeGraph:
                     source_closet,
                     source_file,
                     now,
+                    tier,
                 ),
             )
             triple_id = cur.lastrowid
@@ -777,13 +795,16 @@ class KnowledgeGraph:
 
 
 def _row_to_triple(row: sqlite3.Row) -> Triple:
-    # corroboration_count was added in a later schema version; existing
-    # DBs that predate the migration may lack the key at the row level
-    # when accessed via sqlite3.Row, so default to 0 defensively.
+    # Added-later columns default defensively for rows from pre-migration
+    # DBs; fresh DBs always have the column.
     try:
         count = row["corroboration_count"]
     except (IndexError, KeyError):
         count = 0
+    try:
+        tier_value = row["tier"]
+    except (IndexError, KeyError):
+        tier_value = DEFAULT_TIER
     return Triple(
         subject=row["subject"],
         predicate=row["predicate"],
@@ -794,6 +815,7 @@ def _row_to_triple(row: sqlite3.Row) -> Triple:
         source_closet=row["source_closet"],
         source_file=row["source_file"],
         corroboration_count=count if count is not None else 0,
+        tier=tier_value if tier_value is not None else DEFAULT_TIER,
     )
 
 

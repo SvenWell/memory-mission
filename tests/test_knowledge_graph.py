@@ -13,13 +13,18 @@ import pytest
 from pydantic import ValidationError
 
 from memory_mission.memory import (
+    ALL_TIERS,
     CORROBORATION_CAP,
+    DEFAULT_TIER,
     Entity,
     GraphStats,
     KnowledgeGraph,
     MergeResult,
     Triple,
     TripleSource,
+    is_above,
+    is_at_least,
+    tier_level,
 )
 
 # ---------- Triple model ----------
@@ -742,3 +747,122 @@ def test_merge_persists_across_sessions(tmp_path: Path) -> None:
         assert len(triples) == 1
         assert triples[0].subject == "p_alice"
         assert len(kg2.merge_history("p_alice")) == 1
+
+
+# ---------- Step 15a: Tier field ----------
+
+
+def test_tier_level_order() -> None:
+    """Constitution is highest authority, decision is lowest."""
+    assert tier_level("constitution") > tier_level("doctrine")
+    assert tier_level("doctrine") > tier_level("policy")
+    assert tier_level("policy") > tier_level("decision")
+
+
+def test_tier_is_above_and_is_at_least() -> None:
+    assert is_above("doctrine", "decision") is True
+    assert is_above("decision", "doctrine") is False
+    assert is_above("policy", "policy") is False
+    assert is_at_least("doctrine", "decision") is True
+    assert is_at_least("policy", "policy") is True
+    assert is_at_least("decision", "policy") is False
+
+
+def test_all_tiers_covers_every_value() -> None:
+    assert set(ALL_TIERS) == {"constitution", "doctrine", "policy", "decision"}
+
+
+def test_triple_defaults_to_decision_tier() -> None:
+    t = Triple(subject="a", predicate="p", object="b")
+    assert t.tier == DEFAULT_TIER
+    assert t.tier == "decision"
+
+
+def test_add_triple_without_tier_stores_decision(kg: KnowledgeGraph) -> None:
+    triple = kg.add_triple("sarah", "works_at", "acme")
+    assert triple.tier == "decision"
+    fetched = kg.query_entity("sarah")[0]
+    assert fetched.tier == "decision"
+
+
+def test_add_triple_with_explicit_tier_persists(kg: KnowledgeGraph) -> None:
+    kg.add_triple("firm", "mission", "preserve-client-capital", tier="constitution")
+    kg.add_triple("firm", "believes", "compound-interest-wins", tier="doctrine")
+    kg.add_triple("firm", "policy", "review-allocations-quarterly", tier="policy")
+    kg.add_triple("sarah", "works_at", "acme")  # default decision
+
+    triples = kg.query_relationship("mission")
+    assert triples[0].tier == "constitution"
+    believes = kg.query_relationship("believes")
+    assert believes[0].tier == "doctrine"
+    policy = kg.query_relationship("policy")
+    assert policy[0].tier == "policy"
+    work = kg.query_relationship("works_at")
+    assert work[0].tier == "decision"
+
+
+def test_corroborate_preserves_tier(kg: KnowledgeGraph) -> None:
+    """Corroboration adds evidence; it does not change the fact's tier."""
+    kg.add_triple("firm", "believes", "compound-interest-wins", tier="doctrine", confidence=0.7)
+    updated = kg.corroborate("firm", "believes", "compound-interest-wins", confidence=0.6)
+    assert updated is not None
+    assert updated.tier == "doctrine"
+
+
+def test_merge_preserves_tier_on_rewritten_triples(kg: KnowledgeGraph) -> None:
+    """merge_entities renames subjects/objects but leaves tier alone."""
+    kg.add_entity("alice-smith")
+    kg.add_entity("p_alice")
+    kg.add_triple("alice-smith", "signatory_for", "investment-policy", tier="policy")
+    kg.merge_entities("alice-smith", "p_alice", reviewer_id="r", rationale="merge")
+    fetched = kg.query_entity("p_alice")[0]
+    assert fetched.subject == "p_alice"
+    assert fetched.tier == "policy"
+
+
+def test_migration_adds_tier_to_existing_db(tmp_path: Path) -> None:
+    """Pre-Step-15 DBs get the tier column via ``_run_migrations``."""
+    import sqlite3
+
+    db_path = tmp_path / "pre-tier.kg.sqlite3"
+    # Create a DB with the pre-Step-15 schema by hand — no tier column.
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE entities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            entity_type TEXT NOT NULL DEFAULT 'unknown',
+            properties TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE triples (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subject TEXT NOT NULL,
+            predicate TEXT NOT NULL,
+            object TEXT NOT NULL,
+            valid_from TEXT,
+            valid_to TEXT,
+            confidence REAL NOT NULL DEFAULT 1.0,
+            source_closet TEXT,
+            source_file TEXT,
+            created_at TEXT NOT NULL
+        );
+        INSERT INTO entities (name, created_at)
+        VALUES ('sarah', '2026-04-01T00:00:00+00:00');
+        INSERT INTO triples (subject, predicate, object, confidence, created_at)
+        VALUES ('sarah', 'works_at', 'acme', 0.9, '2026-04-01T00:00:00+00:00');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    # Open via KnowledgeGraph — migration should run, tier should default.
+    with KnowledgeGraph(db_path) as kg:
+        triples = kg.query_entity("sarah")
+        assert len(triples) == 1
+        assert triples[0].tier == "decision"
+        # Fresh inserts accept the new tier kwarg
+        kg.add_triple("firm", "mission", "test", tier="constitution")
+        fetched = kg.query_relationship("mission")[0]
+        assert fetched.tier == "constitution"
