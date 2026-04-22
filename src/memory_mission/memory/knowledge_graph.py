@@ -140,6 +140,19 @@ class GraphStats(BaseModel):
     currently_true_triple_count: int
 
 
+class MergeResult(BaseModel):
+    """Outcome of a ``merge_entities`` call — what changed, who approved."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_entity: str
+    target_entity: str
+    reviewer_id: str
+    rationale: str
+    merged_at: datetime
+    triples_rewritten: int
+
+
 # ---------- Store ----------
 
 
@@ -183,6 +196,21 @@ CREATE TABLE IF NOT EXISTS triple_sources (
 
 CREATE INDEX IF NOT EXISTS idx_triple_sources_triple_id
     ON triple_sources(triple_id);
+
+CREATE TABLE IF NOT EXISTS entity_merges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_entity TEXT NOT NULL,
+    target_entity TEXT NOT NULL,
+    reviewer_id TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    merged_at TEXT NOT NULL,
+    triples_rewritten INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_entity_merges_source
+    ON entity_merges(source_entity);
+CREATE INDEX IF NOT EXISTS idx_entity_merges_target
+    ON entity_merges(target_entity);
 """
 
 
@@ -583,6 +611,114 @@ class KnowledgeGraph:
                 (entity_name, entity_name),
             ).fetchall()
         return [_row_to_triple(r) for r in rows]
+
+    # ---------- Entity merge ----------
+
+    def merge_entities(
+        self,
+        source: str,
+        target: str,
+        *,
+        reviewer_id: str,
+        rationale: str,
+    ) -> MergeResult:
+        """Rewrite every triple using ``source`` to use ``target`` instead.
+
+        Used when identity resolution reveals that two previously-separate
+        entities are actually the same person/org (e.g., "alice-smith" and
+        "a-smith" after an extraction supplied a shared email). Requires
+        a reviewer decision with rationale — same discipline as
+        ``promote()`` to prevent silent graph rewrites.
+
+        Semantics:
+
+        - Every triple where ``subject = source`` gets its subject updated
+          to ``target``.
+        - Every triple where ``object = source`` gets its object updated
+          to ``target``.
+        - The ``source`` entity row is deleted — it's now an alias that
+          no longer exists as a distinct node.
+        - ``triple_sources`` provenance rows are untouched (they key by
+          ``triple_id``, not by entity name), preserving the full
+          audit chain.
+        - A row in ``entity_merges`` records the who/why/when for audit.
+
+        ``merge_entities`` does NOT automatically corroborate or dedupe
+        triples that might collapse (e.g., if both source and target
+        already had ``works_at acme``, you end up with two triples after
+        rewrite). That dedupe is a separate concern and can land later.
+
+        Raises ``ValueError`` on empty rationale or source == target.
+        """
+        if not rationale or not rationale.strip():
+            raise ValueError("rationale is required on every merge")
+        if source == target:
+            raise ValueError("source and target must differ")
+
+        now = datetime.now(UTC)
+        now_iso = now.isoformat()
+        with self._tx() as cur:
+            cur.execute(
+                "UPDATE triples SET subject = ? WHERE subject = ?",
+                (target, source),
+            )
+            subj_rewrites = cur.rowcount
+            cur.execute(
+                "UPDATE triples SET object = ? WHERE object = ?",
+                (target, source),
+            )
+            obj_rewrites = cur.rowcount
+            cur.execute(
+                "DELETE FROM entities WHERE name = ?",
+                (source,),
+            )
+            total = subj_rewrites + obj_rewrites
+            cur.execute(
+                """
+                INSERT INTO entity_merges
+                    (source_entity, target_entity, reviewer_id,
+                     rationale, merged_at, triples_rewritten)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (source, target, reviewer_id, rationale, now_iso, total),
+            )
+
+        return MergeResult(
+            source_entity=source,
+            target_entity=target,
+            reviewer_id=reviewer_id,
+            rationale=rationale,
+            merged_at=now,
+            triples_rewritten=total,
+        )
+
+    def merge_history(self, entity_name: str) -> list[MergeResult]:
+        """Return every merge touching ``entity_name`` (as source or target).
+
+        Useful for audit: "why does this entity ID exist? who merged
+        what into it?" Results are ordered oldest-first.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT source_entity, target_entity, reviewer_id,
+                   rationale, merged_at, triples_rewritten
+            FROM entity_merges
+            WHERE source_entity = ? OR target_entity = ?
+            ORDER BY id ASC
+            """,
+            (entity_name, entity_name),
+        ).fetchall()
+        return [
+            MergeResult(
+                source_entity=r["source_entity"],
+                target_entity=r["target_entity"],
+                reviewer_id=r["reviewer_id"],
+                rationale=r["rationale"],
+                merged_at=datetime.fromisoformat(r["merged_at"]),
+                triples_rewritten=r["triples_rewritten"],
+            )
+            for r in rows
+        ]
 
     # ---------- Bulk + stats ----------
 

@@ -31,6 +31,7 @@ from memory_mission.memory.knowledge_graph import (
     Entity,
     GraphStats,
     KnowledgeGraph,
+    MergeResult,
     Triple,
     TripleSource,
 )
@@ -92,6 +93,7 @@ __all__ = [
     "HashEmbedder",
     "InMemoryEngine",
     "KnowledgeGraph",
+    "MergeResult",
     "Page",
     "PageFrontmatter",
     "PageKey",

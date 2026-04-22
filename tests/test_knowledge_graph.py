@@ -17,6 +17,7 @@ from memory_mission.memory import (
     Entity,
     GraphStats,
     KnowledgeGraph,
+    MergeResult,
     Triple,
     TripleSource,
 )
@@ -564,3 +565,180 @@ def test_corroborate_persists_across_sessions(tmp_path: Path) -> None:
         assert current.corroboration_count == 1
         sources = kg2.triple_sources("sarah", "works_at", "acme")
         assert len(sources) == 2
+
+
+# ---------- Step 14b: Entity merge ----------
+
+
+def test_merge_rewrites_subject_triples(kg: KnowledgeGraph) -> None:
+    """Triples where source is the subject are rewritten to target."""
+    kg.add_entity("alice-smith")
+    kg.add_entity("p_alice")
+    kg.add_entity("acme")
+    kg.add_triple("alice-smith", "works_at", "acme")
+    kg.add_triple("alice-smith", "knows", "bob")
+
+    result = kg.merge_entities(
+        "alice-smith",
+        "p_alice",
+        reviewer_id="reviewer",
+        rationale="resolved via shared email",
+    )
+
+    assert result.triples_rewritten == 2
+    triples = kg.query_entity("p_alice")
+    assert len(triples) == 2
+    assert all(t.subject == "p_alice" for t in triples)
+
+
+def test_merge_rewrites_object_triples(kg: KnowledgeGraph) -> None:
+    """Triples where source is the object are rewritten to target."""
+    kg.add_entity("p_alice")
+    kg.add_entity("alice-smith")
+    kg.add_triple("bob", "knows", "alice-smith")
+    kg.add_triple("carol", "reports_to", "alice-smith")
+
+    result = kg.merge_entities(
+        "alice-smith",
+        "p_alice",
+        reviewer_id="reviewer",
+        rationale="resolved via shared linkedin",
+    )
+
+    assert result.triples_rewritten == 2
+    incoming = kg.query_entity("p_alice", direction="incoming")
+    assert len(incoming) == 2
+    assert all(t.object == "p_alice" for t in incoming)
+
+
+def test_merge_deletes_source_entity(kg: KnowledgeGraph) -> None:
+    """Source becomes an alias that no longer exists as a distinct node."""
+    kg.add_entity("alice-smith", entity_type="person")
+    kg.add_entity("p_alice", entity_type="person")
+    kg.merge_entities(
+        "alice-smith",
+        "p_alice",
+        reviewer_id="reviewer",
+        rationale="merge",
+    )
+    assert kg.get_entity("alice-smith") is None
+    assert kg.get_entity("p_alice") is not None
+
+
+def test_merge_preserves_triple_sources_provenance(kg: KnowledgeGraph) -> None:
+    """Merge leaves ``triple_sources`` untouched — full audit chain survives."""
+    kg.add_entity("alice-smith")
+    kg.add_entity("p_alice")
+    kg.add_triple(
+        "alice-smith",
+        "works_at",
+        "acme",
+        source_closet="personal/alice",
+        source_file="/tmp/source.json",
+    )
+    sources_before = kg.triple_sources("alice-smith", "works_at", "acme")
+    assert len(sources_before) == 1
+
+    kg.merge_entities("alice-smith", "p_alice", reviewer_id="r", rationale="ok")
+
+    sources_after = kg.triple_sources("p_alice", "works_at", "acme")
+    assert len(sources_after) == 1
+    assert sources_after[0].source_closet == "personal/alice"
+    assert sources_after[0].source_file == "/tmp/source.json"
+
+
+def test_merge_records_audit_event(kg: KnowledgeGraph) -> None:
+    """Every merge lives in ``entity_merges`` with who/why/when."""
+    kg.add_entity("alice-smith")
+    kg.add_entity("p_alice")
+    kg.add_triple("alice-smith", "works_at", "acme")
+
+    kg.merge_entities(
+        "alice-smith",
+        "p_alice",
+        reviewer_id="reviewer-123",
+        rationale="shared email discovered in onboarding doc",
+    )
+
+    history = kg.merge_history("p_alice")
+    assert len(history) == 1
+    event = history[0]
+    assert isinstance(event, MergeResult)
+    assert event.source_entity == "alice-smith"
+    assert event.target_entity == "p_alice"
+    assert event.reviewer_id == "reviewer-123"
+    assert "shared email" in event.rationale
+    assert event.triples_rewritten == 1
+
+
+def test_merge_history_queryable_by_source_or_target(
+    kg: KnowledgeGraph,
+) -> None:
+    """``merge_history`` finds merges whether the entity was source or target."""
+    for alias in ("alice-smith", "a-smith"):
+        kg.add_entity(alias)
+    kg.add_entity("p_alice")
+    kg.merge_entities("alice-smith", "p_alice", reviewer_id="r", rationale="ok")
+    kg.merge_entities("a-smith", "p_alice", reviewer_id="r", rationale="ok")
+
+    # Target sees both merges
+    assert len(kg.merge_history("p_alice")) == 2
+    # Each source sees its own merge
+    assert len(kg.merge_history("alice-smith")) == 1
+    assert len(kg.merge_history("a-smith")) == 1
+
+
+def test_merge_requires_non_empty_rationale(kg: KnowledgeGraph) -> None:
+    kg.add_entity("alice-smith")
+    kg.add_entity("p_alice")
+    with pytest.raises(ValueError, match="rationale"):
+        kg.merge_entities("alice-smith", "p_alice", reviewer_id="r", rationale="")
+    with pytest.raises(ValueError, match="rationale"):
+        kg.merge_entities("alice-smith", "p_alice", reviewer_id="r", rationale="   ")
+
+
+def test_merge_rejects_source_equal_to_target(kg: KnowledgeGraph) -> None:
+    kg.add_entity("alice-smith")
+    with pytest.raises(ValueError, match="differ"):
+        kg.merge_entities(
+            "alice-smith",
+            "alice-smith",
+            reviewer_id="r",
+            rationale="ok",
+        )
+
+
+def test_merge_returns_zero_when_source_has_no_triples(kg: KnowledgeGraph) -> None:
+    """Merge of an entity with no triples still records the event (idempotent)."""
+    kg.add_entity("orphan")
+    kg.add_entity("p_target")
+    result = kg.merge_entities(
+        "orphan",
+        "p_target",
+        reviewer_id="r",
+        rationale="cleanup",
+    )
+    assert result.triples_rewritten == 0
+    # Audit row still written
+    assert len(kg.merge_history("p_target")) == 1
+
+
+def test_merge_history_empty_for_unknown_entity(kg: KnowledgeGraph) -> None:
+    assert kg.merge_history("nobody") == []
+
+
+def test_merge_persists_across_sessions(tmp_path: Path) -> None:
+    db_path = tmp_path / "merge-persist.kg.sqlite3"
+    with KnowledgeGraph(db_path) as kg1:
+        kg1.add_entity("alice-smith")
+        kg1.add_entity("p_alice")
+        kg1.add_triple("alice-smith", "works_at", "acme")
+        kg1.merge_entities("alice-smith", "p_alice", reviewer_id="r", rationale="ok")
+
+    with KnowledgeGraph(db_path) as kg2:
+        assert kg2.get_entity("alice-smith") is None
+        assert kg2.get_entity("p_alice") is not None
+        triples = kg2.query_entity("p_alice")
+        assert len(triples) == 1
+        assert triples[0].subject == "p_alice"
+        assert len(kg2.merge_history("p_alice")) == 1
