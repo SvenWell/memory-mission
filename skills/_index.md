@@ -102,3 +102,21 @@ Triggers: "detect firm candidates", "find cross-employee patterns",
 Constraints: administrator-run only, no direct KG writes (proposals
 only), no auto-promotion, independence check must pass, stop on
 error (don't cascade).
+
+## meeting-prep
+
+Compile a distilled context package (doctrine + per-attendee
+outgoing / incoming / events / preferences / related pages) for a
+specific meeting or task, render it as markdown, and hand it to the
+host-agent LLM for drafting. First workflow-level skill in Memory
+Mission; reuses `compile_agent_context` primitive which other
+workflow skills (email-draft, CRM-update, deal-memo) can share.
+Reads-only: never writes to KG or pages.
+
+Triggers: "prep meeting", "prep for", "brief on", "who is",
+"what do we know about", "meeting prep", "meeting with"
+
+Constraints: no LLM call inside the skill (host owns it), must not
+include superseded facts, every fact cites source_closet /
+source_file, no auto-promotion of observations, respect tier_floor
+in constitutional-mode firms.

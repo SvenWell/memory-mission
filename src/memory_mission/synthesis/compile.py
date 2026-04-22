@@ -1,0 +1,233 @@
+"""``compile_agent_context`` — build a distilled context package.
+
+Reads from the KG (for structured facts) and the BrainEngine (for
+curated pages). Optionally consults an IdentityResolver to fill in
+canonical names for attendees referenced by stable ID.
+
+Deliberately single-function, single-pass: this is a read-heavy
+primitive that should be cheap enough to call on every meeting-prep
+invocation.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+
+from memory_mission.identity.base import IdentityResolver
+from memory_mission.memory.engine import BrainEngine
+from memory_mission.memory.knowledge_graph import KnowledgeGraph, Triple
+from memory_mission.memory.pages import Page
+from memory_mission.memory.schema import Plane
+from memory_mission.memory.tiers import Tier
+from memory_mission.synthesis.context import (
+    AgentContext,
+    AttendeeContext,
+    DoctrineContext,
+)
+
+
+def compile_agent_context(
+    *,
+    role: str,
+    task: str,
+    attendees: list[str],
+    kg: KnowledgeGraph,
+    engine: BrainEngine | None = None,
+    plane: Plane = "firm",
+    employee_id: str | None = None,
+    tier_floor: Tier | None = None,
+    as_of: date | None = None,
+    identity_resolver: IdentityResolver | None = None,
+) -> AgentContext:
+    """Build the distilled context package for ``role`` + ``task``.
+
+    Args:
+        role: What the context is for — ``"meeting-prep"``,
+            ``"email-draft"``, etc. Stored on the output and threaded
+            into the rendered header.
+        task: Free-form description of the specific task. Shown to the
+            host-agent LLM verbatim.
+        attendees: Stable entity IDs (``p_<token>`` / ``o_<token>``)
+            or raw names for entities the workflow is scoped to.
+        kg: The firm's knowledge graph.
+        engine: Optional BrainEngine for curated page retrieval. When
+            supplied and ``tier_floor`` is set, ``DoctrineContext`` is
+            populated from the engine's pages at that floor or above.
+            When ``None``, doctrine is empty.
+        plane: Which plane the doctrine pages should come from
+            (default ``"firm"``).
+        employee_id: Required when ``plane == "personal"`` for the
+            engine scope filter.
+        tier_floor: If set, restrict doctrine pages to this tier or
+            higher. ``None`` means "no doctrine section" — most
+            meeting-prep calls should pass ``"policy"`` or
+            ``"doctrine"`` to get authoritative context.
+        as_of: Time-travel date. When supplied, the KG's temporal
+            filtering applies: only triples valid on that date
+            contribute. Invalidated (ended) triples are always
+            excluded regardless.
+        identity_resolver: When supplied, each attendee ID is
+            resolved via ``get_identity`` to populate
+            ``canonical_name``. Without a resolver, ``canonical_name``
+            stays ``None`` and the attendee ID is the display name.
+
+    Returns:
+        ``AgentContext`` ready to render or inspect.
+    """
+    attendee_contexts = [
+        _compile_attendee_context(
+            attendee_id=attendee_id,
+            kg=kg,
+            engine=engine,
+            plane=plane,
+            employee_id=employee_id,
+            as_of=as_of,
+            identity_resolver=identity_resolver,
+        )
+        for attendee_id in attendees
+    ]
+
+    doctrine = _compile_doctrine_context(
+        engine=engine,
+        plane=plane,
+        employee_id=employee_id,
+        tier_floor=tier_floor,
+    )
+
+    return AgentContext(
+        role=role,
+        task=task,
+        plane=plane,
+        as_of=as_of,
+        tier_floor=tier_floor,
+        attendees=attendee_contexts,
+        doctrine=doctrine,
+        generated_at=datetime.now(UTC),
+    )
+
+
+# ---------- Internals ----------
+
+
+def _compile_attendee_context(
+    *,
+    attendee_id: str,
+    kg: KnowledgeGraph,
+    engine: BrainEngine | None,
+    plane: Plane,
+    employee_id: str | None,
+    as_of: date | None,
+    identity_resolver: IdentityResolver | None,
+) -> AttendeeContext:
+    canonical_name: str | None = None
+    if identity_resolver is not None:
+        identity = identity_resolver.get_identity(attendee_id)
+        if identity is not None:
+            canonical_name = identity.canonical_name
+
+    outgoing_raw = kg.query_entity(attendee_id, direction="outgoing", as_of=as_of)
+    incoming_raw = kg.query_entity(attendee_id, direction="incoming", as_of=as_of)
+
+    # Filter out invalidated triples that query_entity did not already
+    # drop (it only drops them when as_of is given).
+    outgoing = _currently_valid(outgoing_raw, as_of=as_of)
+    incoming = _currently_valid(incoming_raw, as_of=as_of)
+
+    # Classify outgoing by predicate:
+    #   "event" → events
+    #   "prefers" → preferences
+    #   everything else → outgoing_triples
+    outgoing_triples: list[Triple] = []
+    events: list[Triple] = []
+    preferences: list[Triple] = []
+    for t in outgoing:
+        if t.predicate == "event":
+            events.append(t)
+        elif t.predicate == "prefers":
+            preferences.append(t)
+        else:
+            outgoing_triples.append(t)
+
+    # Events: newest first by valid_from (None sorts last)
+    events.sort(
+        key=lambda t: (t.valid_from is None, t.valid_from or date.min),
+        reverse=True,
+    )
+    # Put triples with an explicit valid_from at the top
+    events = [e for e in events if e.valid_from is not None] + [
+        e for e in events if e.valid_from is None
+    ]
+
+    # Related pages: look up a curated page by slug == attendee_id if engine available
+    related_pages = _related_pages_for(
+        attendee_id=attendee_id,
+        engine=engine,
+        plane=plane,
+        employee_id=employee_id,
+    )
+
+    return AttendeeContext(
+        attendee_id=attendee_id,
+        canonical_name=canonical_name,
+        outgoing_triples=outgoing_triples,
+        incoming_triples=incoming,
+        events=events,
+        preferences=preferences,
+        related_pages=related_pages,
+    )
+
+
+def _compile_doctrine_context(
+    *,
+    engine: BrainEngine | None,
+    plane: Plane,
+    employee_id: str | None,
+    tier_floor: Tier | None,
+) -> DoctrineContext:
+    """Return doctrine pages at or above ``tier_floor``.
+
+    When either ``engine`` or ``tier_floor`` is None, return empty —
+    the caller explicitly opted out of doctrine context.
+    """
+    if engine is None or tier_floor is None:
+        return DoctrineContext()
+
+    pages = engine.list_pages(plane=plane, employee_id=employee_id)
+    from memory_mission.memory.tiers import is_at_least, tier_level
+
+    kept = [p for p in pages if is_at_least(p.frontmatter.tier, tier_floor)]
+    # Highest tier first, then alphabetical by slug
+    kept.sort(key=lambda p: (-tier_level(p.frontmatter.tier), p.frontmatter.slug))
+    return DoctrineContext(pages=kept)
+
+
+def _related_pages_for(
+    *,
+    attendee_id: str,
+    engine: BrainEngine | None,
+    plane: Plane,
+    employee_id: str | None,
+) -> list[Page]:
+    """Fetch the curated page whose slug matches the attendee ID, if any.
+
+    V1 is intentionally minimal — one page per attendee, direct slug
+    match. Richer lookup (wikilink traversal, backlinks) is a later
+    refinement when real meeting-prep data surfaces the need.
+    """
+    if engine is None:
+        return []
+    page = engine.get_page(slug=attendee_id, plane=plane, employee_id=employee_id)
+    return [page] if page is not None else []
+
+
+def _currently_valid(triples: list[Triple], *, as_of: date | None) -> list[Triple]:
+    """Drop invalidated triples.
+
+    ``query_entity`` drops invalidated triples only when ``as_of`` is
+    set. When it isn't, any ended triple comes back from the query —
+    we filter those out here so the attendee context never contains
+    facts known to be false.
+    """
+    if as_of is not None:
+        return triples
+    return [t for t in triples if t.valid_to is None]

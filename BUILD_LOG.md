@@ -1837,3 +1837,224 @@ the first workflow-level consumer of the whole stack — extraction
 detection all contribute to what the brief says.
 
 ---
+
+## Step 16.5 — SQL-over-KG read primitive
+
+**Goal.** Let workflow agents and eval scripts answer open-ended
+questions about the KG without adding a bespoke method for each
+one. "Every doctrine-tier triple touched in the last 30 days by
+more than 2 employees" should be one SELECT, not a feature request.
+
+Inspired by Ricky's observation that serious agents benefit from
+SQL access AND graph-shaped queries over the same data. Google
+Spanner Graph does this natively; we get the SQL half on SQLite
+with one method.
+
+**Files modified:**
+- `src/memory_mission/memory/knowledge_graph.py`
+  - `KnowledgeGraph.sql_query(query, params, *, row_limit=1000)` —
+    read-only SQL over the existing tables (`entities`, `triples`,
+    `triple_sources`, `entity_merges`).
+- `tests/test_knowledge_graph.py` — 11 new tests covering: basic
+  SELECT, parameterized queries, WITH / CTE support, INSERT /
+  UPDATE / DELETE rejected, row limit enforcement, triple_sources
+  JOIN.
+
+**Safety model:**
+- **Dedicated read-only connection** per call: opened as
+  `file:<path>?mode=ro` via URI. The SQLite engine itself refuses
+  any write, even if the string check misses something.
+- **SELECT / WITH validation** as a nice error path (the engine
+  is the real defense).
+- **Row limit** (default 1000) prevents runaway results; overflow
+  raises rather than silently truncating.
+- **Parameterized placeholders** recommended via docstring;
+  callers who f-string untrusted text get what they deserve — the
+  library can't prevent that, but the RO connection limits blast
+  radius.
+
+**Verification:**
+- [x] `pytest` — 602/602 passed (11 new)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 63 source files
+- [x] INSERT, UPDATE, DELETE all rejected
+- [x] CTE (WITH clause) works
+- [x] Row limit raises on overflow
+
+**Why this is ~20 LOC that changes capability:** workflow agents
+(meeting-prep, future email-draft, deal-memo) can now answer
+questions we didn't anticipate without us shipping a new method.
+That matters specifically because the meeting-prep distilled
+context is computed against the KG — the richer the query surface,
+the smarter the context package.
+
+---
+
+## Docs: VISION + ARCHITECTURE + ABSTRACTIONS + first ADR
+
+Three-doc architecture spine modeled on Tolaria's pattern, plus the
+first ADR as a retroactive capture of Step 13's load-bearing
+decisions. Future contributors and future-us can now understand
+the current state without archaeology.
+
+**Files added:**
+- `docs/VISION.md` — why Memory Mission, problem, insight, method,
+  10 design principles. Short enough to scan in a sitting.
+- `docs/ARCHITECTURE.md` — current shipped state. Design principles
+  first, system diagram, three-representations-one-authority rule,
+  module-by-module walkthrough, stack, non-goals, concrete
+  end-to-end data flow example.
+- `docs/ABSTRACTIONS.md` — every Pydantic model + every predicate +
+  every tier + every event type in one place. Reference for anyone
+  writing against the library. Canonical predicate vocabulary and
+  module-level constants table.
+- `docs/adr/README.md` — ADR format, lifecycle, rules, index.
+- `docs/adr/0001-bayesian-corroboration.md` — first ADR,
+  retroactive for Step 13. Captures Noisy-OR vs alternatives,
+  0.99-cap rationale, re-evaluation triggers.
+
+BUILD_LOG remains the per-step narrative; the new docs are the
+synthesis layer. BUILD_LOG answers "what happened at each step";
+ARCHITECTURE answers "what is the system now"; ABSTRACTIONS
+answers "what does each thing mean"; ADRs answer "why that choice
+and not X."
+
+---
+
+## Step 17 — Meeting-prep workflow agent
+
+**Goal.** Close the V1 synthesis loop. `compile_agent_context`
+is the first workflow-level primitive that composes the full
+stack — identity resolution, tier filtering, corroboration-aware
+triples, coherence-checked facts, federated-aggregated beliefs
+all contribute to what the host-agent LLM sees before drafting.
+
+The shape follows Tolaria's Neighborhood-mode design (ADR-0069):
+structured, grouped, empty categories visible, machine-inspectable
+as well as renderable.
+
+**Files added:**
+- `src/memory_mission/synthesis/__init__.py` — package exports.
+- `src/memory_mission/synthesis/context.py` — Pydantic models:
+  - `AttendeeContext` — one attendee's neighborhood (outgoing /
+    incoming / events / preferences / related pages). Properties:
+    `fact_count`, `display_name`.
+  - `DoctrineContext` — firm-authoritative pages at/above
+    `tier_floor`, sorted highest-tier first.
+  - `AgentContext` — top-level package. `role` / `task` / `plane` /
+    `as_of` / `tier_floor` / attendees / doctrine / `generated_at`.
+    Properties: `fact_count`, `attendee_ids`. `.render()` method
+    produces markdown with inline provenance citations, empty
+    groups explicitly shown as `(none on file)` so the LLM sees
+    absence.
+- `src/memory_mission/synthesis/compile.py` — the primitive:
+  `compile_agent_context(role, task, attendees, kg, *, engine=None,
+  plane="firm", employee_id=None, tier_floor=None, as_of=None,
+  identity_resolver=None) -> AgentContext`. Read-only, idempotent,
+  single-pass.
+- `skills/meeting-prep/SKILL.md` — admin-facing workflow skill.
+  Forcing questions for ambiguous attendee, empty context, tier
+  floor choice, plane selection.
+- `tests/test_synthesis.py` — 21 tests covering:
+  - Empty KG → empty attendee (no crash)
+  - Triple classification by predicate (`event` / `prefers` /
+    other)
+  - Superseded facts omitted (EVALS.md 2.8 criterion 3 — hard
+    requirement, explicit test)
+  - Events sorted newest-first (criterion 2)
+  - Multiple attendees scoped independently (criterion 1)
+  - IdentityResolver produces canonical name
+  - `as_of` time-travel
+  - Doctrine tier_floor filter (criterion 5)
+  - No-engine, no-tier-floor paths
+  - Rendering (role + task, empty groups, doctrine section,
+    provenance citations, round-trip JSON)
+
+**Files modified:**
+- `skills/_index.md` and `skills/_manifest.jsonl` — meeting-prep
+  registry entry.
+
+**Verification:**
+- [x] `pytest` — 623/623 passed (21 new)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict, no issues in 66 source files
+- [x] Invalidated triples never appear in attendee context
+- [x] Tier floor filters doctrine correctly; highest tier sorts first
+- [x] Round-trip `AgentContext.model_dump_json()` →
+      `model_validate_json()` preserves structure
+- [x] Render produces markdown with every attendee, empty groups
+      shown explicitly, provenance cited as
+      `[source_closet/file]`
+
+**Architectural significance.**
+
+- **First workflow-level primitive.** Every prior step was
+  infrastructure (extraction, promotion, KG, identity, tier,
+  federated). Meeting-prep is the first thing a user actually
+  *does* with the stack — and it shows every prior step earning
+  its keep.
+- **Structured over prose.** `AgentContext` is a frozen Pydantic
+  tree. `.render()` is a convenience. The eval harness
+  (`docs/EVALS.md` section 2.8) grades the structured form
+  directly — no prose parsing, no judge drift.
+- **Composable primitive, not monolithic workflow.** `role` is a
+  free-form string — `"meeting-prep"` today, `"email-draft"` /
+  `"deal-memo"` / `"crm-update"` later reuse the same
+  `compile_agent_context` with different rendering.
+- **Coherence enforcement inherited for free.** Triples that land
+  in the context have already passed through Step 15's coherence
+  check at promote time. The package cannot contain contradicting
+  facts that were blocked in constitutional mode.
+- **Identity resolution inherited for free.** Attendees referred
+  to by stable `p_<id>` / `o_<id>` resolve once at prep time for
+  canonical name; all triple queries run against the same stable
+  IDs. No entity fragmentation in the rendered brief.
+
+**V1 loop is now complete.** End-to-end traceable:
+
+1. Connector pulls Gmail / Granola / Drive → staging.
+2. `extract-from-staging` skill runs host LLM → `ExtractionReport` → `ingest_facts` (identity canonicalized) → fact staging.
+3. `create_proposal` groups facts → `ProposalStore` pending.
+4. `review-proposals` skill surfaces each proposal to a human → `promote()` → `_apply_facts` (coherence scan + corroborate-or-add) → KG updated with provenance.
+5. `detect-firm-candidates` skill (admin) scans personal planes → stages firm-plane proposals for cross-employee patterns → back through review.
+6. `meeting-prep` skill calls `compile_agent_context` → host LLM drafts against the rendered context → briefing.
+
+Every write is reviewed. Every read is scoped. Every fact traces
+back to a source file, a reviewer, and a rationale.
+
+**Deferred:**
+- **Richer page lookup.** V1's `_related_pages_for` matches by
+  exact slug. Future: resolve `attendee_id` (stable ID) to
+  wikilinked page via an `identity -> slug` map on page
+  frontmatter.
+- **Relationship-strength scoring** (eval doc 2.5 + 2.6). Derived
+  view over interaction counts + recency + direction. Add when
+  real interaction volume supports it.
+- **Non-meeting roles.** `email-draft`, `deal-memo`, `crm-update`
+  all reuse `compile_agent_context` — skill + rendering refinement
+  per use case, not primitive changes.
+- **Full 15-meeting eval set** per section 2.8. Fixture shape
+  exists; populating with real meetings is a dogfood pass.
+
+**V1 summary.**
+
+17 steps shipped, 623 tests passing, mypy strict on 66 source
+files. Three architectural frames composed: Keagan's CRM-like
+system-of-record, Emile's governed PR-model promotion, Maciek's
+constitutional-plus-identity frame. One eval strategy documented.
+Six skills. Three doc pillars. One ADR.
+
+The firm now has: governed institutional memory, stable person
+IDs across channels, tiered doctrine with coherence enforcement,
+cross-employee federated learning, and a distilled-context
+primitive that turns the whole stack into a briefing.
+
+Post-V1 roadmap (deferred per plan):
+- Step 18: Legislative amendment cycle (batched promotions)
+- Step 19: Constitution bootstrap skill (cold-start firm truth)
+- Step 20: Relationship strength view + Graph One adapter
+- Ongoing: 50-scenario federated eval harness, distillation
+  coherence eval, threshold auto-tuning, MCP server surface for
+  host-agent tools.
+
+---
