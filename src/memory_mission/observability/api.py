@@ -23,6 +23,8 @@ from memory_mission.observability.events import (
     DraftEvent,
     ExtractionEvent,
     PromotionEvent,
+    ProposalCreatedEvent,
+    ProposalDecidedEvent,
     RetrievalEvent,
 )
 
@@ -161,6 +163,68 @@ def log_connector_invocation(
         latency_ms=latency_ms,
         success=success,
         error=error,
+    )
+    current_logger().write(event)
+    return event
+
+
+def log_proposal_created(
+    *,
+    proposal_id: str,
+    target_plane: Literal["personal", "firm"],
+    target_employee_id: str | None,
+    target_scope: str,
+    target_entity: str,
+    proposer_agent_id: str,
+    proposer_employee_id: str,
+    fact_count: int,
+    source_report_path: str,
+) -> ProposalCreatedEvent:
+    """Record a new promotion proposal entering the queue."""
+    event = ProposalCreatedEvent(
+        firm_id=current_firm_id(),
+        employee_id=current_employee_id(),
+        trace_id=current_trace_id(),
+        proposal_id=proposal_id,
+        target_plane=target_plane,
+        target_employee_id=target_employee_id,
+        target_scope=target_scope,
+        target_entity=target_entity,
+        proposer_agent_id=proposer_agent_id,
+        proposer_employee_id=proposer_employee_id,
+        fact_count=fact_count,
+        source_report_path=source_report_path,
+    )
+    current_logger().write(event)
+    return event
+
+
+def log_proposal_decided(
+    *,
+    proposal_id: str,
+    decision: Literal["approved", "rejected", "reopened"],
+    reviewer_id: str,
+    rationale: str,
+    target_plane: Literal["personal", "firm"],
+    target_employee_id: str | None,
+    target_entity: str,
+    fact_count: int,
+    rejection_count: int,
+) -> ProposalDecidedEvent:
+    """Record a reviewer's decision on a pending proposal."""
+    event = ProposalDecidedEvent(
+        firm_id=current_firm_id(),
+        employee_id=current_employee_id(),
+        trace_id=current_trace_id(),
+        proposal_id=proposal_id,
+        decision=decision,
+        reviewer_id=reviewer_id,
+        rationale=rationale,
+        target_plane=target_plane,
+        target_employee_id=target_employee_id,
+        target_entity=target_entity,
+        fact_count=fact_count,
+        rejection_count=rejection_count,
     )
     current_logger().write(event)
     return event

@@ -41,6 +41,8 @@ from memory_mission.observability.api import (
     log_draft,
     log_extraction,
     log_promotion,
+    log_proposal_created,
+    log_proposal_decided,
     log_retrieval,
 )
 from memory_mission.observability.context import (
@@ -57,6 +59,8 @@ from memory_mission.observability.events import (
     Event,
     ExtractionEvent,
     PromotionEvent,
+    ProposalCreatedEvent,
+    ProposalDecidedEvent,
     RetrievalEvent,
 )
 from memory_mission.observability.logger import (
@@ -75,6 +79,8 @@ __all__ = [
     "ExtractionEvent",
     "ObservabilityLogger",
     "PromotionEvent",
+    "ProposalCreatedEvent",
+    "ProposalDecidedEvent",
     "RetrievalEvent",
     "current_employee_id",
     "current_firm_id",
@@ -84,6 +90,8 @@ __all__ = [
     "log_draft",
     "log_extraction",
     "log_promotion",
+    "log_proposal_created",
+    "log_proposal_decided",
     "log_retrieval",
     "observability_scope",
     "parse_event_line",
