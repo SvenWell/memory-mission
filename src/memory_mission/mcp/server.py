@@ -20,6 +20,7 @@ from datetime import date
 from pathlib import Path
 from typing import Annotated, Any
 
+import structlog
 import typer
 from mcp.server.fastmcp import FastMCP
 
@@ -52,9 +53,15 @@ from memory_mission.memory.tiers import DEFAULT_TIER, Tier
 from memory_mission.permissions.policy import Policy, load_policy
 from memory_mission.promotion.proposals import ProposalStore
 
+_log = structlog.get_logger(__name__)
+
 _context: McpContext | None = None
 
-mcp: FastMCP = FastMCP("memory-mission")
+# The server name carries an explicit version so a future contract change
+# can ship alongside the old surface (new name: "memory-mission/v2") while
+# existing MCP clients keep connecting to v1. See ADR-0003 "deprecation
+# policy" section.
+mcp: FastMCP = FastMCP("memory-mission/v1")
 
 
 # ---------- Context lifecycle ----------
@@ -179,22 +186,31 @@ def _bootstrap_engine_from_wiki(engine: BrainEngine, wiki_root: Path) -> None:
     for md_file in wiki_root.rglob("*.md"):
         try:
             real_file = md_file.resolve()
-        except OSError:
+        except OSError as exc:
+            _log.warning("bootstrap_skip", path=str(md_file), reason="resolve-failed", err=str(exc))
             continue
         if not real_file.is_relative_to(real_root):
             # Symlink escape — refuse to load content outside wiki_root.
+            _log.warning("bootstrap_skip", path=str(md_file), reason="symlink-escapes-wiki-root")
             continue
         plane, employee_id = _plane_from_path(md_file, wiki_root)
         if plane is None:
+            _log.debug(
+                "bootstrap_skip",
+                path=str(md_file),
+                reason="unrecognized-path-or-invalid-employee-id",
+            )
             continue
         try:
             raw = real_file.read_text(encoding="utf-8")
             page = parse_page(raw)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            _log.warning("bootstrap_skip", path=str(md_file), reason="parse-failed", err=str(exc))
             continue
         try:
             engine.put_page(page, plane=plane, employee_id=employee_id)
-        except ValueError:
+        except ValueError as exc:
+            _log.warning("bootstrap_skip", path=str(md_file), reason="put-failed", err=str(exc))
             continue
 
 
@@ -223,15 +239,20 @@ def _plane_from_path(md_file: Path, wiki_root: Path) -> tuple[Plane | None, str 
 
 @mcp.tool()
 def query(
-    question: str,
+    q: str,
     plane: Plane = "firm",
     tier_floor: Tier | None = None,
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    """Hybrid search the firm or personal plane. Returns ranked page hits."""
+    """Hybrid search the firm or personal plane. Returns ranked page hits.
+
+    ``q`` is the search string (named to match ``search`` for
+    cross-tool consistency — clients building pagination helpers
+    share the same kwarg).
+    """
     hits = query_tool(
         _ctx(),
-        question=question,
+        question=q,
         plane=plane,
         tier_floor=tier_floor,
         limit=limit,
@@ -250,15 +271,19 @@ def get_page(slug: str, plane: Plane = "firm") -> dict[str, Any] | None:
 
 @mcp.tool()
 def search(
-    query: str,
+    q: str,
     plane: Plane = "firm",
     tier_floor: Tier | None = None,
     limit: int = 10,
 ) -> list[dict[str, Any]]:
-    """Keyword search with permission filtering. Returns ranked page hits."""
+    """Keyword search with permission filtering. Returns ranked page hits.
+
+    ``q`` is the search string (matches ``query``'s kwarg; the old
+    name ``query`` conflicted with this tool's own name).
+    """
     hits = search_tool(
         _ctx(),
-        query=query,
+        query=q,
         plane=plane,
         tier_floor=tier_floor,
         limit=limit,
@@ -317,9 +342,12 @@ def compile_agent_context(
     plane: Plane = "firm",
     tier_floor: Tier | None = None,
     as_of: date | None = None,
-    render: bool = False,
-) -> dict[str, Any] | str:
-    """Compile a distilled context package for a workflow task."""
+) -> dict[str, Any]:
+    """Compile a distilled context package for a workflow task.
+
+    Returns the structured ``AgentContext`` as JSON. For the rendered
+    markdown form, call ``render_agent_context`` with the same args.
+    """
     result = compile_agent_context_tool(
         _ctx(),
         role=role,
@@ -328,11 +356,40 @@ def compile_agent_context(
         plane=plane,
         tier_floor=tier_floor,
         as_of=as_of,
-        render=render,
+        render=False,
     )
-    if isinstance(result, str):
-        return result
+    assert not isinstance(result, str)  # render=False path
     return result.model_dump(mode="json")
+
+
+@mcp.tool()
+def render_agent_context(
+    role: str,
+    task: str,
+    attendees: list[str],
+    plane: Plane = "firm",
+    tier_floor: Tier | None = None,
+    as_of: date | None = None,
+) -> str:
+    """Compile and render the distilled context package as markdown.
+
+    Shortcut for ``compile_agent_context`` followed by ``.render()``.
+    Split from compile so the MCP return type is a single concrete
+    shape per tool (dict for compile, str for render) — clients no
+    longer branch on a union return.
+    """
+    result = compile_agent_context_tool(
+        _ctx(),
+        role=role,
+        task=task,
+        attendees=attendees,
+        plane=plane,
+        tier_floor=tier_floor,
+        as_of=as_of,
+        render=True,
+    )
+    assert isinstance(result, str)  # render=True path
+    return result
 
 
 @mcp.tool()

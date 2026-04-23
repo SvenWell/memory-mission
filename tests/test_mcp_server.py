@@ -547,8 +547,8 @@ def test_full_round_trip_create_approve_query(context: McpContext) -> None:
 def test_server_registers_expected_tools() -> None:
     """FastMCP should register every tool decorated in server.py.
 
-    13 tools after dropping sql_query_readonly (security: MCP scope is
-    orthogonal to Policy scope; raw SQL bypassed viewer_scopes).
+    14 tools: 8 read (compile + render_agent_context split), 6 write.
+    sql_query_readonly removed from MCP; kept in Python API only.
     """
     from memory_mission.mcp import server
 
@@ -561,6 +561,7 @@ def test_server_registers_expected_tools() -> None:
         "get_triples",
         "check_coherence",
         "compile_agent_context",
+        "render_agent_context",
         "create_proposal",
         "list_proposals",
         "approve_proposal",
