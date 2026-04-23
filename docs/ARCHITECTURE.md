@@ -214,6 +214,19 @@ Invalidated triples are always excluded. Events are sorted newest-first. Classif
 
 Consumed by `skills/meeting-prep/`. Other workflow skills (email-draft, deal-memo, CRM-update) reuse the same primitive with different `role` values — the package is composable.
 
+### `src/memory_mission/mcp/` — Step 18
+
+Multi-user agent surface. Wraps the existing engine + KG + promotion primitives in an MCP server so any MCP-compatible host (Claude Code, Cursor, Codex, Hermes) can integrate without a bespoke Python adapter.
+
+- `auth.py` — loads `firm/mcp_clients.yaml`, maps `employee_id` → scopes (`read` / `propose` / `review`). Unknown employees fail closed.
+- `context.py` — `McpContext` holds process-wide handles (engine, kg, store, identity, policy) plus the validated employee + scope set. `tool_scope()` wraps every tool call in an `observability_scope`.
+- `tools.py` — 14 thin wrappers (8 read, 6 write). No new domain logic — every tool delegates to the same primitives the Python API uses.
+- `server.py` — FastMCP registrations + the `python -m memory_mission.mcp` CLI. `initialize_from_handles()` is the test / embedding seam.
+
+**Access model:** one server process per employee. Host agents spawn it per session with `--firm-root`, `--firm-id`, `--employee-id`. Identity is baked in at startup; every tool call acts on behalf of that employee with `viewer_id` threaded into permission checks. See `docs/adr/0003-mcp-as-agent-surface.md` for the rationale and `docs/recipes/mcp-integration.md` for the operator guide.
+
+**Scope tiers:** `read` covers non-mutating lookups; `propose` adds `create_proposal` + `list_proposals`; `review` adds approve / reject / reopen + `merge_entities` + `sql_query_readonly`. SQL sits at the `review` tier because raw SQL bypasses page-level `can_read` and enumerates the whole KG — different guardrail.
+
 ---
 
 ## V1 polish pass (post-Step 17)

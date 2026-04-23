@@ -46,7 +46,8 @@ memory-mission/
 │   ├── permissions/          ← Policy + can_read / can_propose (Step 8)
 │   ├── promotion/            ← Proposal + PR-model review gate (Step 10, 15)
 │   ├── federated/            ← cross-employee pattern detector (Step 16)
-│   └── synthesis/            ← compile_agent_context + AgentContext (Step 17)
+│   ├── synthesis/            ← compile_agent_context + AgentContext (Step 17)
+│   └── mcp/                  ← MCP server surface — multi-user tool access (Step 18)
 │
 ├── skills/
 │   ├── backfill-gmail/       ← pull Gmail → personal staging
@@ -58,7 +59,7 @@ memory-mission/
 │   ├── meeting-prep/         ← distilled context for workflow agents
 │   └── _index.md             ← human-readable skill registry
 │
-├── tests/                    ← 643 tests, pytest, mypy strict
+├── tests/                    ← 680 tests, pytest, mypy strict
 ├── BUILD_LOG.md              ← per-step history, append-only
 ├── CLAUDE.md                 ← one-line @docs/AGENTS.md shim
 ├── README.md                 ← public entry point
