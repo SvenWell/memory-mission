@@ -24,7 +24,13 @@ from memory_mission.memory.pages import Page
 from memory_mission.memory.schema import Plane
 from memory_mission.memory.tiers import Tier
 from memory_mission.observability.api import coherence_warnings_for
-from memory_mission.permissions.policy import Policy, can_read, viewer_scopes
+from memory_mission.permissions.policy import (
+    PUBLIC_SCOPE,
+    Policy,
+    can_read,
+    page_scope,
+    viewer_scopes,
+)
 from memory_mission.synthesis.context import (
     AgentContext,
     AttendeeContext,
@@ -79,21 +85,28 @@ def compile_agent_context(
             ``canonical_name``. Without a resolver, ``canonical_name``
             stays ``None`` and the attendee ID is the display name.
         viewer_id: The employee whose perspective is compiling this
-            context. When paired with ``policy``, KG triples are
-            filtered by the viewer's scopes and firm-plane doctrine
-            pages are filtered via ``can_read``.
-        policy: The firm's permissions policy. Pairs with ``viewer_id``
-            — both must be set for scope enforcement to engage. Either
-            absent = no filtering (backwards compat for firms without
-            policy and for personal-plane compiles that own their
-            scope model).
+            context. When set, KG triples and firm-plane doctrine pages
+            are filtered to what this viewer is allowed to read.
+            ``None`` means "internal caller" — no filtering, trusted
+            context (tests, extraction pipeline, ingestion).
+        policy: The firm's permissions policy. With ``viewer_id`` set:
+            present → full ``can_read`` + ``viewer_scopes`` filtering;
+            ``None`` → fail-closed to public-only scope. This keeps
+            accidental policy removal from silently re-exposing
+            previously-scoped data.
 
     Returns:
         ``AgentContext`` ready to render or inspect.
     """
+    # Fail-closed when a viewer is set but the firm hasn't configured a
+    # policy — public-only rather than unfiltered. Keeps accidental
+    # policy removal from silently exposing previously-scoped data.
     scopes: frozenset[str] | None = None
-    if policy is not None and viewer_id is not None:
-        scopes = viewer_scopes(policy, viewer_id)
+    if viewer_id is not None:
+        if policy is not None:
+            scopes = viewer_scopes(policy, viewer_id)
+        else:
+            scopes = frozenset({PUBLIC_SCOPE})
 
     attendee_contexts = [
         _compile_attendee_context(
@@ -259,8 +272,12 @@ def _compile_doctrine_context(
     from memory_mission.memory.tiers import is_at_least, tier_level
 
     kept = [p for p in pages if is_at_least(p.frontmatter.tier, tier_floor)]
-    if policy is not None and viewer_id is not None and plane == "firm":
-        kept = [p for p in kept if can_read(policy, viewer_id, p)]
+    if viewer_id is not None and plane == "firm":
+        if policy is not None:
+            kept = [p for p in kept if can_read(policy, viewer_id, p)]
+        else:
+            # Fail-closed: no policy configured → public-only doctrine.
+            kept = [p for p in kept if page_scope(p) == PUBLIC_SCOPE]
     # Highest tier first, then alphabetical by slug
     kept.sort(key=lambda p: (-tier_level(p.frontmatter.tier), p.frontmatter.slug))
     return DoctrineContext(pages=kept)

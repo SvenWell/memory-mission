@@ -42,6 +42,7 @@ deleted — they're invalidated by setting ``valid_to``, preserving history.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
@@ -726,13 +727,24 @@ class KnowledgeGraph:
             raise ValueError(
                 f"sql_query accepts only SELECT or WITH statements; got: {stripped[:60]!r}"
             )
+        # Block cross-database + PRAGMA paths. ATTACH DATABASE would let a
+        # caller reach another firm's SQLite file, crossing the one-firm-
+        # one-DB isolation boundary (core rule 6). PRAGMA is the only
+        # remaining SQLite side-effect surface under query_only mode;
+        # reject it explicitly so operators don't accidentally leak
+        # schema or change connection state.
+        if re.search(r"\b(ATTACH|DETACH|PRAGMA)\b", upper):
+            raise ValueError("sql_query rejects ATTACH / DETACH / PRAGMA statements")
         if row_limit < 1:
             raise ValueError(f"row_limit must be >= 1, got {row_limit}")
 
         # Dedicated read-only connection: even a malformed validation
-        # cannot land a write because the engine refuses.
+        # cannot land a write because the engine refuses. ``query_only``
+        # is defense-in-depth — it blocks side-effect statements
+        # (PRAGMA, temp-table creation) that mode=ro alone tolerates.
         ro_conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
         ro_conn.row_factory = sqlite3.Row
+        ro_conn.execute("PRAGMA query_only = ON")
         try:
             # Fetch one extra row so we can detect overflow.
             rows = ro_conn.execute(query, params).fetchmany(row_limit + 1)
@@ -995,12 +1007,26 @@ class KnowledgeGraph:
         already had ``works_at acme``, you end up with two triples after
         rewrite). That dedupe is a separate concern and can land later.
 
-        Raises ``ValueError`` on empty rationale or source == target.
+        Raises ``ValueError`` on empty rationale, ``source == target``,
+        or when the rewrite would colocate triples of differing scopes
+        on the same ``(subject, predicate, object)`` — scope drift via
+        merge must be handled explicitly (split the merge, invalidate
+        the conflicting triple, then re-add under the chosen scope).
         """
         if not rationale or not rationale.strip():
             raise ValueError("rationale is required on every merge")
         if source == target:
             raise ValueError("source and target must differ")
+
+        # Pre-check: would the rewrite create (s,p,o) collisions with
+        # differing scopes on the target entity? If so, raise BEFORE any
+        # write — merge must not be the path that silently reclassifies.
+        conflicts = self._merge_scope_conflicts(source, target)
+        if conflicts:
+            summary = "; ".join(conflicts)
+            raise ValueError(
+                f"merge would colocate differing scopes on {len(conflicts)} triple(s): {summary}"
+            )
 
         now = datetime.now(UTC)
         now_iso = now.isoformat()
@@ -1038,6 +1064,40 @@ class KnowledgeGraph:
             merged_at=now,
             triples_rewritten=total,
         )
+
+    def _merge_scope_conflicts(self, source: str, target: str) -> list[str]:
+        """Return a list of (s,p,o) rewrites that would create scope collisions.
+
+        A merge rewrites every triple ``source → target``. If after the
+        rewrite two currently-true triples on the same ``(subject,
+        predicate, object)`` exist at different scopes, that is a silent
+        reclassification — merge refuses and the reviewer splits the work.
+        """
+        # Get all currently-true triples that reference source or target.
+        rows = self._conn.execute(
+            """
+            SELECT subject, predicate, object, scope FROM triples
+            WHERE valid_to IS NULL
+              AND (subject = ? OR object = ? OR subject = ? OR object = ?)
+            """,
+            (source, source, target, target),
+        ).fetchall()
+
+        # Simulate the rewrite: source → target on subject + object.
+        rewritten: dict[tuple[str, str, str], set[str]] = {}
+        for r in rows:
+            subj = target if r["subject"] == source else r["subject"]
+            obj = target if r["object"] == source else r["object"]
+            key = (subj, r["predicate"], obj)
+            scope = r["scope"] if r["scope"] is not None else "public"
+            rewritten.setdefault(key, set()).add(scope)
+
+        conflicts: list[str] = []
+        for (subj, pred, obj), scopes in rewritten.items():
+            if len(scopes) > 1:
+                scope_list = sorted(scopes)
+                conflicts.append(f"{subj} {pred} {obj}: scopes={scope_list}")
+        return conflicts
 
     def merge_history(self, entity_name: str) -> list[MergeResult]:
         """Return every merge touching ``entity_name`` (as source or target).

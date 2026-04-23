@@ -1048,6 +1048,63 @@ def test_corroborate_raises_on_scope_mismatch(kg: KnowledgeGraph) -> None:
         )
 
 
+def test_sql_query_rejects_attach(kg: KnowledgeGraph) -> None:
+    """ATTACH DATABASE crosses firm isolation — reject."""
+    with pytest.raises(ValueError, match="ATTACH"):
+        kg.sql_query("SELECT * FROM triples; ATTACH DATABASE 'x.db' AS leak")
+    # And inside a WITH / CTE
+    with pytest.raises(ValueError, match="ATTACH"):
+        kg.sql_query("WITH x AS (SELECT 1) SELECT * FROM x; ATTACH DATABASE 'x.db' AS leak")
+
+
+def test_sql_query_rejects_pragma(kg: KnowledgeGraph) -> None:
+    """PRAGMA is a side-effect surface — reject in sql_query."""
+    with pytest.raises(ValueError, match="PRAGMA"):
+        kg.sql_query("SELECT 1; PRAGMA table_list")
+
+
+def test_merge_entities_rejects_scope_conflict(kg: KnowledgeGraph) -> None:
+    """Merge that would colocate differing scopes on one (s,p,o) raises."""
+    kg.add_triple("alice-s", "works_at", "acme", scope="partner-only")
+    kg.add_triple("alice-smith", "works_at", "acme", scope="public")
+    with pytest.raises(ValueError, match="differing scopes"):
+        kg.merge_entities(
+            source="alice-s",
+            target="alice-smith",
+            reviewer_id="reviewer",
+            rationale="same person",
+        )
+
+
+def test_merge_entities_succeeds_when_scopes_match(kg: KnowledgeGraph) -> None:
+    """Matching scopes on overlapping triples merge fine."""
+    kg.add_triple("alice-s", "works_at", "acme", scope="partner-only")
+    kg.add_triple("alice-smith", "works_at", "acme", scope="partner-only")
+    result = kg.merge_entities(
+        source="alice-s",
+        target="alice-smith",
+        reviewer_id="reviewer",
+        rationale="same person",
+    )
+    assert result.triples_rewritten >= 1
+
+
+def test_has_triple_source_reports_existing_source(kg: KnowledgeGraph) -> None:
+    kg.add_triple("alice", "works_at", "acme", source_closet="firm", source_file="/tmp/seed.json")
+    assert (
+        kg.has_triple_source(
+            subject="alice", predicate="works_at", obj="acme", source_file="/tmp/seed.json"
+        )
+        is True
+    )
+    assert (
+        kg.has_triple_source(
+            subject="alice", predicate="works_at", obj="acme", source_file="/tmp/other.json"
+        )
+        is False
+    )
+
+
 def test_corroborate_accepts_matching_scope(kg: KnowledgeGraph) -> None:
     kg.add_triple(
         "alice",

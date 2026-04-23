@@ -23,7 +23,7 @@ Two shapes of "add a protocol layer" are possible:
 
 ## Decision
 
-**Ship an MCP server at `src/memory_mission/mcp/` that wraps the existing engine + KG + promotion surfaces. One server process per employee. 14 tools total — 8 read, 6 write. Auth via a per-firm YAML manifest. Every mutating tool opens an `observability_scope` so audit trail coverage is complete over MCP, not just over the Python API.**
+**Ship an MCP server at `src/memory_mission/mcp/` that wraps the existing engine + KG + promotion surfaces. One server process per employee. 13 tools total — 7 read, 6 write. Auth via a per-firm YAML manifest. Every mutating tool opens an `observability_scope` so audit trail coverage is complete over MCP, not just over the Python API.**
 
 - New package: `src/memory_mission/mcp/{__init__, auth, context, tools, server, __main__}.py`.
 - CLI: `python -m memory_mission.mcp --firm-root <path> --firm-id <id> --employee-id <id>`.
@@ -33,7 +33,7 @@ Two shapes of "add a protocol layer" are possible:
 
 ## Tool set
 
-Eight read tools (scope: `read`):
+Seven read tools (scope: `read`):
 
 1. `query(question, plane, tier_floor, limit)` — hybrid search
 2. `get_page(slug, plane)` — one page by slug
@@ -42,18 +42,23 @@ Eight read tools (scope: `read`):
 5. `get_triples(entity_name, direction, as_of)` — outgoing / incoming / both
 6. `check_coherence(subject, predicate, new_object, new_tier)` — non-mutating preview
 7. `compile_agent_context(role, task, attendees, plane, tier_floor, as_of, render)` — distilled package
-8. `sql_query_readonly(query, params, row_limit)` — raw KG read (gated behind `review`)
 
 Six write tools (scope: `propose` or `review`):
 
-9. `create_proposal(target_entity, facts, source_report_path, target_plane, target_employee_id, target_scope)` — stage (scope: `propose`)
-10. `list_proposals(status, target_plane, target_entity)` — list (scope: `propose`)
-11. `approve_proposal(proposal_id, rationale)` — promote (scope: `review`)
-12. `reject_proposal(proposal_id, rationale)` — reject (scope: `review`)
-13. `reopen_proposal(proposal_id, rationale)` — reopen (scope: `review`)
-14. `merge_entities(source, target, rationale)` — graph rewrite (scope: `review`)
+8. `create_proposal(target_entity, facts, source_report_path, target_plane, target_employee_id, target_scope)` — stage (scope: `propose`)
+9. `list_proposals(status, target_plane, target_entity)` — list (scope: `propose`)
+10. `approve_proposal(proposal_id, rationale)` — promote (scope: `review`)
+11. `reject_proposal(proposal_id, rationale)` — reject (scope: `review`)
+12. `reopen_proposal(proposal_id, rationale)` — reopen (scope: `review`)
+13. `merge_entities(source, target, rationale)` — graph rewrite (scope: `review`)
 
-`sql_query_readonly` sits at `review` scope because raw SQL is the one read surface that can enumerate the whole KG regardless of page-level permissions. Page / entity / triple lookups are routed through `can_read`; SQL isn't. Different guardrail.
+### What was shipped and then removed: `sql_query_readonly`
+
+The initial Step 18 shipment included a fourteenth tool, `sql_query_readonly`, gated behind `review` scope. A subsequent review found the gate was the wrong shape: MCP scope (`read` / `propose` / `review`) is **orthogonal** to Policy scope (`public` / `partner-only` / firm-defined). A reviewer who did not have `partner-only` in their `policy.scopes` could still extract `partner-only` triples by running raw SQL — the `viewer_scopes` filter on `query_entity` / `query_relationship` / `timeline` did not apply to raw SQL.
+
+Rather than re-engineer SQL rewriting to inject scope predicates (fragile) or require every REVIEW-scoped employee to hold every policy scope (surprising governance rule), **`sql_query_readonly` was removed from the MCP surface entirely**. `KnowledgeGraph.sql_query` remains available as a Python API for admin scripts, hardened with `PRAGMA query_only = ON` and explicit rejection of `ATTACH` / `DETACH` / `PRAGMA` statements (no cross-firm SQLite escape).
+
+Operator story: admins who need raw KG exploration do it via an in-process script, not over MCP.
 
 ## Options considered
 

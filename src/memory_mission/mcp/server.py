@@ -41,7 +41,6 @@ from memory_mission.mcp.tools import (
     reject_proposal_tool,
     reopen_proposal_tool,
     search_tool,
-    sql_query_readonly_tool,
 )
 from memory_mission.memory.engine import BrainEngine, InMemoryEngine
 from memory_mission.memory.knowledge_graph import KnowledgeGraph
@@ -314,21 +313,6 @@ def compile_agent_context(
     if isinstance(result, str):
         return result
     return result.model_dump(mode="json")
-
-
-@mcp.tool()
-def sql_query_readonly(
-    query: str,
-    params: list[Any] | None = None,
-    row_limit: int = 1000,
-) -> list[dict[str, Any]]:
-    """Read-only SQL over the KG. Gated behind REVIEW scope — raw graph access."""
-    return sql_query_readonly_tool(
-        _ctx(),
-        query=query,
-        params=params,
-        row_limit=row_limit,
-    )
 
 
 @mcp.tool()

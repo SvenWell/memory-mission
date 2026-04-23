@@ -1,10 +1,10 @@
 # Recipe: Wire a host agent to Memory Mission via MCP
 
-Memory Mission ships an MCP server at `src/memory_mission/mcp/`. Any MCP-compatible host agent (Claude Code, Cursor, Codex, Hermes, a custom one) can spawn the server as a subprocess and call its 14 tools. This recipe covers setup, registration, and the per-firm security model.
+Memory Mission ships an MCP server at `src/memory_mission/mcp/`. Any MCP-compatible host agent (Claude Code, Cursor, Codex, Hermes, a custom one) can spawn the server as a subprocess and call its 13 tools. This recipe covers setup, registration, and the per-firm security model.
 
 ## What you get
 
-Fourteen tools exposed over MCP's stdio transport — 8 read, 6 write. All routed through the same engine + KG + promotion primitives the in-process Python API uses. Every mutating call opens an `observability_scope` so audit trail coverage is complete.
+Thirteen tools exposed over MCP's stdio transport — 7 read, 6 write. All routed through the same engine + KG + promotion primitives the in-process Python API uses. Every mutating call opens an `observability_scope` so audit trail coverage is complete.
 
 | Tool | Scope | Purpose |
 |---|---|---|
@@ -15,13 +15,14 @@ Fourteen tools exposed over MCP's stdio transport — 8 read, 6 write. All route
 | `get_triples` | read | Outgoing / incoming triples for an entity |
 | `check_coherence` | read | Non-mutating preview of coherence warnings |
 | `compile_agent_context` | read | Distilled context package for a workflow task |
-| `sql_query_readonly` | review | Raw read-only SQL over the KG |
 | `create_proposal` | propose | Stage a new proposal for review |
 | `list_proposals` | propose | List proposals filtered by status / plane / entity |
 | `approve_proposal` | review | Promote — applies facts to the KG |
 | `reject_proposal` | review | Reject with rationale |
 | `reopen_proposal` | review | Reopen a rejected proposal |
 | `merge_entities` | review | Rewrite triples using `source` to use `target` |
+
+Raw SQL access (`KnowledgeGraph.sql_query`) is available as a Python API for admin scripts but NOT exposed over MCP — see "What's deliberately NOT exposed" below.
 
 See `docs/adr/0003-mcp-as-agent-surface.md` for the full rationale.
 
@@ -59,7 +60,7 @@ carol@acme.com:
 Scope meanings:
 - `read` — every non-mutating tool (query, get_page, search, get_entity, get_triples, compile_agent_context, check_coherence)
 - `propose` — `create_proposal`, `list_proposals`
-- `review` — `approve_proposal`, `reject_proposal`, `reopen_proposal`, `merge_entities`, `sql_query_readonly`
+- `review` — `approve_proposal`, `reject_proposal`, `reopen_proposal`, `merge_entities`
 
 Unknown employees fail closed — the server refuses to start for anyone not in this file.
 
@@ -102,7 +103,7 @@ The process blocks on stdio waiting for MCP messages. Ctrl-C to stop. This confi
 }
 ```
 
-Restart Claude Code. All 14 tools appear namespaced under `memory-mission:` (e.g., `memory-mission:query`, `memory-mission:approve_proposal`).
+Restart Claude Code. All 13 tools appear namespaced under `memory-mission:` (e.g., `memory-mission:query`, `memory-mission:approve_proposal`).
 
 ### Cursor
 

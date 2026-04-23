@@ -5,8 +5,12 @@ required scope, opens an observability scope, and calls into the
 in-process primitives. No new domain logic lives here — this file is
 the protocol boundary, not a business layer.
 
-Fourteen tools: eight read, six write. See ``docs/adr/0003-mcp-as-agent-surface.md``
-for the rationale on tool count and scope mapping.
+Thirteen tools: seven read, six write. ``sql_query_readonly`` was
+dropped from the MCP surface because MCP scope (read/propose/review)
+is orthogonal to Policy scope (partner-only, etc.) — raw SQL would let
+a reviewer bypass ``viewer_scopes`` filtering. See
+``docs/adr/0003-mcp-as-agent-surface.md`` for the rationale on tool
+count and scope mapping.
 """
 
 from __future__ import annotations
@@ -138,7 +142,7 @@ def get_triples_tool(
     that haven't configured one).
     """
     ctx.require_scope(Scope.READ)
-    scopes = _viewer_scopes_or_none(ctx)
+    scopes = _mcp_viewer_scopes(ctx)
     with ctx.tool_scope():
         return ctx.kg.query_entity(
             entity_name,
@@ -205,20 +209,15 @@ def compile_agent_context_tool(
     return packet
 
 
-def sql_query_readonly_tool(
-    ctx: McpContext,
-    *,
-    query: str,
-    params: list[Any] | None = None,
-    row_limit: int = 1000,
-) -> list[dict[str, Any]]:
-    """Read-only SQL over the KG. Gated behind REVIEW scope — it's raw graph access."""
-    ctx.require_scope(Scope.REVIEW)
-    with ctx.tool_scope():
-        return ctx.kg.sql_query(query, params or (), row_limit=row_limit)
-
-
 # ---------- Write tools ----------
+#
+# sql_query_readonly was previously here but was removed from the MCP
+# tool surface: MCP scope (read/propose/review) is orthogonal to
+# Policy scope (partner-only, etc.), so a reviewer without
+# partner-only read access could use raw SQL to bypass viewer_scopes
+# filtering. KG.sql_query remains available to admin scripts as a
+# Python API; the docs/recipes/mcp-integration.md "what's NOT exposed"
+# section tracks this.
 
 
 def create_proposal_tool(
@@ -358,15 +357,20 @@ def merge_entities_tool(
 # ---------- Helpers ----------
 
 
-def _viewer_scopes_or_none(ctx: McpContext) -> frozenset[str] | None:
-    """Return the viewer's effective scope set, or None if the firm has no policy.
+def _mcp_viewer_scopes(ctx: McpContext) -> frozenset[str]:
+    """Return the viewer's effective scope set for MCP callers.
 
-    Threaded into KG read methods' ``viewer_scopes`` kwarg. ``None`` tells
-    the KG to skip filtering — right default for firms that haven't
-    configured a permissions policy.
+    Fail-closed by default: firms that haven't configured
+    ``protocols/permissions.md`` still filter KG reads to public-scope
+    triples. That way accidentally deleting the policy file doesn't
+    silently re-expose previously-scoped data.
+
+    Threaded into KG read methods' ``viewer_scopes`` kwarg. Always a
+    real ``frozenset``, never ``None`` — ``None`` is reserved for
+    internal (non-MCP) callers that don't carry an auth identity.
     """
     if ctx.policy is None:
-        return None
+        return frozenset({"public"})
     return viewer_scopes(ctx.policy, ctx.employee_id)
 
 
@@ -402,5 +406,4 @@ __all__ = [
     "reject_proposal_tool",
     "reopen_proposal_tool",
     "search_tool",
-    "sql_query_readonly_tool",
 ]

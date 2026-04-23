@@ -31,7 +31,6 @@ from memory_mission.mcp.tools import (
     reject_proposal_tool,
     reopen_proposal_tool,
     search_tool,
-    sql_query_readonly_tool,
 )
 from memory_mission.memory.engine import InMemoryEngine
 from memory_mission.memory.knowledge_graph import KnowledgeGraph
@@ -303,22 +302,6 @@ def test_check_coherence_tool_flags_conflict(context: McpContext) -> None:
     assert warnings[0].conflicting_object == "acme"
 
 
-def test_sql_query_readonly_tool_requires_review_scope(context: McpContext) -> None:
-    ctx = _read_only_context(context, frozenset({Scope.READ, Scope.PROPOSE}))
-    with pytest.raises(AuthError, match="review"):
-        sql_query_readonly_tool(ctx, query="SELECT 1 AS n")
-
-
-def test_sql_query_readonly_tool_runs(context: McpContext) -> None:
-    rows = sql_query_readonly_tool(context, query="SELECT COUNT(*) AS n FROM entities")
-    assert rows == [{"n": 0}]
-
-
-def test_sql_query_readonly_tool_rejects_writes(context: McpContext) -> None:
-    with pytest.raises(ValueError, match="SELECT or WITH"):
-        sql_query_readonly_tool(context, query="DROP TABLE entities")
-
-
 def test_compile_agent_context_tool_structured(context: McpContext) -> None:
     result = compile_agent_context_tool(
         context,
@@ -522,8 +505,12 @@ def test_full_round_trip_create_approve_query(context: McpContext) -> None:
 # ---------- Server registration smoke test ----------
 
 
-def test_server_registers_fourteen_tools() -> None:
-    """FastMCP should register every tool decorated in server.py."""
+def test_server_registers_expected_tools() -> None:
+    """FastMCP should register every tool decorated in server.py.
+
+    13 tools after dropping sql_query_readonly (security: MCP scope is
+    orthogonal to Policy scope; raw SQL bypassed viewer_scopes).
+    """
     from memory_mission.mcp import server
 
     tools = server.mcp._tool_manager._tools
@@ -535,7 +522,6 @@ def test_server_registers_fourteen_tools() -> None:
         "get_triples",
         "check_coherence",
         "compile_agent_context",
-        "sql_query_readonly",
         "create_proposal",
         "list_proposals",
         "approve_proposal",
@@ -727,16 +713,79 @@ def test_create_proposal_allows_public_when_policy_public_only(context: McpConte
     assert proposal.target_scope == "public"
 
 
-def test_get_triples_no_filter_when_policy_none(context: McpContext) -> None:
-    """Back-compat — firms without a policy still see everything via get_triples."""
+def test_compile_agent_context_fail_closed_when_policy_none(context: McpContext) -> None:
+    """compile_agent_context filters scoped doctrine when policy=None but viewer is set.
+
+    Mirrors the fail-closed rule for KG reads: a firm without a
+    configured Policy still gets public-only doctrine in the context
+    packet. Partner-only pages are not returned.
+    """
+    from memory_mission.memory.pages import Page, PageFrontmatter
+
+    public_doctrine = Page(
+        frontmatter=PageFrontmatter(
+            title="Open Playbook",
+            slug="open-playbook",
+            domain="concepts",
+            confidence=0.9,
+            tier="doctrine",
+            scope="public",
+        ),
+        compiled_truth="Public playbook.",
+        timeline=[],
+    )
+    secret = Page(
+        frontmatter=PageFrontmatter(
+            title="Secret Playbook",
+            slug="secret-playbook",
+            domain="concepts",
+            confidence=0.9,
+            tier="doctrine",
+            scope="partner-only",
+        ),
+        compiled_truth="Partner-only.",
+        timeline=[],
+    )
+    context.engine.put_page(public_doctrine, plane="firm")
+    context.engine.put_page(secret, plane="firm")
+
+    # context.policy is None. Compile with a viewer_id → fail-closed.
+    packet = compile_agent_context_tool(
+        context,
+        role="meeting-prep",
+        task="brief",
+        attendees=["ceo"],
+        tier_floor="doctrine",
+    )
+    slugs = [p.frontmatter.slug for p in packet.doctrine.pages]  # type: ignore[union-attr]
+    assert slugs == ["open-playbook"]
+
+
+def test_get_triples_fail_closed_when_policy_none(context: McpContext) -> None:
+    """MCP callers without a configured Policy fail closed to public-only.
+
+    Closes the foot-gun where deleting ``protocols/permissions.md``
+    silently re-exposed previously-scoped triples. The base fixture
+    has ``policy=None``, so a partner-only triple must NOT be visible.
+    """
+    context.kg.add_triple(
+        subject="alice",
+        predicate="works_at",
+        obj="acme-internal",
+        source_closet="firm",
+        source_file="fixture",
+        scope="partner-only",
+    )
     context.kg.add_triple(
         subject="alice",
         predicate="works_at",
         obj="acme",
         source_closet="firm",
         source_file="fixture",
-        scope="partner-only",
+        scope="public",
     )
     triples = get_triples_tool(context, entity_name="alice")
+    # Only the public triple visible under fail-closed default.
     assert len(triples) == 1
-    assert triples[0].scope == "partner-only"
+    assert triples[0].scope == "public"
+    assert triples[0].object == "acme"

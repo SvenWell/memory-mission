@@ -584,19 +584,31 @@ def _viewer_can_read(
 
     - **Personal plane.** Pages are scoped to their owning employee.
       The viewer must equal ``key.employee_id`` to see them.
-    - **Firm plane.** Scopes come from page frontmatter (`scope:` via
+    - **Firm plane.** Scopes come from page frontmatter (``scope:`` via
       extras) and are checked against the viewer's policy entry via
       ``can_read``. Public scope is always visible to any employee in
       the policy; unknown scopes fail closed.
 
-    When ``viewer_id`` or ``policy`` is None, no filtering is applied —
-    the caller has not opted into enforcement. This keeps every
-    existing caller that does not supply both backwards-compatible.
+    Enforcement model:
+
+    - ``viewer_id is None`` → no enforcement. Internal callers (tests,
+      extraction pipeline, ingestion) don't carry an auth identity.
+    - ``viewer_id`` set, ``policy`` None → firm plane falls back to
+      public-only (fail-closed). This covers the MCP case where a firm
+      hasn't configured ``protocols/permissions.md`` yet; partner-only
+      frontmatter still hides from every viewer. Personal plane is
+      owner-only regardless of policy.
+    - ``viewer_id`` + ``policy`` both set → full ``can_read`` logic.
     """
-    if viewer_id is None or policy is None:
+    if viewer_id is None:
         return True
     if key.plane == "personal":
         return key.employee_id == viewer_id
+    if policy is None:
+        # Fail-closed: no policy configured — only public pages visible.
+        from memory_mission.permissions.policy import PUBLIC_SCOPE, page_scope
+
+        return page_scope(page) == PUBLIC_SCOPE
     return can_read(policy, viewer_id, page)
 
 

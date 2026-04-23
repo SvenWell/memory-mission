@@ -225,7 +225,7 @@ Multi-user agent surface. Wraps the existing engine + KG + promotion primitives 
 
 **Access model:** one server process per employee. Host agents spawn it per session with `--firm-root`, `--firm-id`, `--employee-id`. Identity is baked in at startup; every tool call acts on behalf of that employee with `viewer_id` threaded into permission checks. See `docs/adr/0003-mcp-as-agent-surface.md` for the rationale and `docs/recipes/mcp-integration.md` for the operator guide.
 
-**Scope tiers:** `read` covers non-mutating lookups; `propose` adds `create_proposal` + `list_proposals`; `review` adds approve / reject / reopen + `merge_entities` + `sql_query_readonly`. SQL sits at the `review` tier because raw SQL bypasses page-level `can_read` and enumerates the whole KG — different guardrail.
+**Scope tiers:** `read` covers non-mutating lookups; `propose` adds `create_proposal` + `list_proposals`; `review` adds approve / reject / reopen + `merge_entities`. Raw SQL (`KnowledgeGraph.sql_query`) is NOT exposed over MCP — MCP scope is orthogonal to page-level Policy scope, so a reviewer without `partner-only` access could bypass `viewer_scopes` via SQL. Admins who need raw KG access do it via an in-process Python script.
 
 ---
 
