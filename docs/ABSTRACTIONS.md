@@ -63,8 +63,11 @@ class PageFrontmatter(BaseModel):
     created: datetime | None
     updated: datetime | None
     tier: Tier = "decision"       # Step 15
+    reviewed_at: datetime | None = None  # Move 2 (polish): reviewer sign-off timestamp
     # extra="allow" preserves unknown fields on round-trip
 ```
+
+`reviewed_at` drives the Obsidian Bases dashboard's "Stale or unreviewed" view. Left `None` until a reviewer (or a reviewer skill after approving a proposal) explicitly sets it. Automatic back-stamping defeats the purpose.
 
 ```python
 class Page(BaseModel):
@@ -230,6 +233,19 @@ class GraphStats(BaseModel):
 | `triple_sources(s, p, o) -> list[TripleSource]` | Full provenance history, oldest-first. |
 | `scan_triple_sources(*, closet_prefix, currently_true_only)` | The join the federated detector needs, returned as list of dicts. |
 | `sql_query(query, params, *, row_limit) -> list[dict]` | Step 16.5 — read-only SQL over the KG's tables. Engine-enforced read-only. |
+
+### `BrainEngine` read-path signatures (Move 5 polish)
+
+`get_page` / `search` / `query` accept optional `viewer_id: str | None` + `policy: Policy | None`. When both are supplied, results are filtered through `can_read(policy, viewer_id, page)` for firm-plane pages; personal-plane pages are dropped unless the viewer owns them. When either is `None`, no filtering is applied — this keeps every existing caller backwards-compatible and requires callers who want enforcement to opt in explicitly.
+
+```python
+engine.query(
+    "quarterly review",
+    viewer_id="alice",
+    policy=firm_policy,
+    tier_floor="policy",
+)  # returns only pages Alice can read, at or above policy tier
+```
 | `query_entity(name, *, direction, as_of) -> list[Triple]` | "Everything involving this entity." |
 | `query_relationship(predicate, *, as_of) -> list[Triple]` | "Everything with this predicate." |
 | `timeline(entity_name) -> list[Triple]` | Chronological. |
@@ -461,6 +477,66 @@ Returned by `detect_firm_candidates(kg, *, min_employees=3, min_sources=3)`. Thr
 
 ---
 
+## Synthesis domain model (`synthesis/context.py`)
+
+Output of `compile_agent_context` — the V1 workflow-level primitive. Structured Pydantic tree so the eval harness can grade it without parsing prose; `.render()` produces markdown for the host-agent LLM.
+
+### AttendeeContext
+
+```python
+class AttendeeContext(BaseModel):
+    attendee_id: str                              # stable ID or raw name
+    canonical_name: str | None = None             # filled by IdentityResolver
+    outgoing_triples: list[Triple]                # non-event, non-preference
+    incoming_triples: list[Triple]                # inverse relationships
+    events: list[Triple]                          # predicate == "event"
+    preferences: list[Triple]                     # predicate == "prefers"
+    related_pages: list[Page]                     # curated pages matching slug
+    coherence_warnings: list[CoherenceWarning]    # Move 3 — via observability log
+
+    @property
+    def fact_count(self) -> int: ...
+    @property
+    def display_name(self) -> str: ...
+```
+
+Shape mirrors Tolaria's Neighborhood mode (ADR-0069): outgoing / incoming / events / preferences as their own groups, empty groups visible so the LLM sees absence explicitly.
+
+### DoctrineContext
+
+```python
+class DoctrineContext(BaseModel):
+    pages: list[Page]                             # filtered by tier_floor
+    # Sorted highest-tier first, alphabetical within tier
+```
+
+Empty when `tier_floor` is `None` or no engine was supplied. The caller explicitly opts in by passing both.
+
+### AgentContext
+
+```python
+class AgentContext(BaseModel):
+    role: str                                     # "meeting-prep", "email-draft", ...
+    task: str
+    plane: Plane
+    as_of: date | None                            # time-travel
+    tier_floor: Tier | None
+    attendees: list[AttendeeContext]
+    doctrine: DoctrineContext
+    generated_at: datetime
+
+    @property
+    def fact_count(self) -> int: ...              # sum across attendees
+    @property
+    def attendee_ids(self) -> list[str]: ...
+
+    def render(self) -> str: ...                  # markdown with [!contradiction] callouts
+```
+
+Produced by `compile_agent_context(role, task, attendees, kg, *, engine=None, plane="firm", employee_id=None, tier_floor=None, as_of=None, identity_resolver=None)`. Read-only, single-pass, idempotent (modulo `generated_at` timestamp).
+
+---
+
 ## Observability (`observability/events.py`)
 
 All events share:
@@ -487,6 +563,14 @@ Event types (discriminated by `event_type`):
 | `ProposalCreatedEvent` | `create_proposal` | proposal_id, target_plane, fact_count, source_report_path |
 | `ProposalDecidedEvent` | `promote` / `reject` / `reopen` | proposal_id, decision, reviewer_id, rationale |
 | `CoherenceWarningEvent` | `_apply_facts` coherence scan (Step 15b) | proposal_id, subject, predicate, new_object, new_tier, conflicting_object, conflicting_tier, `blocked: bool` |
+
+### Query helper (Move 3 polish)
+
+```python
+coherence_warnings_for(entity_id: str, *, since: datetime | None = None) -> list[CoherenceWarningEvent]
+```
+
+Reads the active firm's append-only JSONL via `current_logger` and returns unresolved `CoherenceWarningEvent`s where `subject == entity_id`. Used by `render_page()` and `compile_agent_context` to emit `> [!contradiction]` callouts above entities with outstanding conflicts. V1 treats every warning as unresolved — a future `CoherenceResolvedEvent` will let the helper filter resolved pairs automatically.
 
 ---
 

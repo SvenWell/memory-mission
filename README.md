@@ -2,9 +2,22 @@
 
 **A governed context engine for agents: turn a firm's scattered knowledge into one queryable, auditable layer that AI agents can act on safely.**
 
-Python infrastructure for pulling data from external sources (email, transcripts, calendars), distilling it into git-versioned markdown the firm owns, and surfacing it through a hybrid-search retrieval interface — with every extraction, promotion, and retrieval logged for compliance audit.
+Python infrastructure for pulling data from external sources (email, transcripts, calendars, Drive), distilling it into git-versioned markdown the firm owns, and surfacing it through a hybrid-search retrieval interface — with every extraction, promotion, and retrieval logged for compliance audit.
 
-The first deployment is a wealth-management firm. The system itself is vertical-neutral: domain-specific taxonomies and policies plug in via config; nothing in the core is wealth-specific.
+Two planes (personal and firm) separated by a PR-model review gate. Every fact traces to a source, a reviewer, and a rationale. Nothing lands on firm-plane memory without an explicit human decision.
+
+## Where to start
+
+| For | Read |
+|---|---|
+| The thesis and who it's for | [`docs/VISION.md`](docs/VISION.md) |
+| The shipped architecture + module walkthrough | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| Every Pydantic model, predicate, tier in one place | [`docs/ABSTRACTIONS.md`](docs/ABSTRACTIONS.md) |
+| How we measure whether the system is right | [`docs/EVALS.md`](docs/EVALS.md) |
+| Load-bearing decisions with rationale | [`docs/adr/`](docs/adr/) |
+| Operator recipes (hot-cache hooks, Bases dashboard) | [`docs/recipes/`](docs/recipes/) |
+| How agents should navigate this repo | [`docs/AGENTS.md`](docs/AGENTS.md) |
+| Per-step chronology | [`BUILD_LOG.md`](BUILD_LOG.md) |
 
 ## Quickstart
 
@@ -15,7 +28,7 @@ cd memory-mission
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
-make check          # ruff + format + mypy strict + 269 tests
+make check          # ruff + format + mypy --strict + 643 tests
 python -m memory_mission info
 ```
 
@@ -29,136 +42,150 @@ from memory_mission.observability import observability_scope
 with observability_scope(observability_root=Path("./.observability"),
                          firm_id="acme"):
     engine = InMemoryEngine(embedder=HashEmbedder())
-    engine.put_page(new_page(
-        slug="sarah-chen", title="Sarah Chen", domain="people",
-        compiled_truth="CEO of [[acme-corp]]. Direct, numbers-heavy.",
-    ))
+    engine.put_page(
+        new_page(
+            slug="sarah-chen", title="Sarah Chen", domain="people",
+            compiled_truth="CEO of [[acme-corp]]. Direct, numbers-heavy.",
+        ),
+        plane="firm",
+    )
     hits = engine.query("CEO of acme")
     # Each query writes a RetrievalEvent to .observability/<firm>/events.jsonl
 ```
 
-## What this is
+End-to-end with the full stack (connectors → extract → review → promote → meeting-prep):
 
-A working set of foundational components, an in-memory reference implementation, and a clear shape for the agents that compose them. Concretely, what's shipping today:
+```python
+from memory_mission.synthesis import compile_agent_context
 
-- **Foundations.** Append-only observability log scoped per firm; checkpointed durable execution that resumes mid-loop on crash; LLM-call middleware with PII redaction tuned to wealth/compliance regex defaults plus pluggable extras.
-- **Memory layer.** Compiled-truth + timeline page format with `[[wikilinks]]` and validity windows; MECE directory schema (vertical-neutral GBrain base); `BrainEngine` Protocol + dict-backed `InMemoryEngine`; SQLite temporal knowledge graph ported from MemPalace; hybrid search with RRF fusion, compiled-truth boost, and 70/30 cosine blend.
-- **Ingestion primitives.** `Connector` Protocol + `invoke()` harness that threads observability + PII through every external call; `ComposioConnector` adapter (stubbed); Granola + Gmail factories; `StagingWriter` for the human-review zone; `MentionTracker` for tier-based enrichment escalation.
+# Assuming a populated KG + identity resolver (see ARCHITECTURE.md for setup)
+context = compile_agent_context(
+    role="meeting-prep",
+    task="Prep the Q3 review with Acme Corp",
+    attendees=["p_alice_abc123"],
+    kg=kg,
+    engine=engine,
+    identity_resolver=resolver,
+    plane="firm",
+    tier_floor="policy",          # only authoritative doctrine + policy
+)
+briefing = context.render()       # markdown for the host-agent LLM
+```
 
-Built as five layers on top of eight open-source references (GBrain, MemPalace, Mem0, Rowboat, Honcho, Supermemory, LLM-Wiki, Composio). Most components borrow shape; the harness wiring (observability + middleware + durable threading through every call) is the net-new engineering.
+## What shipped
 
-## What's shipped (Steps 1–7a)
+V1 complete. 17 build steps plus a six-move polish pass. **643 tests passing**, `mypy --strict` clean on 66 source files.
 
-| Step | Component | What landed |
-|---|---|---|
-| 1 | Project scaffolding | Python package, `make check`, 5 smoke tests |
-| 2 | Observability (0.4) | Append-only JSONL audit log, per-firm isolation, path-traversal hardened |
-| 3 | Durable execution (0.6) | Checkpointed `DurableRun`, resume-on-crash, terminal-state respected |
-| 4 | Middleware + PII (0.7) | `MiddlewareChain`, `PIIRedactionMiddleware`, frozen `ModelCall` / `ModelResponse` |
-| 5 | Connectors (1.3) | Protocol + `invoke()` harness; Composio + Granola + Gmail factories (stubs) |
-| 6a | Memory: pages + schema + engine | Compiled-truth pages, MECE schema, `BrainEngine` + `InMemoryEngine` |
-| 6b | Memory: knowledge graph | SQLite temporal KG, validity windows, time-travel queries |
-| 6c | Memory: hybrid search | RRF + cosine blend + `COMPILED_TRUTH_BOOST=2.0`, `HashEmbedder` stub |
-| 7a | Ingestion primitives | `StagingWriter`, `MentionTracker` (GBrain enrichment tiers) |
+| Layer | What you can do today |
+|---|---|
+| **Foundations** | Append-only observability log per firm; checkpointed durable execution with resume-on-crash; PII-redacted middleware around every LLM call |
+| **Connectors** | `Connector` Protocol + `invoke()` harness. Composio-backed Gmail / Granola / Drive adapters (SDK is a stub; host wires the client) |
+| **Memory** | Compiled-truth + timeline page format (Obsidian-compatible); SQLite temporal knowledge graph with Bayesian corroboration (Noisy-OR, 0.99 cap); hybrid search (RRF + cosine + compiled-truth boost); tier-aware authority hierarchy; read-only SQL surface for ad-hoc queries |
+| **Identity** | `IdentityResolver` Protocol + SQLite-backed local resolver; stable `p_<id>` / `o_<id>` across email / LinkedIn / Twitter / phone; `merge_entities` with reviewer gate |
+| **Extraction** | Six-bucket `ExtractedFact` Pydantic union with mandatory support-quote; `EXTRACTION_PROMPT` markdown template; ingest-time canonicalization to stable IDs; zero LLM-SDK imports in-repo |
+| **Permissions** | Per-firm `Policy` with scopes + employees; `can_read` + `can_propose` with no-escalation; read-path enforcement inside `BrainEngine` |
+| **Promotion** | `Proposal` + `ProposalStore`; `create_proposal` / `promote` / `reject` / `reopen` with required rationale; coherence check emits structured warnings; opt-in constitutional mode blocks on contradictions |
+| **Federated** | Cross-employee pattern detector with distinct-source-file independence check; stages firm-plane proposals from N≥3 employees' personal planes |
+| **Synthesis** | `compile_agent_context(role, task, attendees, ...)` returns a structured `AgentContext` package; Tolaria Neighborhood-mode shape; Obsidian `[!contradiction]` callouts on rendered pages |
+| **Skills** | Seven shipped: `backfill-gmail`, `backfill-granola`, `backfill-firm-artefacts`, `extract-from-staging`, `review-proposals`, `detect-firm-candidates`, `meeting-prep` |
 
-**269 tests passing** across the suite. `mypy --strict` clean on 40 source files.
+Full per-step chronology in [`BUILD_LOG.md`](BUILD_LOG.md).
 
-## What's stubbed or open
+## How it composes
 
-- **Live connector wiring.** `ComposioConnector` adapter shape is in; the actual SDK calls raise `NotImplementedError` until a `ComposioClient` is injected.
-- **Real embeddings.** `EmbeddingProvider` Protocol is in; only `HashEmbedder` (deterministic, non-semantic, for tests) is implemented. OpenAI / Gemini adapters land when a real flow needs them.
-- **Filesystem-backed engine.** Source-of-truth markdown-on-disk pattern is documented; the engine is in-memory only today.
-- **Backfill workflow.** Primitives shipped (Step 7a); the workflow itself lands in Step 7b as a Hermes skill in markdown, not Python code.
-- **Phases 2-4.** Workflow agents (meeting prep, email draft, CRM update), promotion pipeline, multi-tenancy hardening, runtime adapter.
+Each layer reads from the one below without rewriting it.
 
-See `BUILD_LOG.md` for the per-step record and what's next.
+1. A **connector** pulls from Gmail / Granola / Drive through the `invoke()` harness — PII-scrubbed, durable-checkpointed, logged as a `ConnectorInvocationEvent`.
+2. **Staging** lands the payload as `staging/<plane>/<source>/<id>.md` plus a raw sidecar. Hand-reviewable, plane-scoped, filesystem-level.
+3. The **`extract-from-staging` skill** runs the host agent's LLM against `EXTRACTION_PROMPT`. Response JSON parses into `ExtractionReport`; `ingest_facts` canonicalizes entity names via the `IdentityResolver` and writes structured facts to fact-staging.
+4. **`create_proposal`** groups facts by entity into a `Proposal`. Deterministic `proposal_id` — idempotent under re-extraction.
+5. The **`review-proposals` skill** surfaces each proposal to a human reviewer. Coherence warnings on tier conflicts surface as forcing questions. Approve / reject / reopen always requires rationale.
+6. **`promote()`** corroborates an existing currently-true triple (Bayesian update) or adds a new one. Every source appends to `triple_sources`. Firm-plane writes are the only way facts leave staging.
+7. The **`detect-firm-candidates` skill** (admin) scans personal planes for cross-employee patterns; distinct-source-file threshold defeats the "three people sharing one Granola transcript" failure mode. Candidates route through the same proposal pipeline.
+8. The **`meeting-prep` skill** calls `compile_agent_context` — distilled doctrine + per-attendee neighborhoods with inline provenance + coherence callouts. The host-agent LLM drafts the briefing; Memory Mission doesn't own the generation.
 
-## How it compounds
+Every link in the chain is auditable. Every write is reviewed. No link is silent.
 
-Each component composes into the next without rewriting the layer below.
+## Open the vault in Obsidian
 
-1. A `Connector` pulls from an external source through `invoke()` — the harness writes a `ConnectorInvocationEvent` with PII-scrubbed preview.
-2. A `DurableRun` wraps the loop so each item is a checkpointed step. Crash mid-run; restart picks up where it stopped.
-3. `StagingWriter` lands the raw payload + a frontmatter-headed markdown file under `<wiki_root>/staging/<source>/`.
-4. `MentionTracker` increments per-entity counts; threshold crossings (`stub` → `enrich` → `full`) trigger enrichment.
-5. The extraction agent (next phase) reads from staging, calls an LLM through `MiddlewareChain` (PII-redacted in/out), writes structured triples to the `KnowledgeGraph` and a curated `Page` to the `BrainEngine`.
-6. Workflow agents (meeting prep, email draft) call `engine.query()` — RRF + cosine blend + truth boost surface the relevant pages; every retrieval logs a `RetrievalEvent`.
-7. `git log` over the wiki root becomes the firm's institutional memory; `events.jsonl` is the audit trail.
+The on-disk format is vault-native. Point Obsidian at `<firm_root>/` and the whole governed memory appears as a working vault — graph view, linked mentions, search, tag panel, all of it.
 
-Verifiability + traceability are not retrofitted. They ship in Phase 1 because every later component writes through them.
+The Bases dashboard (Obsidian ≥ v1.9.10) gives partners a native database view:
+
+```bash
+cp src/memory_mission/memory/templates/dashboard.base <firm_root>/firm/dashboard.base
+```
+
+Five views out of the box: Recent changes, Low confidence, Stale or unreviewed, Constitution + doctrine, By domain. Install notes in [`docs/recipes/vault-dashboard.md`](docs/recipes/vault-dashboard.md).
+
+For employees running a host-agent session against their personal plane, the hot-cache hook recipe makes session memory persistent across restarts: [`docs/recipes/personal-hot-cache.md`](docs/recipes/personal-hot-cache.md).
 
 ## Repo layout
 
 ```
 src/memory_mission/
-├── __init__.py / __main__.py / cli.py / config.py
-├── observability/                # 0.4 — append-only audit, per-firm scoped
-├── durable/                      # 0.6 — checkpointed runs, resume-on-crash
-├── middleware/                   # 0.7 — LLM-call chain + PII redaction
-├── memory/                       # 0.1 + 0.2
-│   ├── pages.py                  # compiled truth + timeline format
-│   ├── schema.py                 # MECE directories (vertical-neutral)
-│   ├── engine.py                 # BrainEngine Protocol + InMemoryEngine
-│   ├── knowledge_graph.py        # SQLite temporal triples (MemPalace port)
-│   └── search.py                 # RRF + cosine + COMPILED_TRUTH_BOOST
-├── ingestion/                    # 1.1 + 1.2 + 1.3
-│   ├── connectors/               # Protocol + harness + Composio adapter
-│   ├── staging.py                # raw sidecar + distilled markdown
-│   └── mentions.py               # tier-escalation tracker
-├── workflows/                    # 2.x — meeting prep, email draft, CRM update (stubs)
-└── runtime/                      # Layer 5 — Hermes adapter (stub)
+├── observability/          # append-only JSONL audit, per-firm scoped
+├── durable/                # checkpointed runs, resume-on-crash
+├── middleware/             # LLM-call chain + PII redaction
+├── connectors/             # Composio harness + Gmail/Granola/Drive factories
+├── memory/
+│   ├── pages.py            # compiled-truth + timeline format
+│   ├── schema.py           # MECE domains + plane paths
+│   ├── engine.py           # BrainEngine Protocol + InMemoryEngine
+│   ├── knowledge_graph.py  # SQLite temporal KG + corroborate + coherence
+│   ├── tiers.py            # constitution / doctrine / policy / decision
+│   ├── search.py           # RRF + cosine + compiled-truth boost
+│   └── templates/          # dashboard.base
+├── ingestion/              # StagingWriter + MentionTracker
+├── personal_brain/         # working / episodic / semantic / preferences / lessons
+├── extraction/             # 6-bucket ExtractedFact + ingest_facts
+├── identity/               # IdentityResolver Protocol + LocalIdentityResolver
+├── permissions/            # Policy + can_read / can_propose
+├── promotion/              # Proposal + PR-model review gate
+├── federated/              # cross-employee pattern detector
+└── synthesis/              # compile_agent_context + AgentContext
 
-tests/                            # 269 passing
-BUILD_LOG.md                      # per-step record
-Makefile                          # install, check, lint, test, dev, clean
+skills/                     # 7 shipped, markdown + YAML frontmatter
+tests/                      # 643 passing
+docs/                       # VISION + ARCHITECTURE + ABSTRACTIONS + EVALS + AGENTS + adr/ + recipes/
+BUILD_LOG.md                # per-step record
 ```
 
 ## Operational notes
 
-Configuration is environment-driven via `MM_*` vars (see `src/memory_mission/config.py`):
+Configuration is environment-driven via `MM_*` vars (see [`src/memory_mission/config.py`](src/memory_mission/config.py)):
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `MM_WIKI_ROOT` | `./wiki` | Root for firm content (curated pages + staging) |
 | `MM_OBSERVABILITY_ROOT` | `./.observability` | Append-only audit log root |
 | `MM_DATABASE_URL` | (empty) | Postgres URL when we move off in-memory |
-| `MM_LLM_PROVIDER` | `anthropic` | `anthropic` / `openai` / `gemini` |
+| `MM_LLM_PROVIDER` | `anthropic` | `anthropic` / `openai` / `gemini` (the host agent uses this; we don't import the SDK) |
 | `MM_LLM_MODEL` | `claude-sonnet-4-6` | Default model identifier |
 
-Per-firm isolation is filesystem-based today: each firm gets its own subdirectory under `MM_OBSERVABILITY_ROOT` and its own SQLite files for durable execution + knowledge graph + mention tracker. Multi-tenancy hardening (row-level security, schema-per-tenant) lands in Phase 4.
+Per-firm isolation is filesystem-based today: each firm gets its own subdirectory + its own SQLite files (KG, identity, proposals, mentions, durable). Multi-tenant RLS lands post-V1 when firm count justifies it.
 
 Day-to-day:
 
 ```bash
-make check          # ruff + format + mypy strict + pytest
-make lint-fix       # auto-apply ruff fixes
-pytest -k <pattern> # run a subset
+make check           # full pre-commit check
+make lint-fix        # auto-apply ruff fixes
+pytest -k <pattern>  # run a subset
 ```
 
-## Open the personal plane in Obsidian
+## Post-V1 roadmap
 
-The on-disk format is vault-native. Point Obsidian at
-`<MM_WIKI_ROOT>/personal/<employee_id>/` and you get a working vault
-for free — graph view, linked mentions, search, tag panel, all of it.
-The four-layer agent brain (`working/`, `episodic/`, `semantic/`,
-`preferences/`, `lessons/`) shows up as four top-level folders; the
-MECE domains (`people/`, `companies/`, etc.) live under `semantic/`.
+Deferred items (see `project_post_v1_roadmap.md` in memory or the plan file at `virtual-petting-tarjan.md`):
 
-Hidden directories (`.facts/`, `.raw/`) are skipped by Obsidian by
-default, so the vault stays clean. The `---` zone separator inside
-each curated page renders as a horizontal rule rather than a two-zone
-split — cosmetic, doesn't affect content.
-
-Treat Obsidian as the safety hatch (browse / grep / hand-annotate),
-not the primary UX. Workflow-agent chat is where the daily work
-happens.
-
-## Status
-
-Phase 1 foundations + memory layer + ingestion primitives complete. Step 7b (Hermes backfill skill in markdown) is next, then Step 8 (extraction agent), then promotion pipeline (Step 9) and workflow agents (Phase 2).
-
-This is engineering infrastructure. It is not a finished product, and the current commit history (`git log`) is the most accurate description of what works.
+- **Step 18:** Legislative amendment cycle (batched promotions triggered by evidence pressure).
+- **Step 19:** Constitution bootstrap skill (cold-start firm truth from existing strategy docs).
+- **Step 20:** Relationship-strength view + Graph One adapter (needs real interaction volume).
+- 50-scenario federated eval harness (per EVALS § 2.6).
+- Distillation coherence eval (per EVALS § 2.7).
+- MCP server surface exposing KG ops to any MCP-compatible host agent.
+- `CoherenceResolvedEvent` so the contradiction callout hides acknowledged conflicts.
+- `/save` (conversation → personal-plane note) + `/autoresearch` (WebSearch + WebFetch loop) as optional skills.
 
 ## License
 
-Proprietary — see `pyproject.toml`.
+Proprietary — see [`pyproject.toml`](pyproject.toml).

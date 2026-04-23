@@ -54,12 +54,13 @@ proposed → active → superseded
 | ID | Title | Status |
 |----|-------|--------|
 | [0001](0001-bayesian-corroboration.md) | Bayesian corroboration via Noisy-OR with 0.99 cap | active |
+| [0002](0002-two-plane-split.md) | Two-plane split (personal / firm) with one-way promotion bridge | active |
 
 More ADRs will land as decisions accumulate. Good candidates for the next few:
 
-- `0002` — Two-plane split (personal/firm) with one-way promotion bridge
 - `0003` — LLM lives with the host agent (no SDK imports)
 - `0004` — Constitutional mode as opt-in firm-level flag (not default strict)
 - `0005` — Identity resolver Protocol + adapter pattern (Composio-shaped)
 - `0006` — Independence threshold on federated detector (distinct source_files, not just employees)
 - `0007` — SQL-over-KG as read-only primitive (Step 16.5)
+- `0008` — AGENTS.md canonical under `docs/` because claude-mem owns repo-root (Move 4)

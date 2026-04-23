@@ -2058,3 +2058,139 @@ Post-V1 roadmap (deferred per plan):
   host-agent tools.
 
 ---
+
+## V1 Polish Pass — six additive moves (post-Step 17)
+
+**Goal.** Fold in high-value mechanisms from comparative reviews
+(Tolaria, claude-obsidian, Google Knowledge Catalog, Ricky's
+cloud-code agent stack) without changing the governance model.
+All six moves are backwards-compatible; every new parameter
+defaults to a behavior that matches the pre-polish state.
+
+Approved via plan file `virtual-petting-tarjan.md`.
+
+### Move 1 — Hot-cache hook recipe
+
+**Files added:** `docs/recipes/personal-hot-cache.md`.
+
+Hook recipe documenting how to wire host-agent `Stop` /
+`SessionStart` / `PostCompact` / `PostToolUse` hooks around
+`personal/<emp>/working/WORKSPACE.md`. Employee agent gets session-
+persistent working memory without hand maintenance. Personal-plane
+only — firm plane is never session-scoped, by design.
+
+### Move 2 — Obsidian Bases dashboard + `reviewed_at`
+
+**Files added:**
+- `src/memory_mission/memory/templates/dashboard.base` — native
+  Obsidian Bases YAML with five views.
+- `docs/recipes/vault-dashboard.md` — install + customize guide.
+
+**Files modified:**
+- `src/memory_mission/memory/pages.py` — `PageFrontmatter.reviewed_at:
+  datetime | None = None` new field.
+- `tests/test_memory.py` — round-trip + default tests.
+
+Requires Obsidian ≥ v1.9.10 (Bases is core since August 2025).
+Partners open the vault and see Recent changes / Low confidence /
+Stale or unreviewed / Constitution + doctrine / By domain in one
+click. Non-technical governance surface.
+
+### Move 3 — Contradiction callout rendering
+
+**Files modified:**
+- `src/memory_mission/observability/api.py` — new
+  `coherence_warnings_for(entity_id, *, since=None)` helper.
+- `src/memory_mission/observability/__init__.py` — export.
+- `src/memory_mission/synthesis/context.py` —
+  `AttendeeContext.coherence_warnings` field + callout rendering
+  in `_render_attendee`.
+- `src/memory_mission/synthesis/compile.py` —
+  `_compile_attendee_context` pulls warnings from the observability
+  log when a scope is active; best-effort (empty on no scope).
+- `src/memory_mission/memory/pages.py` — `render_page()` accepts
+  optional `coherence_warnings` kwarg and emits `> [!contradiction]`
+  callout above compiled-truth when non-empty.
+
+Reads `CoherenceWarningEvent` rows from the append-only JSONL.
+Callouts render natively in Obsidian with the warning's subject,
+predicate, and conflicting object / tier. Eval-corpus ready via the
+structured event stream (per `docs/EVALS.md` 2.7).
+
+### Move 4 — AGENTS.md canonical + CLAUDE.md shim
+
+**Files added:**
+- `docs/AGENTS.md` — canonical agent instructions (skill routing +
+  Memory Mission skill list + build discipline).
+- `CLAUDE.md` at repo root — one-line `@docs/AGENTS.md` shim.
+
+The canonical file lives under `docs/` because the repo-root
+`AGENTS.md` is claimed by the claude-mem MCP (session-context cache)
+and gets overwritten per-session. Keeping canonical under `docs/`
+means Codex / Gemini / Cursor / Windsurf adopters point at
+`docs/AGENTS.md` directly and Claude Code picks it up via the shim.
+
+### Move 5 — Permission-aware `BrainEngine` read path
+
+**Files modified:**
+- `src/memory_mission/memory/engine.py`:
+  - `BrainEngine.get_page` / `search` / `query` accept optional
+    `viewer_id: str | None` + `policy: Policy | None`.
+  - New module helper `_viewer_can_read(key, page, *, viewer_id,
+    policy)` routes firm pages through `can_read()` and drops
+    personal pages whose owner isn't the viewer.
+  - `can_read` / `Policy` imported from `permissions.policy`.
+- `tests/test_memory.py` — 8 new tests covering firm-scope
+  filtering, personal-plane owner gating, fail-closed on unknown
+  employee, backwards compat when either argument is `None`.
+
+Closes the read-time permission gap. Permissions were advisory at
+the utility layer; now the engine enforces when the caller asks
+for enforcement. Matches Google Knowledge Catalog's "access-control-
+aware search" pattern without adopting the rest of their SaaS
+architecture.
+
+### Move 6 — "Context engine" framing
+
+**Files modified:**
+- `docs/VISION.md` — subtitle + opening paragraph now call Memory
+  Mission "a governed context engine for agents."
+- `README.md` — hero sentence updated to match.
+- `docs/EVALS.md` — stance paragraph adds "context construction as
+  measurable engineering, not guesswork" from Google Knowledge
+  Catalog's framing.
+
+No code change. Sharpens the external pitch without changing
+architecture.
+
+### Combined verification
+
+- [x] `pytest` — 643/643 passed (+20 since Step 17: 2 frontmatter +
+      8 permission + 4 callout + synthesis updates + Move 4/6 test
+      preservation)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy src/` strict clean on 66 files
+- [x] Obsidian compatibility preserved on all new fields
+- [x] Every existing caller unchanged (Move 5/3 new params default
+      to None / empty list)
+
+### Separate: promotion-pipeline tightening (committed alongside)
+
+Independently of the polish pass, `create_proposal` / `promote` /
+`reject` / `reopen` now call `_require_observability_scope()` at
+entry — promotion operations cannot run without a live audit
+trail. Tests wrap affected calls in `observability_scope(...)`.
+Tightens Emile's "provenance mandatory" principle from "logged
+when scoped" to "scope required."
+
+### Saved to memory
+
+Post-V1 items captured as memory entries for future sessions:
+`project_post_v1_roadmap.md` (authoritative deferred-items list)
+and `reference_google_knowledge_catalog.md` (GCP's enterprise
+context engine — overlap + wedge phrasing).
+
+### Status
+
+V1 + polish complete. Branch `SvenWell/office-hours` pushed to
+`origin`. Ready for review by colleagues.
