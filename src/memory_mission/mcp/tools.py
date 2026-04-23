@@ -18,7 +18,9 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Literal
 
-from memory_mission.extraction.schema import ExtractedFact, ExtractionReport
+from pydantic import TypeAdapter
+
+from memory_mission.extraction.schema import ExtractedFact
 from memory_mission.mcp.auth import AuthError, Scope
 from memory_mission.mcp.context import McpContext
 from memory_mission.memory.engine import SearchHit
@@ -386,22 +388,19 @@ def _mcp_viewer_scopes(ctx: McpContext) -> frozenset[str]:
     return viewer_scopes(ctx.policy, ctx.employee_id)
 
 
+_EXTRACTED_FACT_ADAPTER: TypeAdapter[ExtractedFact] = TypeAdapter(ExtractedFact)
+
+
 def _parse_fact(raw: dict[str, Any]) -> ExtractedFact:
     """Parse one dict into the ``ExtractedFact`` discriminated union.
 
-    Uses an ExtractionReport with a single fact to reuse the discriminator
-    machinery already in place — keeps the validation surface identical
-    to what ``ingest_facts`` expects.
+    Uses Pydantic's ``TypeAdapter`` to validate the discriminator
+    directly — cleaner than the earlier pattern that fabricated a
+    single-fact ExtractionReport just to reuse its validation. Same
+    validation semantics; no coupling to ExtractionReport's unrelated
+    required fields.
     """
-    report = ExtractionReport.model_validate(
-        {
-            "source": "mcp",
-            "source_id": "inline",
-            "target_plane": "firm",
-            "facts": [raw],
-        }
-    )
-    return report.facts[0]
+    return _EXTRACTED_FACT_ADAPTER.validate_python(raw)
 
 
 __all__ = [

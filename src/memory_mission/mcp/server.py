@@ -28,6 +28,8 @@ from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.mcp.auth import ClientEntry, load_manifest, resolve_employee
 from memory_mission.mcp.context import McpContext
 from memory_mission.mcp.tools import (
+    Direction,
+    ProposalStatus,
     approve_proposal_tool,
     check_coherence_tool,
     compile_agent_context_tool,
@@ -276,16 +278,14 @@ def get_entity(name: str) -> dict[str, Any] | None:
 @mcp.tool()
 def get_triples(
     entity_name: str,
-    direction: str = "outgoing",
+    direction: Direction = "outgoing",
     as_of: date | None = None,
 ) -> list[dict[str, Any]]:
     """Triples involving ``entity_name``. Direction: outgoing / incoming / both."""
-    if direction not in ("outgoing", "incoming", "both"):
-        raise ValueError(f"direction must be outgoing|incoming|both, got {direction!r}")
     triples = get_triples_tool(
         _ctx(),
         entity_name=entity_name,
-        direction=direction,  # type: ignore[arg-type]
+        direction=direction,
         as_of=as_of,
     )
     return [t.model_dump(mode="json") for t in triples]
@@ -359,16 +359,14 @@ def create_proposal(
 
 @mcp.tool()
 def list_proposals(
-    status: str | None = None,
+    status: ProposalStatus | None = None,
     target_plane: Plane | None = None,
     target_entity: str | None = None,
 ) -> list[dict[str, Any]]:
     """List proposals — all, or filtered by status / plane / entity."""
-    if status is not None and status not in ("pending", "approved", "rejected"):
-        raise ValueError(f"status must be pending|approved|rejected, got {status!r}")
     proposals = list_proposals_tool(
         _ctx(),
-        status=status,  # type: ignore[arg-type]
+        status=status,
         target_plane=target_plane,
         target_entity=target_entity,
     )
