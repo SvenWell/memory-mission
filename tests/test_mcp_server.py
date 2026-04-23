@@ -177,15 +177,54 @@ def test_manifest_rejects_non_mapping_top_level(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+def test_manifest_rejects_duplicate_keys(tmp_path: Path) -> None:
+    """Duplicate employee_id silently kept the last entry in default PyYAML.
+
+    Reject at load time so a permissive duplicate doesn't silently
+    override a restricted one during manual edits.
+    """
+    path = _write_manifest(
+        tmp_path / "mcp_clients.yaml",
+        "alice@acme.com:\n  scopes: [read]\nalice@acme.com:\n  scopes: [read, review]\n",
+    )
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_manifest(path)
+
+
+def test_manifest_rejects_symlink_escape(tmp_path: Path) -> None:
+    """Manifest path that resolves outside its parent dir is refused."""
+    import os
+
+    outside = tmp_path / "outside.yaml"
+    outside.write_text("mallory@attacker.com:\n  scopes: [read, propose, review]\n")
+
+    firm_dir = tmp_path / "firm"
+    firm_dir.mkdir()
+    manifest = firm_dir / "mcp_clients.yaml"
+    os.symlink(outside, manifest)
+
+    # The symlink resolves outside firm_dir; load_manifest refuses.
+    # (Without the check, we'd load attacker-controlled entries.)
+    with pytest.raises(ValueError, match="symlink attack"):
+        load_manifest(manifest)
+
+
 def test_resolve_employee_unknown_fails_closed() -> None:
-    with pytest.raises(AuthError, match="not in MCP client manifest"):
+    with pytest.raises(AuthError, match="not authorized") as exc_info:
         resolve_employee({}, "nobody@acme.com")
+    # Generic message to caller; structured detail on the exception for
+    # audit consumers. Prevents scope-taxonomy enumeration.
+    assert exc_info.value.employee_id == "nobody@acme.com"
 
 
 def test_require_scope_raises_when_missing() -> None:
     client = ClientEntry(employee_id="alice@acme.com", scopes=frozenset({Scope.READ}))
-    with pytest.raises(AuthError, match="missing required scope: propose"):
+    with pytest.raises(AuthError, match="insufficient scope") as exc_info:
         require_scope(client, Scope.PROPOSE)
+    assert exc_info.value.required_scope == "propose"
+    assert exc_info.value.employee_id == "alice@acme.com"
+    # Scope name is NOT in the caller-visible message.
+    assert "propose" not in str(exc_info.value)
 
 
 def test_require_scope_silent_when_present() -> None:
@@ -362,7 +401,7 @@ def test_create_proposal_tool_stages_proposal(context: McpContext) -> None:
 
 def test_create_proposal_tool_requires_propose_scope(context: McpContext) -> None:
     ctx = _read_only_context(context, frozenset({Scope.READ}))
-    with pytest.raises(AuthError, match="propose"):
+    with pytest.raises(AuthError, match="insufficient scope"):
         create_proposal_tool(
             ctx,
             target_entity="alice",
@@ -409,7 +448,7 @@ def test_approve_proposal_tool_requires_review_scope(context: McpContext) -> Non
         source_report_path="/tmp/r.json",
     )
     ctx = _read_only_context(context, frozenset({Scope.READ, Scope.PROPOSE}))
-    with pytest.raises(AuthError, match="review"):
+    with pytest.raises(AuthError, match="insufficient scope"):
         approve_proposal_tool(
             ctx,
             proposal_id=proposal.proposal_id,
@@ -567,6 +606,72 @@ def test_server_initialize_from_handles(tmp_path: Path) -> None:
         identity.close()
 
 
+def test_bootstrap_skips_symlink_escape(tmp_path: Path) -> None:
+    """_bootstrap_engine_from_wiki refuses pages whose resolved path escapes wiki_root."""
+    import os
+
+    from memory_mission.mcp.server import _bootstrap_engine_from_wiki
+
+    wiki = tmp_path / "wiki"
+    firm_dir = wiki / "firm" / "people"
+    firm_dir.mkdir(parents=True)
+    # Legit page
+    (firm_dir / "alice.md").write_text(
+        "---\ntitle: Alice\nslug: alice\ndomain: people\n---\n\nLegit content.\n"
+    )
+    # Malicious: outside wiki_root, symlinked in
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text(
+        "---\ntitle: Secret\nslug: secret\ndomain: people\n---\n\nMalicious content.\n"
+    )
+    os.symlink(outside / "secret.md", firm_dir / "trap.md")
+
+    engine = InMemoryEngine()
+    engine.connect()
+    try:
+        _bootstrap_engine_from_wiki(engine, wiki)
+        alice = engine.get_page("alice", plane="firm")
+        secret = engine.get_page("secret", plane="firm")
+        assert alice is not None
+        assert secret is None, "symlink-escaped page should not be loaded"
+    finally:
+        engine.disconnect()
+
+
+def test_bootstrap_skips_invalid_employee_id(tmp_path: Path) -> None:
+    """Personal-plane paths with unsafe employee_id (path chars, null bytes) are skipped."""
+    from memory_mission.mcp.server import _bootstrap_engine_from_wiki
+
+    wiki = tmp_path / "wiki"
+    # Valid: alphanumeric + dots/hyphens
+    ok_dir = wiki / "personal" / "alice.smith" / "people"
+    ok_dir.mkdir(parents=True)
+    (ok_dir / "bob.md").write_text("---\ntitle: Bob\nslug: bob\ndomain: people\n---\n\nContent.\n")
+    # Invalid: contains "@" which validate_employee_id rejects
+    bad_dir = wiki / "personal" / "mallory@evil" / "people"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "planted.md").write_text(
+        "---\ntitle: Planted\nslug: planted\ndomain: people\n---\n\nContent.\n"
+    )
+
+    engine = InMemoryEngine()
+    engine.connect()
+    try:
+        _bootstrap_engine_from_wiki(engine, wiki)
+        # Valid employee_id loaded normally.
+        loaded = engine.get_page("bob", plane="personal", employee_id="alice.smith")
+        assert loaded is not None
+        # Invalid employee_id was skipped pre-put — the planted page isn't
+        # in the engine. (We can't call get_page with mallory@evil because
+        # _validate_plane_args would raise on that employee_id first; that's
+        # the second layer of the same defense.)
+        all_personal = engine.list_pages(plane="personal", employee_id="alice.smith")
+        assert all(p.frontmatter.slug != "planted" for p in all_personal)
+    finally:
+        engine.disconnect()
+
+
 def test_server_ctx_raises_when_uninitialized() -> None:
     from memory_mission.mcp import server
 
@@ -671,7 +776,7 @@ def test_create_proposal_enforces_can_propose(context: McpContext) -> None:
         viewer_id="bob@acme.com",
         viewer_policy_scopes=["public"],
     )
-    with pytest.raises(AuthError, match="cannot propose into scope 'partner-only'"):
+    with pytest.raises(AuthError, match="insufficient scope") as exc_info:
         create_proposal_tool(
             bob,
             target_entity="ceo",
@@ -679,6 +784,9 @@ def test_create_proposal_enforces_can_propose(context: McpContext) -> None:
             source_report_path="/tmp/r.json",
             target_scope="partner-only",
         )
+    # Structured details for audit; 'partner-only' NOT in the message.
+    assert exc_info.value.required_scope == "partner-only"
+    assert "partner-only" not in str(exc_info.value)
 
     # But Alice (partner) can.
     alice = _context_with_policy_and_viewer(
@@ -694,6 +802,17 @@ def test_create_proposal_enforces_can_propose(context: McpContext) -> None:
         target_scope="partner-only",
     )
     assert proposal.target_scope == "partner-only"
+
+
+def test_create_proposal_rejects_oversized_facts_list(context: McpContext) -> None:
+    """Bound on facts per proposal — DoS + rubber-stamp mitigation."""
+    with pytest.raises(ValueError, match="at most 100 facts"):
+        create_proposal_tool(
+            context,
+            target_entity="alice",
+            facts=[_identity_fact(f"alias-{i}") for i in range(101)],
+            source_report_path="/tmp/flood.json",
+        )
 
 
 def test_create_proposal_allows_public_when_policy_public_only(context: McpContext) -> None:

@@ -49,16 +49,80 @@ class ClientEntry(BaseModel):
 
 
 class AuthError(Exception):
-    """Raised when an employee is not in the manifest or lacks a required scope."""
+    """Raised when an employee is not in the manifest or lacks a required scope.
+
+    Keeps the caller-visible message generic ("insufficient scope" /
+    "not authorized") to avoid leaking the firm's scope taxonomy via
+    enumeration — a low-privilege caller probing with different
+    target_scope values should not learn which scope names exist.
+    Audit-log consumers can read the structured ``employee_id`` /
+    ``required_scope`` attributes to record the full detail.
+    """
+
+    def __init__(
+        self,
+        message: str = "insufficient scope",
+        *,
+        employee_id: str | None = None,
+        required_scope: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.employee_id = employee_id
+        self.required_scope = required_scope
+
+
+class _NoDupSafeLoader(yaml.SafeLoader):
+    """SafeLoader subclass that rejects duplicate mapping keys.
+
+    Default PyYAML silently keeps the last occurrence on duplicate keys —
+    an operator editing the manifest by merge could introduce a second,
+    permissive entry for the same employee and not notice. Reject
+    duplicates so the bug surfaces at load time.
+    """
+
+
+def _no_dup_construct_mapping(
+    loader: _NoDupSafeLoader,
+    node: yaml.MappingNode,
+    deep: bool = False,
+) -> dict[Any, Any]:
+    seen: set[Any] = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=deep)  # type: ignore[no-untyped-call]
+        if key in seen:
+            raise ValueError(f"duplicate key {key!r} in MCP client manifest")
+        seen.add(key)
+    mapping: dict[Any, Any] = loader.construct_mapping(node, deep=deep)
+    return mapping
+
+
+_NoDupSafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _no_dup_construct_mapping,
+)
 
 
 def load_manifest(path: Path) -> dict[str, ClientEntry]:
-    """Load and validate the MCP client manifest from a YAML file."""
+    """Load and validate the MCP client manifest from a YAML file.
+
+    Resolves symlinks and verifies the target lives inside the manifest's
+    parent directory — a symlink-swap attack that points the manifest at
+    some other file elsewhere on disk would otherwise load attacker-
+    controlled client entries.
+    """
     if not path.exists():
         raise FileNotFoundError(f"MCP client manifest not found: {path}")
 
-    raw_text = path.read_text(encoding="utf-8")
-    data: Any = yaml.safe_load(raw_text)
+    real_path = path.resolve()
+    real_parent = path.parent.resolve()
+    if not real_path.is_relative_to(real_parent):
+        raise ValueError(
+            f"MCP client manifest {path} resolves outside its parent directory "
+            "(possible symlink attack) — refusing to load"
+        )
+
+    raw_text = real_path.read_text(encoding="utf-8")
+    data: Any = yaml.load(raw_text, Loader=_NoDupSafeLoader)
     if data is None:
         return {}
     if not isinstance(data, dict):
@@ -98,11 +162,15 @@ def resolve_employee(
     """Return the manifest entry for ``employee_id`` or raise ``AuthError``."""
     entry = manifest.get(employee_id)
     if entry is None:
-        raise AuthError(f"employee not in MCP client manifest: {employee_id}")
+        raise AuthError("not authorized", employee_id=employee_id)
     return entry
 
 
 def require_scope(entry: ClientEntry, scope: Scope) -> None:
     """Raise ``AuthError`` if ``entry`` is missing ``scope``."""
     if scope not in entry.scopes:
-        raise AuthError(f"employee {entry.employee_id!r} missing required scope: {scope.value}")
+        raise AuthError(
+            "insufficient scope",
+            employee_id=entry.employee_id,
+            required_scope=scope.value,
+        )

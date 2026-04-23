@@ -51,6 +51,12 @@ from memory_mission.synthesis.context import AgentContext
 ProposalStatus = Literal["pending", "approved", "rejected"]
 Direction = Literal["outgoing", "incoming", "both"]
 
+# Cap on facts per create_proposal call. A proposal is one reviewer
+# decision — 100+ facts under a single rationale is not a review, it's
+# rubber-stamping. Splitting also limits DoS surface from abusive
+# PROPOSE-scoped clients (see reviewer finding B11).
+MAX_FACTS_PER_PROPOSAL = 100
+
 
 # ---------- Read tools ----------
 
@@ -243,10 +249,16 @@ def create_proposal_tool(
     don't include ``partner-only`` — a permission-uplift path.
     """
     ctx.require_scope(Scope.PROPOSE)
+    if len(facts) > MAX_FACTS_PER_PROPOSAL:
+        raise ValueError(
+            f"create_proposal accepts at most {MAX_FACTS_PER_PROPOSAL} facts "
+            f"per call, got {len(facts)} — split into multiple proposals"
+        )
     if ctx.policy is not None and not can_propose(ctx.policy, ctx.employee_id, target_scope):
         raise AuthError(
-            f"employee {ctx.employee_id!r} cannot propose into scope "
-            f"{target_scope!r} under this firm's policy"
+            "insufficient scope",
+            employee_id=ctx.employee_id,
+            required_scope=target_scope,
         )
     parsed_facts: list[ExtractedFact] = [_parse_fact(f) for f in facts]
     with ctx.tool_scope():

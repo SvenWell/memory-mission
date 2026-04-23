@@ -45,7 +45,7 @@ from memory_mission.mcp.tools import (
 from memory_mission.memory.engine import BrainEngine, InMemoryEngine
 from memory_mission.memory.knowledge_graph import KnowledgeGraph
 from memory_mission.memory.pages import parse_page
-from memory_mission.memory.schema import Plane
+from memory_mission.memory.schema import Plane, validate_employee_id
 from memory_mission.memory.tiers import DEFAULT_TIER, Tier
 from memory_mission.permissions.policy import Policy, load_policy
 from memory_mission.promotion.proposals import ProposalStore
@@ -163,15 +163,30 @@ def _bootstrap_engine_from_wiki(engine: BrainEngine, wiki_root: Path) -> None:
 
     Anything that doesn't match is skipped silently — operator files
     (READMEs, drafts, etc.) shouldn't crash the server.
+
+    Symlink-safe: each candidate's resolved path must live inside
+    ``wiki_root.resolve()``. A symlink like ``wiki/firm/trap`` pointing
+    to ``/tmp/malicious`` is skipped rather than loaded under the firm
+    plane. ``employee_id`` extracted from the personal-plane path is
+    validated via ``validate_employee_id`` — no path separators, no
+    null bytes, no ``..`` segments leak through.
     """
     if not wiki_root.exists():
         return
+    real_root = wiki_root.resolve()
     for md_file in wiki_root.rglob("*.md"):
+        try:
+            real_file = md_file.resolve()
+        except OSError:
+            continue
+        if not real_file.is_relative_to(real_root):
+            # Symlink escape — refuse to load content outside wiki_root.
+            continue
         plane, employee_id = _plane_from_path(md_file, wiki_root)
         if plane is None:
             continue
         try:
-            raw = md_file.read_text(encoding="utf-8")
+            raw = real_file.read_text(encoding="utf-8")
             page = parse_page(raw)
         except (OSError, ValueError):
             continue
@@ -192,7 +207,12 @@ def _plane_from_path(md_file: Path, wiki_root: Path) -> tuple[Plane | None, str 
     if parts[0] == "firm":
         return "firm", None
     if parts[0] == "personal" and len(parts) >= 3:
-        return "personal", parts[1]
+        candidate = parts[1]
+        try:
+            validate_employee_id(candidate)
+        except ValueError:
+            return None, None
+        return "personal", candidate
     return None, None
 
 
