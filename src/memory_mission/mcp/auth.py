@@ -16,6 +16,7 @@ employee_id absent from the manifest.
 
 from __future__ import annotations
 
+import unicodedata
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -102,13 +103,27 @@ _NoDupSafeLoader.add_constructor(
 )
 
 
+def _normalize_employee_id(employee_id: str) -> str:
+    """Return the NFKC-normalized form of ``employee_id``.
+
+    Unicode normalization collapses visually-identical compatibility
+    characters (fullwidth ``a`` → ``a``, compat ligatures, etc.). We
+    require manifest and runtime callers to use the canonical NFKC
+    form so a homoglyph or fullwidth attacker can't smuggle a second
+    entry that resolves to the same rendered glyph as a legitimate
+    employee but sits at a different Python string key.
+    """
+    return unicodedata.normalize("NFKC", employee_id)
+
+
 def load_manifest(path: Path) -> dict[str, ClientEntry]:
     """Load and validate the MCP client manifest from a YAML file.
 
     Resolves symlinks and verifies the target lives inside the manifest's
     parent directory — a symlink-swap attack that points the manifest at
     some other file elsewhere on disk would otherwise load attacker-
-    controlled client entries.
+    controlled client entries. Rejects employee_id values that aren't
+    already in NFKC canonical form.
     """
     if not path.exists():
         raise FileNotFoundError(f"MCP client manifest not found: {path}")
@@ -132,6 +147,11 @@ def load_manifest(path: Path) -> dict[str, ClientEntry]:
     for employee_id, fields in data.items():
         if not isinstance(employee_id, str) or not employee_id:
             raise ValueError(f"employee_id must be a non-empty string, got {employee_id!r}")
+        if _normalize_employee_id(employee_id) != employee_id:
+            raise ValueError(
+                f"employee_id {employee_id!r} must be in Unicode NFKC form — "
+                "homoglyph or fullwidth variants are rejected"
+            )
         if not isinstance(fields, dict):
             raise ValueError(
                 f"entry for {employee_id!r} must be a mapping, got {type(fields).__name__}"
@@ -159,7 +179,14 @@ def resolve_employee(
     manifest: dict[str, ClientEntry],
     employee_id: str,
 ) -> ClientEntry:
-    """Return the manifest entry for ``employee_id`` or raise ``AuthError``."""
+    """Return the manifest entry for ``employee_id`` or raise ``AuthError``.
+
+    Rejects non-NFKC input before lookup so homoglyph / fullwidth
+    variants can't match a legitimate manifest key via the visual
+    collision alone. Must match byte-for-byte after normalization.
+    """
+    if _normalize_employee_id(employee_id) != employee_id:
+        raise AuthError("not authorized", employee_id=employee_id)
     entry = manifest.get(employee_id)
     if entry is None:
         raise AuthError("not authorized", employee_id=employee_id)

@@ -40,6 +40,7 @@ from memory_mission.mcp.tools import (
     get_triples_tool,
     list_proposals_tool,
     merge_entities_tool,
+    parse_facts,
     query_tool,
     reject_proposal_tool,
     reopen_proposal_tool,
@@ -401,11 +402,19 @@ def create_proposal(
     target_employee_id: str | None = None,
     target_scope: str = "public",
 ) -> dict[str, Any]:
-    """Stage a new proposal for review. Requires PROPOSE scope."""
+    """Stage a new proposal for review. Requires PROPOSE scope.
+
+    ``facts`` is a list of JSON dicts matching the ExtractedFact
+    discriminated union — each dict must have a ``kind`` field plus the
+    other fields required by that variant. ``parse_facts`` validates
+    + narrows to typed ``ExtractedFact`` objects before the internal
+    tool is called.
+    """
+    typed_facts = parse_facts(facts)
     proposal = create_proposal_tool(
         _ctx(),
         target_entity=target_entity,
-        facts=facts,
+        facts=typed_facts,
         source_report_path=source_report_path,
         target_plane=target_plane,
         target_employee_id=target_employee_id,

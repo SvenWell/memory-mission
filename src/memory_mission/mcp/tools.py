@@ -232,7 +232,7 @@ def create_proposal_tool(
     ctx: McpContext,
     *,
     target_entity: str,
-    facts: list[dict[str, Any]],
+    facts: list[ExtractedFact],
     source_report_path: str,
     target_plane: Plane = "firm",
     target_employee_id: str | None = None,
@@ -240,9 +240,9 @@ def create_proposal_tool(
 ) -> Proposal:
     """Stage a new proposal for review. Requires PROPOSE scope.
 
-    ``facts`` is a list of dicts matching the ``ExtractedFact`` discriminated
-    union — each dict must have a ``kind`` field plus the fields the
-    variant requires. See ``extraction/schema.py`` for the full shape.
+    ``facts`` is a list of already-validated ``ExtractedFact`` objects.
+    Wire-format callers (MCP server) use ``parse_facts`` to turn incoming
+    ``list[dict]`` into this shape before calling.
 
     Enforces the no-escalation rule: when ``ctx.policy`` is set, the
     proposer must have read access to ``target_scope`` via
@@ -262,13 +262,12 @@ def create_proposal_tool(
             employee_id=ctx.employee_id,
             required_scope=target_scope,
         )
-    parsed_facts: list[ExtractedFact] = [_parse_fact(f) for f in facts]
     with ctx.tool_scope():
         return _create_proposal(
             ctx.store,
             target_plane=target_plane,
             target_entity=target_entity,
-            facts=parsed_facts,
+            facts=facts,
             source_report_path=source_report_path,
             proposer_agent_id=f"mcp:{ctx.employee_id}",
             proposer_employee_id=ctx.employee_id,
@@ -391,16 +390,14 @@ def _mcp_viewer_scopes(ctx: McpContext) -> frozenset[str]:
 _EXTRACTED_FACT_ADAPTER: TypeAdapter[ExtractedFact] = TypeAdapter(ExtractedFact)
 
 
-def _parse_fact(raw: dict[str, Any]) -> ExtractedFact:
-    """Parse one dict into the ``ExtractedFact`` discriminated union.
+def parse_facts(raw: list[dict[str, Any]]) -> list[ExtractedFact]:
+    """Validate a wire-format ``list[dict]`` into typed ``ExtractedFact`` objects.
 
-    Uses Pydantic's ``TypeAdapter`` to validate the discriminator
-    directly — cleaner than the earlier pattern that fabricated a
-    single-fact ExtractionReport just to reuse its validation. Same
-    validation semantics; no coupling to ExtractionReport's unrelated
-    required fields.
+    Used at the MCP wire boundary in ``server.create_proposal``. Tool
+    implementations call ``create_proposal_tool`` with already-typed
+    facts so the internal contract is a typed union, not a bag of dicts.
     """
-    return _EXTRACTED_FACT_ADAPTER.validate_python(raw)
+    return [_EXTRACTED_FACT_ADAPTER.validate_python(r) for r in raw]
 
 
 __all__ = [
@@ -413,6 +410,7 @@ __all__ = [
     "get_triples_tool",
     "list_proposals_tool",
     "merge_entities_tool",
+    "parse_facts",
     "query_tool",
     "reject_proposal_tool",
     "reopen_proposal_tool",

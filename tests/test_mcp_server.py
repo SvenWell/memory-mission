@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from memory_mission.extraction import IdentityFact, RelationshipFact
 from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.mcp.auth import (
     AuthError,
@@ -191,6 +192,31 @@ def test_manifest_rejects_duplicate_keys(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+def test_manifest_rejects_non_nfkc_employee_id(tmp_path: Path) -> None:
+    """Unicode fullwidth / compatibility forms are refused at load.
+
+    Fullwidth ``ａlice`` (U+FF41) renders near-identical to ``alice``
+    but is a different Python string. Without the NFKC check an
+    operator adding ``ａlice@acme.com`` to the manifest would create
+    a second entry that matches the visual rendering of an existing
+    employee.
+    """
+    fullwidth = "\uff41lice@acme.com"  # fullwidth a
+    path = _write_manifest(
+        tmp_path / "mcp_clients.yaml",
+        f"{fullwidth}:\n  scopes: [read]\n",
+    )
+    with pytest.raises(ValueError, match="NFKC"):
+        load_manifest(path)
+
+
+def test_resolve_employee_rejects_non_nfkc_input() -> None:
+    """Runtime lookup also refuses non-canonical forms."""
+    manifest = {"alice@acme.com": ClientEntry(employee_id="alice@acme.com", scopes=ALL_SCOPES)}
+    with pytest.raises(AuthError):
+        resolve_employee(manifest, "\uff41lice@acme.com")
+
+
 def test_manifest_rejects_symlink_escape(tmp_path: Path) -> None:
     """Manifest path that resolves outside its parent dir is refused."""
     import os
@@ -367,25 +393,23 @@ def test_compile_agent_context_tool_rendered(context: McpContext) -> None:
 # ---------- Write tools ----------
 
 
-def _identity_fact(name: str) -> dict[str, object]:
-    return {
-        "kind": "identity",
-        "confidence": 0.95,
-        "support_quote": f"mention of {name}",
-        "entity_name": name,
-        "entity_type": "person",
-    }
+def _identity_fact(name: str) -> IdentityFact:
+    return IdentityFact(
+        confidence=0.95,
+        support_quote=f"mention of {name}",
+        entity_name=name,
+        entity_type="person",
+    )
 
 
-def _relationship_fact(subject: str, predicate: str, obj: str) -> dict[str, object]:
-    return {
-        "kind": "relationship",
-        "confidence": 0.9,
-        "support_quote": f"{subject} {predicate} {obj}",
-        "subject": subject,
-        "predicate": predicate,
-        "object": obj,
-    }
+def _relationship_fact(subject: str, predicate: str, obj: str) -> RelationshipFact:
+    return RelationshipFact(
+        confidence=0.9,
+        support_quote=f"{subject} {predicate} {obj}",
+        subject=subject,
+        predicate=predicate,
+        object=obj,
+    )
 
 
 def test_create_proposal_tool_stages_proposal(context: McpContext) -> None:
