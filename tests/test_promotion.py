@@ -293,6 +293,23 @@ def test_create_proposal_personal_requires_employee_id(
             )
 
 
+def test_create_proposal_without_observability_scope_does_not_insert(
+    store: ProposalStore,
+) -> None:
+    with pytest.raises(RuntimeError, match="observability_scope"):
+        create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="sarah-chen",
+            facts=_sample_facts(),
+            source_report_path="/tmp/r.json",
+            proposer_agent_id="x",
+            proposer_employee_id="alice",
+        )
+
+    assert store.list() == []
+
+
 # ---------- promote ----------
 
 
@@ -401,6 +418,23 @@ def test_promote_raises_on_already_approved(
         promote(store, kg, proposal.proposal_id, reviewer_id="a", rationale="ok")
         with pytest.raises(ProposalStateError, match="approved.*expected pending"):
             promote(store, kg, proposal.proposal_id, reviewer_id="b", rationale="ok")
+
+
+def test_promote_without_observability_scope_does_not_mutate(
+    store: ProposalStore, kg: KnowledgeGraph, tmp_path: Path
+) -> None:
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        proposal = _create_sample(store)
+
+    with pytest.raises(RuntimeError, match="observability_scope"):
+        promote(store, kg, proposal.proposal_id, reviewer_id="alice", rationale="ok")
+
+    pending = store.get(proposal.proposal_id)
+    assert pending is not None
+    assert pending.status == "pending"
+    assert kg.get_entity("sarah-chen") is None
+    assert kg.get_entity("acme-corp") is None
+    assert kg.query_relationship("works_at") == []
 
 
 def test_promote_provenance_carries_source_closet(
@@ -624,6 +658,22 @@ def test_reject_raises_on_non_pending(
             reject(store, proposal.proposal_id, reviewer_id="b", rationale="oops")
 
 
+def test_reject_without_observability_scope_does_not_mutate(
+    store: ProposalStore, tmp_path: Path
+) -> None:
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        proposal = _create_sample(store)
+
+    with pytest.raises(RuntimeError, match="observability_scope"):
+        reject(store, proposal.proposal_id, reviewer_id="alice", rationale="no")
+
+    pending = store.get(proposal.proposal_id)
+    assert pending is not None
+    assert pending.status == "pending"
+    assert pending.rejection_count == 0
+    assert pending.decision_history == []
+
+
 # ---------- reopen ----------
 
 
@@ -687,6 +737,23 @@ def test_reopen_emits_decided_event(store: ProposalStore, tmp_path: Path) -> Non
         if isinstance(e, ProposalDecidedEvent) and e.decision == "reopened"
     ]
     assert len(reopened_events) == 1
+
+
+def test_reopen_without_observability_scope_does_not_mutate(
+    store: ProposalStore, tmp_path: Path
+) -> None:
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        proposal = _create_sample(store)
+        reject(store, proposal.proposal_id, reviewer_id="alice", rationale="stale")
+
+    with pytest.raises(RuntimeError, match="observability_scope"):
+        reopen(store, proposal.proposal_id, reviewer_id="alice", rationale="retry")
+
+    rejected = store.get(proposal.proposal_id)
+    assert rejected is not None
+    assert rejected.status == "rejected"
+    assert rejected.rejection_count == 1
+    assert [entry.decision for entry in rejected.decision_history] == ["rejected"]
 
 
 # ---------- End-to-end audit trail ----------

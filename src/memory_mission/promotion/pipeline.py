@@ -53,6 +53,7 @@ from memory_mission.observability.api import (
     log_proposal_created,
     log_proposal_decided,
 )
+from memory_mission.observability.context import current_firm_id, current_logger, current_trace_id
 from memory_mission.permissions.policy import Policy
 from memory_mission.promotion.proposals import (
     DecisionEntry,
@@ -107,6 +108,7 @@ def create_proposal(
     instead of inserting a duplicate — handy when an extraction flow
     re-runs on the same source material.
     """
+    _require_observability_scope()
     if not facts:
         raise ValueError("create_proposal requires at least one fact")
 
@@ -171,6 +173,7 @@ def promote(
     warning raises ``CoherenceBlockedError`` and the proposal stays
     pending. Advisory mode logs the warnings and proceeds.
     """
+    _require_observability_scope()
     proposal = _require_pending(store, proposal_id)
     _require_rationale(rationale)
 
@@ -218,6 +221,7 @@ def reject(
     rationale: str,
 ) -> Proposal:
     """Reject a pending proposal. Preserves decision history + bumps rejection_count."""
+    _require_observability_scope()
     proposal = _require_pending(store, proposal_id)
     _require_rationale(rationale)
 
@@ -268,6 +272,7 @@ def reopen(
     the KG and can't be unwound through this path (that's what
     ``KnowledgeGraph.invalidate`` is for).
     """
+    _require_observability_scope()
     proposal = store.get(proposal_id)
     if proposal is None:
         raise ProposalStateError(f"proposal {proposal_id!r} not found")
@@ -312,6 +317,13 @@ def reopen(
 
 
 # ---------- Internals ----------
+
+
+def _require_observability_scope() -> None:
+    """Fail before mutating store/KG if the audit context is missing."""
+    current_firm_id()
+    current_trace_id()
+    current_logger()
 
 
 def _require_pending(store: ProposalStore, proposal_id: str) -> Proposal:
