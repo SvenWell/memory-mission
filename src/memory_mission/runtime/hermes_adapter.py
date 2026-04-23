@@ -1,14 +1,9 @@
-"""Hermes Agent adapter.
+"""Hermes Agent adapter — superseded by ``memory_mission.mcp``.
 
-TODO: Wire Hermes to our layers:
-- Hook every action to observability log (0.4)
-- Trigger extraction (1.2) after interactions via Hermes periodic nudges
-- Expose employee memory + firm wiki via MCP tools
-- Honor access control metadata when routing queries
-- Integrate middleware chain (0.7) at Hermes' LLM call sites
+The MCP server at ``memory_mission.mcp.server`` is now the supported
+integration surface. Host agents (Hermes, Claude Code, Cursor, Codex)
+connect by spawning the MCP server as a subprocess; per-employee
+observability + scope enforcement is enforced there.
 
-Hermes native MEMORY.md + USER.md maps cleanly to our concepts:
-- MEMORY.md = compiled firm/environment facts (firm wiki extract per employee)
-- USER.md = employee's own profile (communication style, preferences)
-These become the employee agent's 'soul' injected into every session.
+See ``docs/adr/0003-mcp-as-agent-surface.md``.
 """
