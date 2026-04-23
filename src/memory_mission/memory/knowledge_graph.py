@@ -287,6 +287,12 @@ class KnowledgeGraph:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
+        # WAL + busy_timeout: one MCP process per employee means multiple
+        # writers against the same firm DB (ADR-0003). WAL lets readers
+        # run while a writer holds the lock; busy_timeout blocks writers
+        # briefly instead of raising OperationalError on contention.
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA_SQL)
         self._run_migrations()
@@ -298,6 +304,12 @@ class KnowledgeGraph:
         SQLite lacks ``ALTER TABLE ADD COLUMN IF NOT EXISTS``, so we
         introspect ``PRAGMA table_info`` and add missing columns. Safe on
         fresh DBs because the schema already includes these columns.
+
+        Scope default is ``'public'``: this is correct for V1 only because
+        no firm had scoped triples before this column landed. Any future
+        schema change that adds a different scope-like column MUST NOT
+        default to a permissive value — back-fill with an explicit
+        admin step so pre-existing rows don't silently leak.
         """
         triple_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(triples)")}
         if "corroboration_count" not in triple_cols:
@@ -460,6 +472,47 @@ class KnowledgeGraph:
                 (triple_id, source_closet, source_file, confidence, now),
             )
         return triple
+
+    def has_triple_source(
+        self,
+        *,
+        subject: str,
+        predicate: str,
+        obj: str,
+        source_file: str | None,
+    ) -> bool:
+        """Return True if a currently-true triple for ``(s, p, o)`` already
+        records ``source_file`` in its ``triple_sources`` provenance log.
+
+        Used by promotion to make ``_apply_facts`` idempotent: a retry on
+        the same proposal (e.g., after a transient store-save failure)
+        must not double-corroborate the same source. ``None`` source_file
+        matches the ``NULL`` provenance entries that can be written by
+        internal paths without a source report.
+        """
+        if source_file is None:
+            rows = self._conn.execute(
+                """
+                SELECT 1 FROM triples t
+                JOIN triple_sources ts ON ts.triple_id = t.id
+                WHERE t.subject = ? AND t.predicate = ? AND t.object = ?
+                  AND t.valid_to IS NULL AND ts.source_file IS NULL
+                LIMIT 1
+                """,
+                (subject, predicate, obj),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT 1 FROM triples t
+                JOIN triple_sources ts ON ts.triple_id = t.id
+                WHERE t.subject = ? AND t.predicate = ? AND t.object = ?
+                  AND t.valid_to IS NULL AND ts.source_file = ?
+                LIMIT 1
+                """,
+                (subject, predicate, obj, source_file),
+            ).fetchall()
+        return len(rows) > 0
 
     def find_current_triple(
         self,

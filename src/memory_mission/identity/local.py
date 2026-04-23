@@ -64,6 +64,11 @@ class LocalIdentityResolver:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
+        # WAL + busy_timeout: identity resolution runs from every MCP
+        # process; multiple writers to one file need WAL + a block-on-lock
+        # timeout to stay clear of OperationalError.
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
