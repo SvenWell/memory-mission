@@ -18,6 +18,7 @@ Public surface:
 from memory_mission.promotion.pipeline import (
     CoherenceBlockedError,
     ProposalStateError,
+    ScopeConflictError,
     create_proposal,
     promote,
     reject,
@@ -38,6 +39,7 @@ __all__ = [
     "ProposalStateError",
     "ProposalStatus",
     "ProposalStore",
+    "ScopeConflictError",
     "create_proposal",
     "generate_proposal_id",
     "promote",

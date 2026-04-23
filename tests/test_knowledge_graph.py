@@ -975,3 +975,153 @@ def test_sql_query_spans_triple_sources_join(kg: KnowledgeGraph) -> None:
         {"source_closet": "firm", "source_file": "/a.md"},
         {"source_closet": "personal/alice", "source_file": "/b.md"},
     ]
+
+
+# ---------- Scope column (access-control enforcement) ----------
+
+
+def test_triple_model_defaults_scope_to_public() -> None:
+    t = Triple(subject="a", predicate="p", object="b")
+    assert t.scope == "public"
+
+
+def test_add_triple_persists_scope(kg: KnowledgeGraph) -> None:
+    kg.add_triple(
+        subject="alice",
+        predicate="works_at",
+        obj="acme",
+        source_closet="firm",
+        source_file="/f.md",
+        scope="partner-only",
+    )
+    triples = kg.query_entity("alice")
+    assert len(triples) == 1
+    assert triples[0].scope == "partner-only"
+
+
+def test_query_entity_filters_by_viewer_scopes(kg: KnowledgeGraph) -> None:
+    kg.add_triple("alice", "works_at", "acme", source_closet="firm", scope="public")
+    kg.add_triple("alice", "compensation", "7m", source_closet="firm", scope="partner-only")
+
+    public_only = kg.query_entity("alice", viewer_scopes=frozenset({"public"}))
+    partner = kg.query_entity("alice", viewer_scopes=frozenset({"public", "partner-only"}))
+    all_triples = kg.query_entity("alice")
+
+    assert {t.predicate for t in public_only} == {"works_at"}
+    assert {t.predicate for t in partner} == {"works_at", "compensation"}
+    assert {t.predicate for t in all_triples} == {"works_at", "compensation"}  # None = no filter
+
+
+def test_query_relationship_filters_by_viewer_scopes(kg: KnowledgeGraph) -> None:
+    kg.add_triple("alice", "works_at", "acme", source_closet="firm", scope="public")
+    kg.add_triple("bob", "works_at", "secret-co", source_closet="firm", scope="partner-only")
+
+    public_only = kg.query_relationship("works_at", viewer_scopes=frozenset({"public"}))
+    assert {t.subject for t in public_only} == {"alice"}
+
+
+def test_timeline_filters_by_viewer_scopes(kg: KnowledgeGraph) -> None:
+    kg.add_triple("alice", "works_at", "acme", source_closet="firm", scope="public")
+    kg.add_triple("alice", "compensation", "7m", source_closet="firm", scope="partner-only")
+
+    filtered = kg.timeline("alice", viewer_scopes=frozenset({"public"}))
+    assert {t.predicate for t in filtered} == {"works_at"}
+
+
+def test_corroborate_raises_on_scope_mismatch(kg: KnowledgeGraph) -> None:
+    kg.add_triple(
+        "alice",
+        "works_at",
+        "acme",
+        confidence=0.7,
+        source_closet="firm",
+        scope="public",
+    )
+    with pytest.raises(ValueError, match="scope mismatch"):
+        kg.corroborate(
+            "alice",
+            "works_at",
+            "acme",
+            confidence=0.8,
+            source_closet="firm",
+            scope="partner-only",
+        )
+
+
+def test_sql_query_rejects_attach(kg: KnowledgeGraph) -> None:
+    """ATTACH DATABASE crosses firm isolation — reject."""
+    with pytest.raises(ValueError, match="ATTACH"):
+        kg.sql_query("SELECT * FROM triples; ATTACH DATABASE 'x.db' AS leak")
+    # And inside a WITH / CTE
+    with pytest.raises(ValueError, match="ATTACH"):
+        kg.sql_query("WITH x AS (SELECT 1) SELECT * FROM x; ATTACH DATABASE 'x.db' AS leak")
+
+
+def test_sql_query_rejects_pragma(kg: KnowledgeGraph) -> None:
+    """PRAGMA is a side-effect surface — reject in sql_query."""
+    with pytest.raises(ValueError, match="PRAGMA"):
+        kg.sql_query("SELECT 1; PRAGMA table_list")
+
+
+def test_merge_entities_rejects_scope_conflict(kg: KnowledgeGraph) -> None:
+    """Merge that would colocate differing scopes on one (s,p,o) raises."""
+    kg.add_triple("alice-s", "works_at", "acme", scope="partner-only")
+    kg.add_triple("alice-smith", "works_at", "acme", scope="public")
+    with pytest.raises(ValueError, match="differing scopes"):
+        kg.merge_entities(
+            source="alice-s",
+            target="alice-smith",
+            reviewer_id="reviewer",
+            rationale="same person",
+        )
+
+
+def test_merge_entities_succeeds_when_scopes_match(kg: KnowledgeGraph) -> None:
+    """Matching scopes on overlapping triples merge fine."""
+    kg.add_triple("alice-s", "works_at", "acme", scope="partner-only")
+    kg.add_triple("alice-smith", "works_at", "acme", scope="partner-only")
+    result = kg.merge_entities(
+        source="alice-s",
+        target="alice-smith",
+        reviewer_id="reviewer",
+        rationale="same person",
+    )
+    assert result.triples_rewritten >= 1
+
+
+def test_has_triple_source_reports_existing_source(kg: KnowledgeGraph) -> None:
+    kg.add_triple("alice", "works_at", "acme", source_closet="firm", source_file="/tmp/seed.json")
+    assert (
+        kg.has_triple_source(
+            subject="alice", predicate="works_at", obj="acme", source_file="/tmp/seed.json"
+        )
+        is True
+    )
+    assert (
+        kg.has_triple_source(
+            subject="alice", predicate="works_at", obj="acme", source_file="/tmp/other.json"
+        )
+        is False
+    )
+
+
+def test_corroborate_accepts_matching_scope(kg: KnowledgeGraph) -> None:
+    kg.add_triple(
+        "alice",
+        "works_at",
+        "acme",
+        confidence=0.7,
+        source_closet="firm",
+        scope="partner-only",
+    )
+    updated = kg.corroborate(
+        "alice",
+        "works_at",
+        "acme",
+        confidence=0.6,
+        source_closet="firm",
+        scope="partner-only",
+    )
+    assert updated is not None
+    assert updated.scope == "partner-only"
+    assert updated.corroboration_count == 1

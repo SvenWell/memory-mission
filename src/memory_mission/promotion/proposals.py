@@ -154,6 +154,11 @@ class ProposalStore:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
+        # WAL + busy_timeout: one MCP process per employee means multiple
+        # writers against the same firm's proposal store. WAL + busy_timeout
+        # keep contention manageable instead of raising OperationalError.
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
 

@@ -67,6 +67,24 @@ class ProposalStateError(Exception):
     """Raised when an operation is attempted on a proposal in the wrong status."""
 
 
+class ScopeConflictError(Exception):
+    """Raised by ``promote()`` when target_scope conflicts with KG state.
+
+    Collected by ``_scope_scan`` on a pre-flight pass over every fact —
+    raising BEFORE any write keeps ``_apply_facts`` structurally atomic
+    under scope-conflict paths (no partial-write corruption on retry).
+
+    The structured ``conflicts`` field carries one human-readable line
+    per conflicting fact so the reviewer can decide whether to split
+    the proposal, adjust target_scope, or reject.
+    """
+
+    def __init__(self, conflicts: list[str]) -> None:
+        self.conflicts = conflicts
+        summary = "; ".join(conflicts)
+        super().__init__(f"promotion blocked by {len(conflicts)} scope conflict(s): {summary}")
+
+
 class CoherenceBlockedError(Exception):
     """Raised by ``promote()`` when firm policy blocks on coherence warnings.
 
@@ -382,7 +400,16 @@ def _apply_facts(
     """
     source_closet = _source_closet(proposal)
     source_file = proposal.source_report_path
+    target_scope = proposal.target_scope
     strict = bool(policy is not None and policy.constitutional_mode)
+
+    # Pass 0: scope scan. Catch scope mismatches BEFORE any write so the
+    # KG never holds partial state on a scope-conflict raise. Covers the
+    # corroborate-on-different-scope path AND the UpdateFact invalidate+
+    # re-add downgrade attack — both raise here, both leave KG untouched.
+    scope_conflicts = _scope_scan(proposal, kg)
+    if scope_conflicts:
+        raise ScopeConflictError(scope_conflicts)
 
     # Pass 1: coherence scan. Collect every warning, log each one, and
     # raise before applying anything if the firm is in strict mode.
@@ -422,6 +449,7 @@ def _apply_facts(
                 confidence=fact.confidence,
                 source_closet=source_closet,
                 source_file=source_file,
+                scope=target_scope,
             )
         elif isinstance(fact, PreferenceFact):
             kg.add_entity(fact.subject)
@@ -433,6 +461,7 @@ def _apply_facts(
                 confidence=fact.confidence,
                 source_closet=source_closet,
                 source_file=source_file,
+                scope=target_scope,
             )
         elif isinstance(fact, EventFact):
             kg.add_entity(fact.entity_name)
@@ -445,6 +474,7 @@ def _apply_facts(
                 confidence=fact.confidence,
                 source_closet=source_closet,
                 source_file=source_file,
+                scope=target_scope,
             )
         elif isinstance(fact, UpdateFact):
             kg.add_entity(fact.subject)
@@ -464,9 +494,65 @@ def _apply_facts(
                 confidence=fact.confidence,
                 source_closet=source_closet,
                 source_file=source_file,
+                scope=target_scope,
             )
         elif isinstance(fact, OpenQuestion):
             continue  # open questions never promote
+
+
+def _scope_scan(proposal: Proposal, kg: KnowledgeGraph) -> list[str]:
+    """Pre-flight scope compatibility pass — returns a list of conflict strings.
+
+    For every fact that would write to the KG, check if the currently-true
+    triple at that (subject, predicate, object) has a different scope than
+    ``proposal.target_scope``. For ``UpdateFact``, also check the
+    ``supersedes_object`` triple — that one would otherwise be silently
+    invalidated under the old scope and re-added under the new.
+
+    Returns an empty list when every write is scope-compatible.
+    """
+    target = proposal.target_scope
+    errors: list[str] = []
+    for fact in proposal.facts:
+        if isinstance(fact, RelationshipFact):
+            existing = kg.find_current_triple(fact.subject, fact.predicate, fact.object)
+            if existing is not None and existing.scope != target:
+                errors.append(
+                    f"{fact.subject} {fact.predicate} {fact.object}: existing scope "
+                    f"{existing.scope!r} != proposal scope {target!r}"
+                )
+        elif isinstance(fact, PreferenceFact):
+            existing = kg.find_current_triple(fact.subject, "prefers", fact.preference)
+            if existing is not None and existing.scope != target:
+                errors.append(
+                    f"{fact.subject} prefers {fact.preference!r}: existing scope "
+                    f"{existing.scope!r} != proposal scope {target!r}"
+                )
+        elif isinstance(fact, EventFact):
+            existing = kg.find_current_triple(fact.entity_name, "event", fact.description)
+            if existing is not None and existing.scope != target:
+                errors.append(
+                    f"{fact.entity_name} event {fact.description!r}: existing scope "
+                    f"{existing.scope!r} != proposal scope {target!r}"
+                )
+        elif isinstance(fact, UpdateFact):
+            if fact.supersedes_object:
+                prev = kg.find_current_triple(fact.subject, fact.predicate, fact.supersedes_object)
+                if prev is not None and prev.scope != target:
+                    errors.append(
+                        f"{fact.subject} {fact.predicate} {fact.supersedes_object} "
+                        f"(supersedes): existing scope {prev.scope!r} != proposal "
+                        f"scope {target!r} — invalidating would downgrade"
+                    )
+            new_existing = kg.find_current_triple(fact.subject, fact.predicate, fact.new_object)
+            if new_existing is not None and new_existing.scope != target:
+                errors.append(
+                    f"{fact.subject} {fact.predicate} {fact.new_object}: existing scope "
+                    f"{new_existing.scope!r} != proposal scope {target!r}"
+                )
+        # IdentityFact: entities carry no scope — skip.
+        # OpenQuestion: never promotes — skip.
+    return errors
 
 
 def _coherence_scan(proposal: Proposal, kg: KnowledgeGraph) -> list[CoherenceWarning]:
@@ -530,13 +616,29 @@ def _add_or_corroborate(
     source_closet: str | None,
     source_file: str | None,
     tier: Tier = DEFAULT_TIER,
+    scope: str = "public",
 ) -> None:
     """Corroborate a matching currently-true triple, or add a new one.
 
     Central injection point for the promotion-time Bayesian update.
     If no currently-true match exists, falls back to ``add_triple`` so
     the fact lands with its provenance seeded into ``triple_sources``.
+
+    ``scope`` is copied from the proposal's ``target_scope`` and is
+    load-bearing for access control — corroboration raises
+    ``ValueError`` on scope mismatch rather than letting a restricted
+    fact silently become public (or vice versa). ``_scope_scan`` runs
+    pre-flight so this raise path is defense-in-depth, not the primary
+    error surface.
+
+    Idempotent by ``source_file``: if a currently-true triple for
+    ``(subject, predicate, object)`` already records this source in
+    ``triple_sources``, we skip — prevents double-corroboration when a
+    prior ``promote()`` applied facts but then failed on ``store.save``
+    and the reviewer retries.
     """
+    if kg.has_triple_source(subject=subject, predicate=predicate, obj=obj, source_file=source_file):
+        return
     existing = kg.find_current_triple(subject, predicate, obj)
     if existing is not None:
         kg.corroborate(
@@ -546,6 +648,7 @@ def _add_or_corroborate(
             confidence=confidence,
             source_closet=source_closet,
             source_file=source_file,
+            scope=scope,
         )
         return
     kg.add_triple(
@@ -557,6 +660,7 @@ def _add_or_corroborate(
         source_closet=source_closet,
         source_file=source_file,
         tier=tier,
+        scope=scope,
     )
 
 

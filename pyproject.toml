@@ -20,6 +20,10 @@ dependencies = [
     # Markdown + frontmatter (needed for any wiki page work)
     "python-frontmatter>=1.1",
     "markdown-it-py>=3.0",
+    # YAML (MCP client manifest + firm config files)
+    "PyYAML>=6.0",
+    # MCP server surface — exposes memory-mission as tools to host agents
+    "mcp>=1.0",
     # LLM providers (used by extraction + workflow agents)
     "anthropic>=0.39",
     "openai>=1.54",
@@ -92,6 +96,10 @@ warn_unused_configs = true
 # back when we actually import those modules (Step 5+: composio; Step 6+:
 # mempalace; Layer 5: hermes_agent). Keeping the list lean today avoids
 # mypy's "unused section" warning.
+
+[[tool.mypy.overrides]]
+module = "mcp.*"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

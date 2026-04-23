@@ -24,6 +24,13 @@ from memory_mission.memory.pages import Page
 from memory_mission.memory.schema import Plane
 from memory_mission.memory.tiers import Tier
 from memory_mission.observability.api import coherence_warnings_for
+from memory_mission.permissions.policy import (
+    PUBLIC_SCOPE,
+    Policy,
+    can_read,
+    page_scope,
+    viewer_scopes,
+)
 from memory_mission.synthesis.context import (
     AgentContext,
     AttendeeContext,
@@ -43,6 +50,8 @@ def compile_agent_context(
     tier_floor: Tier | None = None,
     as_of: date | None = None,
     identity_resolver: IdentityResolver | None = None,
+    viewer_id: str | None = None,
+    policy: Policy | None = None,
 ) -> AgentContext:
     """Build the distilled context package for ``role`` + ``task``.
 
@@ -75,10 +84,30 @@ def compile_agent_context(
             resolved via ``get_identity`` to populate
             ``canonical_name``. Without a resolver, ``canonical_name``
             stays ``None`` and the attendee ID is the display name.
+        viewer_id: The employee whose perspective is compiling this
+            context. When set, KG triples and firm-plane doctrine pages
+            are filtered to what this viewer is allowed to read.
+            ``None`` means "internal caller" — no filtering, trusted
+            context (tests, extraction pipeline, ingestion).
+        policy: The firm's permissions policy. With ``viewer_id`` set:
+            present → full ``can_read`` + ``viewer_scopes`` filtering;
+            ``None`` → fail-closed to public-only scope. This keeps
+            accidental policy removal from silently re-exposing
+            previously-scoped data.
 
     Returns:
         ``AgentContext`` ready to render or inspect.
     """
+    # Fail-closed when a viewer is set but the firm hasn't configured a
+    # policy — public-only rather than unfiltered. Keeps accidental
+    # policy removal from silently exposing previously-scoped data.
+    scopes: frozenset[str] | None = None
+    if viewer_id is not None:
+        if policy is not None:
+            scopes = viewer_scopes(policy, viewer_id)
+        else:
+            scopes = frozenset({PUBLIC_SCOPE})
+
     attendee_contexts = [
         _compile_attendee_context(
             attendee_id=attendee_id,
@@ -88,6 +117,9 @@ def compile_agent_context(
             employee_id=employee_id,
             as_of=as_of,
             identity_resolver=identity_resolver,
+            viewer_id=viewer_id,
+            policy=policy,
+            scopes=scopes,
         )
         for attendee_id in attendees
     ]
@@ -97,6 +129,8 @@ def compile_agent_context(
         plane=plane,
         employee_id=employee_id,
         tier_floor=tier_floor,
+        viewer_id=viewer_id,
+        policy=policy,
     )
 
     return AgentContext(
@@ -123,6 +157,9 @@ def _compile_attendee_context(
     employee_id: str | None,
     as_of: date | None,
     identity_resolver: IdentityResolver | None,
+    viewer_id: str | None,
+    policy: Policy | None,
+    scopes: frozenset[str] | None,
 ) -> AttendeeContext:
     canonical_name: str | None = None
     if identity_resolver is not None:
@@ -130,8 +167,12 @@ def _compile_attendee_context(
         if identity is not None:
             canonical_name = identity.canonical_name
 
-    outgoing_raw = kg.query_entity(attendee_id, direction="outgoing", as_of=as_of)
-    incoming_raw = kg.query_entity(attendee_id, direction="incoming", as_of=as_of)
+    outgoing_raw = kg.query_entity(
+        attendee_id, direction="outgoing", as_of=as_of, viewer_scopes=scopes
+    )
+    incoming_raw = kg.query_entity(
+        attendee_id, direction="incoming", as_of=as_of, viewer_scopes=scopes
+    )
 
     # Filter out invalidated triples that query_entity did not already
     # drop (it only drops them when as_of is given).
@@ -169,6 +210,8 @@ def _compile_attendee_context(
         engine=engine,
         plane=plane,
         employee_id=employee_id,
+        viewer_id=viewer_id,
+        policy=policy,
     )
 
     # Coherence warnings (Move 3): pulled from the observability log
@@ -210,11 +253,17 @@ def _compile_doctrine_context(
     plane: Plane,
     employee_id: str | None,
     tier_floor: Tier | None,
+    viewer_id: str | None,
+    policy: Policy | None,
 ) -> DoctrineContext:
     """Return doctrine pages at or above ``tier_floor``.
 
     When either ``engine`` or ``tier_floor`` is None, return empty —
-    the caller explicitly opted out of doctrine context.
+    the caller explicitly opted out of doctrine context. When
+    ``policy`` + ``viewer_id`` are set and ``plane == "firm"``, pages
+    the viewer cannot read under ``can_read`` are dropped. The
+    ``BrainEngine.list_pages`` Protocol does not accept viewer/policy,
+    so filtering happens here rather than in the engine.
     """
     if engine is None or tier_floor is None:
         return DoctrineContext()
@@ -223,6 +272,12 @@ def _compile_doctrine_context(
     from memory_mission.memory.tiers import is_at_least, tier_level
 
     kept = [p for p in pages if is_at_least(p.frontmatter.tier, tier_floor)]
+    if viewer_id is not None and plane == "firm":
+        if policy is not None:
+            kept = [p for p in kept if can_read(policy, viewer_id, p)]
+        else:
+            # Fail-closed: no policy configured → public-only doctrine.
+            kept = [p for p in kept if page_scope(p) == PUBLIC_SCOPE]
     # Highest tier first, then alphabetical by slug
     kept.sort(key=lambda p: (-tier_level(p.frontmatter.tier), p.frontmatter.slug))
     return DoctrineContext(pages=kept)
@@ -234,6 +289,8 @@ def _related_pages_for(
     engine: BrainEngine | None,
     plane: Plane,
     employee_id: str | None,
+    viewer_id: str | None,
+    policy: Policy | None,
 ) -> list[Page]:
     """Fetch the curated page whose slug matches the attendee ID, if any.
 
@@ -243,7 +300,13 @@ def _related_pages_for(
     """
     if engine is None:
         return []
-    page = engine.get_page(slug=attendee_id, plane=plane, employee_id=employee_id)
+    page = engine.get_page(
+        slug=attendee_id,
+        plane=plane,
+        employee_id=employee_id,
+        viewer_id=viewer_id,
+        policy=policy,
+    )
     return [page] if page is not None else []
 
 

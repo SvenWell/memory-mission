@@ -2194,3 +2194,102 @@ context engine — overlap + wedge phrasing).
 
 V1 + polish complete. Branch `SvenWell/office-hours` pushed to
 `origin`. Ready for review by colleagues.
+
+---
+
+## Step 18: MCP Server Surface — DONE (2026-04-23)
+
+**Goal:** Close the multi-user access gap by exposing Memory Mission
+as tools to any MCP-compatible host agent. Before Step 18, every host
+had to import the Python package directly — no way for Codex, Cursor,
+Claude Desktop, or a remote Hermes instance to read the firm KG
+without a bespoke per-host adapter.
+
+**Decision:** ship a FastMCP server at `src/memory_mission/mcp/`.
+One process per employee. 14 tools total — 8 read, 6 write. Auth
+via per-firm YAML manifest. Every mutating call opens an
+`observability_scope` so audit trail coverage is complete over MCP,
+not just over the Python API. Full rationale in
+`docs/adr/0003-mcp-as-agent-surface.md`.
+
+**Scope mapping:**
+
+- `read` — `query` / `get_page` / `search` / `get_entity` /
+  `get_triples` / `check_coherence` / `compile_agent_context`
+- `propose` — `create_proposal` / `list_proposals`
+- `review` — `approve_proposal` / `reject_proposal` /
+  `reopen_proposal` / `merge_entities` / `sql_query_readonly`
+
+SQL sits at the `review` tier because raw SQL can enumerate the
+whole KG regardless of page-level `can_read`. Different guardrail.
+
+### Files created
+
+- `src/memory_mission/mcp/__init__.py` — package + re-exports
+- `src/memory_mission/mcp/auth.py` — YAML manifest loader, `Scope`
+  enum (StrEnum), `ClientEntry`, `AuthError`
+- `src/memory_mission/mcp/context.py` — `McpContext` + `tool_scope()`
+- `src/memory_mission/mcp/tools.py` — 14 tool implementations
+- `src/memory_mission/mcp/server.py` — FastMCP wiring, CLI
+  entrypoint, `initialize_from_handles()` test/embed seam, wiki
+  bootstrap loader
+- `src/memory_mission/mcp/__main__.py` — enables
+  `python -m memory_mission.mcp`
+- `tests/test_mcp_server.py` — 37 tests
+- `docs/adr/0003-mcp-as-agent-surface.md` — rationale ADR
+- `docs/recipes/mcp-integration.md` — operator guide
+
+### Files modified
+
+- `pyproject.toml` — added `mcp>=1.0` + `PyYAML>=6.0` to
+  runtime deps; `[[tool.mypy.overrides]]` for `mcp.*` to skip
+  missing stubs
+- `src/memory_mission/runtime/hermes_adapter.py` — TODO stub
+  replaced with a pointer to `memory_mission.mcp`
+- `docs/ARCHITECTURE.md` — new module walkthrough entry for `mcp/`
+- `docs/AGENTS.md` — added MCP line to the repo map
+
+### Reuse
+
+No new domain logic in `mcp/tools.py`. Every tool is a thin wrapper
+over existing primitives:
+
+- `BrainEngine` — already `viewer_id` + `policy` aware since Move 5
+- `KnowledgeGraph` — already exposes `corroborate`, `merge_entities`,
+  `sql_query`, `check_coherence`
+- `create_proposal` / `promote` / `reject` / `reopen` — already
+  require active observability scope
+- `compile_agent_context` — already returns structured
+  `AgentContext` with `.render()`
+
+The MCP layer is the protocol boundary. Everything below it is the
+same code the Python API uses.
+
+### Verification
+
+- [x] `pytest` — 680/680 passed (+37 since V1 polish)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 71 source files (+5)
+- [x] All 14 tools registered in FastMCP
+- [x] Unknown employees fail closed at startup
+- [x] Missing scopes fail closed per tool call
+- [x] `sql_query_readonly` rejects writes; requires `review` scope
+- [x] Full round-trip: create_proposal → list_proposals →
+      approve_proposal → get_triples returns the new fact
+
+### Post-MCP deferred (per plan Phase B)
+
+Complexity cut is evidence-gated: only cut after two weeks of real-
+data dogfooding. Explicitly kept:
+
+- Federated detector — admin-skill-opt-in already
+- Bayesian corroboration — KGs update Bayesianly by design
+- Identity layer — extend with Slack / Telegram / WhatsApp / phone
+  channel types + E.164 normalization as a separate step
+
+### Next
+
+Dogfood real Gmail + Granola through MCP for two weeks, then review
+`personal_brain/working.py`, `personal_brain/lessons.py`, and
+`permissions/policy.py` for evidence-based cuts. ADR-0004 for
+identity channel extension is the natural next ADR.

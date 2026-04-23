@@ -42,6 +42,7 @@ deleted — they're invalidated by setting ``valid_to``, preserving history.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
@@ -76,7 +77,15 @@ class Entity(BaseModel):
 
 
 class Triple(BaseModel):
-    """One (subject, predicate, object) fact with validity + provenance."""
+    """One (subject, predicate, object) fact with validity + provenance.
+
+    ``scope`` carries the page-level access-control scope this fact lives
+    under (``"public"`` / ``"partner-only"`` / firm-defined names).
+    Copied from the source ``Proposal.target_scope`` on promotion. Read
+    paths that want permission filtering pass ``viewer_scopes`` into
+    ``query_entity`` / ``query_relationship`` / ``timeline`` and the KG
+    drops rows whose scope is outside the viewer's set.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -90,6 +99,7 @@ class Triple(BaseModel):
     source_file: str | None = None
     corroboration_count: int = 0
     tier: Tier = DEFAULT_TIER
+    scope: str = "public"
 
     @field_validator("confidence")
     @classmethod
@@ -226,7 +236,8 @@ CREATE TABLE IF NOT EXISTS triples (
     source_file TEXT,
     created_at TEXT NOT NULL,
     corroboration_count INTEGER NOT NULL DEFAULT 0,
-    tier TEXT NOT NULL DEFAULT 'decision'
+    tier TEXT NOT NULL DEFAULT 'decision',
+    scope TEXT NOT NULL DEFAULT 'public'
 );
 
 CREATE INDEX IF NOT EXISTS idx_triples_subject ON triples(subject);
@@ -277,6 +288,12 @@ class KnowledgeGraph:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self._db_path)
         self._conn.row_factory = sqlite3.Row
+        # WAL + busy_timeout: one MCP process per employee means multiple
+        # writers against the same firm DB (ADR-0003). WAL lets readers
+        # run while a writer holds the lock; busy_timeout blocks writers
+        # briefly instead of raising OperationalError on contention.
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA_SQL)
         self._run_migrations()
@@ -288,6 +305,12 @@ class KnowledgeGraph:
         SQLite lacks ``ALTER TABLE ADD COLUMN IF NOT EXISTS``, so we
         introspect ``PRAGMA table_info`` and add missing columns. Safe on
         fresh DBs because the schema already includes these columns.
+
+        Scope default is ``'public'``: this is correct for V1 only because
+        no firm had scoped triples before this column landed. Any future
+        schema change that adds a different scope-like column MUST NOT
+        default to a permissive value — back-fill with an explicit
+        admin step so pre-existing rows don't silently leak.
         """
         triple_cols = {row["name"] for row in self._conn.execute("PRAGMA table_info(triples)")}
         if "corroboration_count" not in triple_cols:
@@ -297,6 +320,10 @@ class KnowledgeGraph:
         if "tier" not in triple_cols:
             self._conn.execute(
                 "ALTER TABLE triples ADD COLUMN tier TEXT NOT NULL DEFAULT 'decision'"
+            )
+        if "scope" not in triple_cols:
+            self._conn.execute(
+                "ALTER TABLE triples ADD COLUMN scope TEXT NOT NULL DEFAULT 'public'"
             )
 
     # ---------- Lifecycle ----------
@@ -378,6 +405,7 @@ class KnowledgeGraph:
         source_closet: str | None = None,
         source_file: str | None = None,
         tier: Tier = DEFAULT_TIER,
+        scope: str = "public",
     ) -> Triple:
         """Insert a new triple. Triples are append-only; use ``invalidate``
         to end the validity of an existing triple instead of overwriting.
@@ -392,6 +420,11 @@ class KnowledgeGraph:
         ``doctrine`` / ``constitution`` is a deliberate editorial act by
         the reviewer; the default makes most everyday extractions
         land safely as decisions that higher tiers can override.
+
+        ``scope`` carries the page-level access-control scope (``public``
+        by default). Read paths filter by this field when the caller
+        passes ``viewer_scopes``; promotion copies the
+        ``Proposal.target_scope`` onto each triple it writes.
         """
         triple = Triple(
             subject=subject,
@@ -403,6 +436,7 @@ class KnowledgeGraph:
             source_closet=source_closet,
             source_file=source_file,
             tier=tier,
+            scope=scope,
         )
         now = _utcnow_iso()
         with self._tx() as cur:
@@ -411,8 +445,8 @@ class KnowledgeGraph:
                 INSERT INTO triples
                     (subject, predicate, object, valid_from, valid_to,
                      confidence, source_closet, source_file, created_at,
-                     corroboration_count, tier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                     corroboration_count, tier, scope)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                 """,
                 (
                     subject,
@@ -425,6 +459,7 @@ class KnowledgeGraph:
                     source_file,
                     now,
                     tier,
+                    scope,
                 ),
             )
             triple_id = cur.lastrowid
@@ -438,6 +473,47 @@ class KnowledgeGraph:
                 (triple_id, source_closet, source_file, confidence, now),
             )
         return triple
+
+    def has_triple_source(
+        self,
+        *,
+        subject: str,
+        predicate: str,
+        obj: str,
+        source_file: str | None,
+    ) -> bool:
+        """Return True if a currently-true triple for ``(s, p, o)`` already
+        records ``source_file`` in its ``triple_sources`` provenance log.
+
+        Used by promotion to make ``_apply_facts`` idempotent: a retry on
+        the same proposal (e.g., after a transient store-save failure)
+        must not double-corroborate the same source. ``None`` source_file
+        matches the ``NULL`` provenance entries that can be written by
+        internal paths without a source report.
+        """
+        if source_file is None:
+            rows = self._conn.execute(
+                """
+                SELECT 1 FROM triples t
+                JOIN triple_sources ts ON ts.triple_id = t.id
+                WHERE t.subject = ? AND t.predicate = ? AND t.object = ?
+                  AND t.valid_to IS NULL AND ts.source_file IS NULL
+                LIMIT 1
+                """,
+                (subject, predicate, obj),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """
+                SELECT 1 FROM triples t
+                JOIN triple_sources ts ON ts.triple_id = t.id
+                WHERE t.subject = ? AND t.predicate = ? AND t.object = ?
+                  AND t.valid_to IS NULL AND ts.source_file = ?
+                LIMIT 1
+                """,
+                (subject, predicate, obj, source_file),
+            ).fetchall()
+        return len(rows) > 0
 
     def find_current_triple(
         self,
@@ -472,6 +548,7 @@ class KnowledgeGraph:
         confidence: float,
         source_closet: str | None = None,
         source_file: str | None = None,
+        scope: str = "public",
     ) -> Triple | None:
         """Bump confidence on a matching currently-true triple.
 
@@ -488,13 +565,21 @@ class KnowledgeGraph:
         strengthen belief, not create a duplicate. The cap keeps
         certainty (1.0) reachable only through explicit human override,
         never via accumulated agent corroboration.
+
+        Raises ``ValueError`` when the incoming ``scope`` differs from
+        the existing triple's scope. Scope changes are editorial — the
+        reviewer must reject the proposal or handle the scope delta
+        explicitly (via ``invalidate`` + re-add under the new scope).
+        Silent scope drift would let a ``partner-only`` proposal weaken
+        an existing ``partner-only`` fact to ``public`` (or vice versa)
+        without a human on the path.
         """
         if not 0.0 <= confidence <= 1.0:
             raise ValueError(f"confidence must be in [0, 1], got {confidence}")
 
         row = self._conn.execute(
             """
-            SELECT id, confidence, corroboration_count FROM triples
+            SELECT id, confidence, corroboration_count, scope FROM triples
             WHERE subject = ? AND predicate = ? AND object = ?
               AND valid_to IS NULL
             ORDER BY id DESC
@@ -504,6 +589,15 @@ class KnowledgeGraph:
         ).fetchone()
         if row is None:
             return None
+
+        existing_scope = row["scope"] if row["scope"] is not None else "public"
+        if existing_scope != scope:
+            raise ValueError(
+                f"scope mismatch on corroborate ({subject!r}, {predicate!r}, "
+                f"{obj!r}): existing={existing_scope!r} incoming={scope!r} — "
+                "split the proposal, change scope deliberately via invalidate, "
+                "or reject"
+            )
 
         triple_id = row["id"]
         old_confidence = row["confidence"]
@@ -633,13 +727,24 @@ class KnowledgeGraph:
             raise ValueError(
                 f"sql_query accepts only SELECT or WITH statements; got: {stripped[:60]!r}"
             )
+        # Block cross-database + PRAGMA paths. ATTACH DATABASE would let a
+        # caller reach another firm's SQLite file, crossing the one-firm-
+        # one-DB isolation boundary (core rule 6). PRAGMA is the only
+        # remaining SQLite side-effect surface under query_only mode;
+        # reject it explicitly so operators don't accidentally leak
+        # schema or change connection state.
+        if re.search(r"\b(ATTACH|DETACH|PRAGMA)\b", upper):
+            raise ValueError("sql_query rejects ATTACH / DETACH / PRAGMA statements")
         if row_limit < 1:
             raise ValueError(f"row_limit must be >= 1, got {row_limit}")
 
         # Dedicated read-only connection: even a malformed validation
-        # cannot land a write because the engine refuses.
+        # cannot land a write because the engine refuses. ``query_only``
+        # is defense-in-depth — it blocks side-effect statements
+        # (PRAGMA, temp-table creation) that mode=ro alone tolerates.
         ro_conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
         ro_conn.row_factory = sqlite3.Row
+        ro_conn.execute("PRAGMA query_only = ON")
         try:
             # Fetch one extra row so we can detect overflow.
             rows = ro_conn.execute(query, params).fetchmany(row_limit + 1)
@@ -779,6 +884,7 @@ class KnowledgeGraph:
         *,
         as_of: date | None = None,
         direction: Direction = "outgoing",
+        viewer_scopes: frozenset[str] | None = None,
     ) -> list[Triple]:
         """Return triples involving ``name``.
 
@@ -787,6 +893,10 @@ class KnowledgeGraph:
         - ``direction="both"``: union of the above
 
         When ``as_of`` is set, only triples valid on that date are returned.
+
+        When ``viewer_scopes`` is set, triples whose scope isn't in the
+        viewer's set are dropped. ``None`` disables the filter (callers
+        without a policy context, and internal promotion-side callers).
         """
         clauses = []
         params: list[Any] = []
@@ -804,6 +914,8 @@ class KnowledgeGraph:
         triples = [_row_to_triple(r) for r in rows]
         if as_of is not None:
             triples = [t for t in triples if t.is_valid_at(as_of)]
+        if viewer_scopes is not None:
+            triples = [t for t in triples if t.scope in viewer_scopes]
         return triples
 
     def query_relationship(
@@ -811,18 +923,32 @@ class KnowledgeGraph:
         predicate: str,
         *,
         as_of: date | None = None,
+        viewer_scopes: frozenset[str] | None = None,
     ) -> list[Triple]:
-        """Return all triples using ``predicate``, optionally filtered by date."""
+        """Return all triples using ``predicate``, optionally filtered by date.
+
+        ``viewer_scopes`` — same semantics as ``query_entity``.
+        """
         rows = self._conn.execute(
             "SELECT * FROM triples WHERE predicate = ?", (predicate,)
         ).fetchall()
         triples = [_row_to_triple(r) for r in rows]
         if as_of is not None:
             triples = [t for t in triples if t.is_valid_at(as_of)]
+        if viewer_scopes is not None:
+            triples = [t for t in triples if t.scope in viewer_scopes]
         return triples
 
-    def timeline(self, entity_name: str | None = None) -> list[Triple]:
-        """Return triples ordered by ``valid_from`` (NULLs first)."""
+    def timeline(
+        self,
+        entity_name: str | None = None,
+        *,
+        viewer_scopes: frozenset[str] | None = None,
+    ) -> list[Triple]:
+        """Return triples ordered by ``valid_from`` (NULLs first).
+
+        ``viewer_scopes`` — same semantics as ``query_entity``.
+        """
         if entity_name is None:
             rows = self._conn.execute(
                 "SELECT * FROM triples ORDER BY "
@@ -840,7 +966,10 @@ class KnowledgeGraph:
                 """,
                 (entity_name, entity_name),
             ).fetchall()
-        return [_row_to_triple(r) for r in rows]
+        triples = [_row_to_triple(r) for r in rows]
+        if viewer_scopes is not None:
+            triples = [t for t in triples if t.scope in viewer_scopes]
+        return triples
 
     # ---------- Entity merge ----------
 
@@ -878,12 +1007,26 @@ class KnowledgeGraph:
         already had ``works_at acme``, you end up with two triples after
         rewrite). That dedupe is a separate concern and can land later.
 
-        Raises ``ValueError`` on empty rationale or source == target.
+        Raises ``ValueError`` on empty rationale, ``source == target``,
+        or when the rewrite would colocate triples of differing scopes
+        on the same ``(subject, predicate, object)`` — scope drift via
+        merge must be handled explicitly (split the merge, invalidate
+        the conflicting triple, then re-add under the chosen scope).
         """
         if not rationale or not rationale.strip():
             raise ValueError("rationale is required on every merge")
         if source == target:
             raise ValueError("source and target must differ")
+
+        # Pre-check: would the rewrite create (s,p,o) collisions with
+        # differing scopes on the target entity? If so, raise BEFORE any
+        # write — merge must not be the path that silently reclassifies.
+        conflicts = self._merge_scope_conflicts(source, target)
+        if conflicts:
+            summary = "; ".join(conflicts)
+            raise ValueError(
+                f"merge would colocate differing scopes on {len(conflicts)} triple(s): {summary}"
+            )
 
         now = datetime.now(UTC)
         now_iso = now.isoformat()
@@ -921,6 +1064,40 @@ class KnowledgeGraph:
             merged_at=now,
             triples_rewritten=total,
         )
+
+    def _merge_scope_conflicts(self, source: str, target: str) -> list[str]:
+        """Return a list of (s,p,o) rewrites that would create scope collisions.
+
+        A merge rewrites every triple ``source → target``. If after the
+        rewrite two currently-true triples on the same ``(subject,
+        predicate, object)`` exist at different scopes, that is a silent
+        reclassification — merge refuses and the reviewer splits the work.
+        """
+        # Get all currently-true triples that reference source or target.
+        rows = self._conn.execute(
+            """
+            SELECT subject, predicate, object, scope FROM triples
+            WHERE valid_to IS NULL
+              AND (subject = ? OR object = ? OR subject = ? OR object = ?)
+            """,
+            (source, source, target, target),
+        ).fetchall()
+
+        # Simulate the rewrite: source → target on subject + object.
+        rewritten: dict[tuple[str, str, str], set[str]] = {}
+        for r in rows:
+            subj = target if r["subject"] == source else r["subject"]
+            obj = target if r["object"] == source else r["object"]
+            key = (subj, r["predicate"], obj)
+            scope = r["scope"] if r["scope"] is not None else "public"
+            rewritten.setdefault(key, set()).add(scope)
+
+        conflicts: list[str] = []
+        for (subj, pred, obj), scopes in rewritten.items():
+            if len(scopes) > 1:
+                scope_list = sorted(scopes)
+                conflicts.append(f"{subj} {pred} {obj}: scopes={scope_list}")
+        return conflicts
 
     def merge_history(self, entity_name: str) -> list[MergeResult]:
         """Return every merge touching ``entity_name`` (as source or target).
@@ -1017,6 +1194,10 @@ def _row_to_triple(row: sqlite3.Row) -> Triple:
         tier_value = row["tier"]
     except (IndexError, KeyError):
         tier_value = DEFAULT_TIER
+    try:
+        scope_value = row["scope"]
+    except (IndexError, KeyError):
+        scope_value = "public"
     return Triple(
         subject=row["subject"],
         predicate=row["predicate"],
@@ -1028,6 +1209,7 @@ def _row_to_triple(row: sqlite3.Row) -> Triple:
         source_file=row["source_file"],
         corroboration_count=count if count is not None else 0,
         tier=tier_value if tier_value is not None else DEFAULT_TIER,
+        scope=scope_value if scope_value is not None else "public",
     )
 
 

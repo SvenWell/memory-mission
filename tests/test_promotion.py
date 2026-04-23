@@ -939,3 +939,184 @@ def test_promote_preference_corroborates(
     prefs = kg.query_relationship("prefers")
     assert len(prefs) == 1
     assert prefs[0].corroboration_count == 1
+
+
+# ---------- Scope propagation (bugfix regression) ----------
+
+
+def test_promote_copies_target_scope_onto_triples(
+    store: ProposalStore,
+    kg: KnowledgeGraph,
+    tmp_path: Path,
+) -> None:
+    """Approving a partner-only proposal must stamp its triples partner-only.
+
+    Before the fix, target_scope was dropped on approval and triples
+    landed at the schema default 'public', letting MCP get_triples
+    return the fact to any employee with READ scope.
+    """
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        p = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="ceo",
+            facts=[_rel("ceo", "compensation", "7m")],
+            source_report_path="/tmp/board.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="alice",
+            target_scope="partner-only",
+        )
+        promote(store, kg, p.proposal_id, reviewer_id="reviewer", rationale="verified")
+
+    triples = kg.query_entity("ceo")
+    assert len(triples) == 1
+    assert triples[0].scope == "partner-only"
+
+
+def test_promote_corroborating_mismatched_scope_raises(
+    store: ProposalStore,
+    kg: KnowledgeGraph,
+    tmp_path: Path,
+) -> None:
+    """A second proposal corroborating under a different scope must raise.
+
+    Raised by the pre-flight ``_scope_scan`` before any KG write, so the
+    reviewer surfaces the conflict and the KG stays at post-p1 state.
+    """
+    from memory_mission.promotion import ScopeConflictError
+
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        p1 = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="ceo",
+            facts=[_rel("ceo", "compensation", "7m")],
+            source_report_path="/tmp/a.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="alice",
+            target_scope="partner-only",
+        )
+        promote(store, kg, p1.proposal_id, reviewer_id="reviewer", rationale="source 1")
+
+        p2 = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="ceo",
+            facts=[_rel("ceo", "compensation", "7m")],
+            source_report_path="/tmp/b.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="bob",
+            target_scope="public",
+        )
+        with pytest.raises(ScopeConflictError, match="existing scope 'partner-only'"):
+            promote(store, kg, p2.proposal_id, reviewer_id="reviewer", rationale="source 2")
+
+    # KG unchanged after the raise — proves atomicity.
+    triples = kg.query_entity("ceo")
+    assert len(triples) == 1
+    assert triples[0].scope == "partner-only"
+    assert triples[0].corroboration_count == 0  # p2 never corroborated
+
+
+def test_promote_is_idempotent_after_failed_save(
+    store: ProposalStore,
+    kg: KnowledgeGraph,
+    tmp_path: Path,
+) -> None:
+    """Re-promoting a proposal whose facts already landed must NOT corroborate twice.
+
+    Mitigates the non-atomic promote() edge case: if store.save failed
+    after _apply_facts succeeded on the first try, the proposal is still
+    pending. A retry must not double-bump confidence on the same source.
+    """
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        p = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="alice",
+            facts=[_rel("alice", "works_at", "acme")],
+            source_report_path="/tmp/retry.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="alice",
+        )
+        promote(store, kg, p.proposal_id, reviewer_id="reviewer", rationale="first run")
+
+        # Simulate a retry: reset proposal to pending to mimic a failed-save
+        # scenario, then promote again. Idempotent _add_or_corroborate must
+        # detect the already-applied source and skip.
+        reset = p.model_copy(update={"status": "pending", "reviewer_id": None, "decided_at": None})
+        store.save(reset)
+        promote(store, kg, p.proposal_id, reviewer_id="reviewer", rationale="retry")
+
+    triples = kg.query_entity("alice")
+    assert len(triples) == 1
+    assert triples[0].corroboration_count == 0  # not double-bumped
+
+
+def test_promote_updatefact_scope_downgrade_blocked(
+    store: ProposalStore,
+    kg: KnowledgeGraph,
+    tmp_path: Path,
+) -> None:
+    """UpdateFact cannot invalidate a partner-only triple under a public proposal.
+
+    Closes the downgrade attack: invalidate + re-add would otherwise
+    bypass corroborate's scope check because the prior triple is no
+    longer 'current' by the time add_triple runs.
+    """
+    from datetime import date as _date
+
+    from memory_mission.promotion import ScopeConflictError
+
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        # Seed partner-only triple
+        seed = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="ceo",
+            facts=[_rel("ceo", "compensation", "7m")],
+            source_report_path="/tmp/seed.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="alice",
+            target_scope="partner-only",
+        )
+        promote(store, kg, seed.proposal_id, reviewer_id="reviewer", rationale="seed")
+
+        # Try to supersede it under public scope
+        update = UpdateFact(
+            confidence=0.9,
+            support_quote="compensation change",
+            subject="ceo",
+            predicate="compensation",
+            supersedes_object="7m",
+            new_object="8m",
+            effective_date=_date(2026, 4, 1),
+        )
+        p = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="ceo",
+            facts=[update],
+            source_report_path="/tmp/downgrade.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="bob",
+            target_scope="public",
+        )
+        with pytest.raises(ScopeConflictError, match="invalidating would downgrade"):
+            promote(store, kg, p.proposal_id, reviewer_id="reviewer", rationale="downgrade")
+
+    # KG unchanged: the original partner-only triple still exists, not invalidated
+    triples = kg.query_entity("ceo")
+    assert len(triples) == 1
+    assert triples[0].scope == "partner-only"
+    assert triples[0].valid_to is None
+
+
+def test_knowledge_graph_enables_wal(tmp_path: Path) -> None:
+    """KG connection uses WAL journal mode for multi-writer safety."""
+    graph = KnowledgeGraph(tmp_path / "kg.sqlite3")
+    try:
+        mode = graph._conn.execute("PRAGMA journal_mode").fetchone()[0]
+    finally:
+        graph.close()
+    assert mode == "wal"

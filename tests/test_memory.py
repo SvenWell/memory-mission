@@ -974,18 +974,24 @@ def test_permission_filter_fails_closed_on_unknown_employee(tmp_path: Path) -> N
     assert hits == []
 
 
-def test_permission_filter_missing_one_argument_means_no_filter() -> None:
-    """If only viewer_id is supplied or only policy, treat as no-filter.
+def test_permission_filter_viewer_without_policy_is_fail_closed() -> None:
+    """A viewer_id without a policy fails closed to public-scope pages.
 
-    This keeps the contract explicit: permission enforcement requires
-    BOTH arguments. Half-configured callers are not silently stricter.
+    Closes the foot-gun from the Step 18 review: MCP callers with no
+    configured ``protocols/permissions.md`` used to see every scoped
+    page because ``_viewer_can_read`` silently skipped enforcement.
+    Now: viewer_id set → firm plane filters to public-only when
+    policy is absent. Personal plane stays owner-only regardless.
     """
 
     engine = InMemoryEngine()
     engine.put_page(_scoped_firm_page("secret", "partner-only"), plane="firm")
+    engine.put_page(_scoped_firm_page("public-page", "public"), plane="firm")
     policy: Policy = _partner_policy()
 
-    # viewer_id alone: not enforced (page returned)
-    assert engine.get_page("secret", plane="firm", viewer_id="alice") is not None
-    # policy alone: not enforced (page returned)
+    # viewer_id alone (policy=None): fail-closed → partner-only hidden, public visible.
+    assert engine.get_page("secret", plane="firm", viewer_id="alice") is None
+    assert engine.get_page("public-page", plane="firm", viewer_id="alice") is not None
+    # policy alone (viewer_id=None): no enforcement, as before — internal callers
+    # (tests, extraction) don't carry a viewer identity.
     assert engine.get_page("secret", plane="firm", policy=policy) is not None
