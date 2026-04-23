@@ -1,6 +1,6 @@
 # Memory Mission — Vision
 
-*Working synthesis, 2026-04-22. A living doc — update as the vision evolves.*
+*A governed context engine for agents. Working synthesis, 2026-04-22. Update as the vision evolves.*
 
 ---
 
@@ -8,7 +8,7 @@
 
 The last two years produced broad agent capability — coding agents, chat agents, voice agents — and a brutal gap on the data layer beneath them. Firms running knowledge work (VCs, wealth managers, law firms, consultancies, corporate strategy teams) now watch their agents repeat questions across meetings, contradict what the firm decided last quarter, and misattribute facts across people who share a first name. The bottleneck is not raw intelligence. It is **governed institutional memory** that agents can read, write, and build on without corrupting what the firm actually believes.
 
-The personal-memory layer (Tolaria, Obsidian, second-brain vaults) is a solved-enough problem for individuals. The enterprise layer — shared truth, review gates, coherence across multiple knowledge workers — is not. Memory Mission is for that layer.
+The personal-memory layer (Tolaria, Obsidian, second-brain vaults) is a solved-enough problem for individuals. The enterprise layer — shared truth, review gates, coherence across multiple knowledge workers — is not. Memory Mission is the **context engine for agents** at that layer: not a chat wrapper, not a vector-store retrofit, but a governed substrate that turns scattered firm knowledge into the trusted context an agent needs to be useful.
 
 ---
 

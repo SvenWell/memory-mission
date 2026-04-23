@@ -37,6 +37,7 @@ Format: immutable append-only JSONL per firm.
 """
 
 from memory_mission.observability.api import (
+    coherence_warnings_for,
     log_coherence_warning,
     log_connector_invocation,
     log_draft,
@@ -85,6 +86,7 @@ __all__ = [
     "ProposalCreatedEvent",
     "ProposalDecidedEvent",
     "RetrievalEvent",
+    "coherence_warnings_for",
     "current_employee_id",
     "current_firm_id",
     "current_logger",

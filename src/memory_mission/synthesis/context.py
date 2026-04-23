@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from memory_mission.memory.knowledge_graph import Triple
+from memory_mission.memory.knowledge_graph import CoherenceWarning, Triple
 from memory_mission.memory.pages import Page
 from memory_mission.memory.schema import Plane
 from memory_mission.memory.tiers import Tier
@@ -41,6 +41,7 @@ class AttendeeContext(BaseModel):
     events: list[Triple] = Field(default_factory=list)
     preferences: list[Triple] = Field(default_factory=list)
     related_pages: list[Page] = Field(default_factory=list)
+    coherence_warnings: list[CoherenceWarning] = Field(default_factory=list)
 
     @property
     def fact_count(self) -> int:
@@ -162,6 +163,14 @@ class AgentContext(BaseModel):
 def _render_attendee(attendee: AttendeeContext) -> list[str]:
     lines: list[str] = []
     lines.append(f"### {attendee.display_name} (`{attendee.attendee_id}`)")
+
+    if attendee.coherence_warnings:
+        lines.append("")
+        lines.append("> [!contradiction] Unresolved tier conflict")
+        for w in attendee.coherence_warnings:
+            new_ref = f"`{w.subject} {w.predicate} = {w.new_object}` ({w.new_tier})"
+            old_ref = f"`{w.subject} {w.predicate} = {w.conflicting_object}` ({w.conflicting_tier})"
+            lines.append(f"> - {new_ref} vs {old_ref}")
 
     lines.append("")
     lines.append("**Outgoing relationships**")

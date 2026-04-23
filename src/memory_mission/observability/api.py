@@ -10,6 +10,7 @@ to log, not the raw Logger class.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from memory_mission.observability.context import (
@@ -229,6 +230,50 @@ def log_proposal_decided(
     )
     current_logger().write(event)
     return event
+
+
+def coherence_warnings_for(
+    entity_id: str,
+    *,
+    since: datetime | None = None,
+) -> list[CoherenceWarningEvent]:
+    """Return unresolved coherence warnings touching ``entity_id``.
+
+    Used by Move 3 rendering paths (``AgentContext`` / ``render_page``)
+    to surface ``[!contradiction]`` callouts for an entity when an
+    observability log records unresolved conflicts on it.
+
+    Scans the current firm's append-only JSONL via ``current_logger``.
+    Requires an active observability scope; returns ``[]`` if no
+    matching events are found.
+
+    V1 treats every ``CoherenceWarningEvent`` as unresolved — we do
+    not yet emit a ``CoherenceResolvedEvent`` on merge / reject. That
+    primitive is deferred to post-V1 (see ``docs/VISION.md`` +
+    post-V1 backlog). When it lands, this helper will filter by
+    subsequent resolution events on the same (subject, predicate,
+    conflicting_object) triple.
+
+    Args:
+        entity_id: Subject to match on. Stable ID (``p_<token>``) or
+            raw entity name. Compared exactly against ``subject``.
+        since: Optional floor — only return events at or after this
+            timestamp. Default ``None`` = entire log.
+
+    Returns:
+        List of ``CoherenceWarningEvent`` ordered oldest-first.
+    """
+    logger = current_logger()
+    out: list[CoherenceWarningEvent] = []
+    for event in logger.read_all():
+        if not isinstance(event, CoherenceWarningEvent):
+            continue
+        if event.subject != entity_id:
+            continue
+        if since is not None and event.timestamp < since:
+            continue
+        out.append(event)
+    return out
 
 
 def log_coherence_warning(

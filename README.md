@@ -1,6 +1,6 @@
 # Memory Mission
 
-**Turn a firm's scattered knowledge into one queryable, auditable memory layer that AI agents can act on safely.**
+**A governed context engine for agents: turn a firm's scattered knowledge into one queryable, auditable layer that AI agents can act on safely.**
 
 Python infrastructure for pulling data from external sources (email, transcripts, calendars), distilling it into git-versioned markdown the firm owns, and surfacing it through a hybrid-search retrieval interface — with every extraction, promotion, and retrieval logged for compliance audit.
 

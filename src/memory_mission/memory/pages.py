@@ -96,6 +96,7 @@ class PageFrontmatter(BaseModel):
     created: datetime | None = None
     updated: datetime | None = None
     tier: Tier = DEFAULT_TIER
+    reviewed_at: datetime | None = None
 
     @field_validator("confidence")
     @classmethod
@@ -184,8 +185,19 @@ def parse_page(raw: str) -> Page:
     )
 
 
-def render_page(page: Page) -> str:
-    """Serialize a page to the on-disk markdown format."""
+def render_page(
+    page: Page,
+    *,
+    coherence_warnings: list[Any] | None = None,
+) -> str:
+    """Serialize a page to the on-disk markdown format.
+
+    ``coherence_warnings`` (Move 3) attaches an Obsidian
+    ``> [!contradiction]`` callout above the compiled-truth zone when
+    non-empty. Items should be ``CoherenceWarning`` instances (imported
+    lazily to avoid a memory→knowledge_graph cycle at module load).
+    Default ``None`` preserves existing callers unchanged.
+    """
     fm_data = page.frontmatter.model_dump(mode="json", exclude_none=True)
     # Preserve key order: core fields first, then extras.
     ordered_keys = [
@@ -209,14 +221,11 @@ def render_page(page: Page) -> str:
             ordered[key] = value
 
     fm_yaml = yaml.safe_dump(ordered, sort_keys=False, allow_unicode=True).rstrip()
-    parts = [
-        "---",
-        fm_yaml,
-        "---",
-        "",
-        page.compiled_truth.rstrip(),
-        "",
-    ]
+    parts = ["---", fm_yaml, "---", ""]
+    if coherence_warnings:
+        parts.extend(_render_contradiction_callout(coherence_warnings))
+        parts.append("")
+    parts.extend([page.compiled_truth.rstrip(), ""])
     if page.timeline:
         parts.extend(
             [
@@ -314,3 +323,20 @@ def new_page(
         compiled_truth=compiled_truth,
         timeline=list(timeline),
     )
+
+
+def _render_contradiction_callout(warnings: list[Any]) -> list[str]:
+    """Render a ``> [!contradiction]`` callout block for Obsidian.
+
+    One line per warning. Format is stable and reviewer-scannable:
+    new fact vs conflicting fact, with tier annotations. Move 3
+    (claude-obsidian pattern) — contradictions pop visually when the
+    vault is opened in Obsidian instead of being buried in decision
+    history.
+    """
+    lines = ["> [!contradiction] Unresolved tier conflict"]
+    for w in warnings:
+        new_ref = f"`{w.subject} {w.predicate} = {w.new_object}` ({w.new_tier})"
+        old_ref = f"`{w.subject} {w.predicate} = {w.conflicting_object}` ({w.conflicting_tier})"
+        lines.append(f"> - {new_ref} vs {old_ref}")
+    return lines

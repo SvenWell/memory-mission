@@ -518,3 +518,147 @@ def test_doctrine_context_default_empty() -> None:
     d = DoctrineContext()
     assert d.pages == []
     assert d.page_count == 0
+
+
+# ---------- Move 3: Contradiction callout ----------
+
+
+def _seed_coherence_warning(kg: KnowledgeGraph, tmp_path: Path) -> None:
+    """Helper — set up a doctrine/decision conflict that will fire a
+    CoherenceWarningEvent when promoted."""
+    from memory_mission.extraction import IdentityFact, RelationshipFact
+    from memory_mission.promotion import ProposalStore, create_proposal, promote
+
+    kg.add_triple("sarah-chen", "works_at", "acme-corp", tier="doctrine")
+    store = ProposalStore(tmp_path / "proposals.sqlite3")
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        proposal = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="sarah-chen",
+            facts=[
+                IdentityFact(confidence=0.9, support_quote="sarah", entity_name="sarah-chen"),
+                RelationshipFact(
+                    confidence=0.9,
+                    support_quote="new info",
+                    subject="sarah-chen",
+                    predicate="works_at",
+                    object="beta-fund",
+                ),
+            ],
+            source_report_path="/tmp/new.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="alice",
+        )
+        promote(store, kg, proposal.proposal_id, reviewer_id="r", rationale="advisory")
+
+
+def test_compile_populates_coherence_warnings(kg: KnowledgeGraph, tmp_path: Path) -> None:
+    """When the observability log has a CoherenceWarningEvent for an
+    attendee, compile_agent_context surfaces it on the AttendeeContext."""
+    _seed_coherence_warning(kg, tmp_path)
+
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        ctx = compile_agent_context(
+            role="meeting-prep",
+            task="prep",
+            attendees=["sarah-chen"],
+            kg=kg,
+        )
+    [attendee] = ctx.attendees
+    assert len(attendee.coherence_warnings) == 1
+    warning = attendee.coherence_warnings[0]
+    assert warning.subject == "sarah-chen"
+    assert warning.predicate == "works_at"
+    # The triple was corroborated after landing, so both directions show:
+    # new_object is the conflicting proposal; conflicting is the doctrine value
+    assert "acme-corp" in {warning.new_object, warning.conflicting_object}
+    assert "beta-fund" in {warning.new_object, warning.conflicting_object}
+
+
+def test_render_emits_contradiction_callout_when_warnings_present(
+    kg: KnowledgeGraph, tmp_path: Path
+) -> None:
+    _seed_coherence_warning(kg, tmp_path)
+
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        ctx = compile_agent_context(
+            role="meeting-prep",
+            task="prep",
+            attendees=["sarah-chen"],
+            kg=kg,
+        )
+    rendered = ctx.render()
+    assert "[!contradiction]" in rendered
+    assert "Unresolved tier conflict" in rendered
+
+
+def test_render_no_callout_without_warnings(kg: KnowledgeGraph, tmp_path: Path) -> None:
+    """Absent warnings: no callout in output."""
+    kg.add_triple("sarah-chen", "works_at", "acme-corp")
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        ctx = compile_agent_context(
+            role="meeting-prep",
+            task="prep",
+            attendees=["sarah-chen"],
+            kg=kg,
+        )
+    rendered = ctx.render()
+    assert "[!contradiction]" not in rendered
+
+
+def test_compile_handles_missing_observability_scope(
+    kg: KnowledgeGraph,
+) -> None:
+    """compile_agent_context outside any scope degrades gracefully —
+    coherence_warnings comes back empty, no crash."""
+    kg.add_triple("sarah-chen", "works_at", "acme-corp")
+    ctx = compile_agent_context(
+        role="meeting-prep",
+        task="prep",
+        attendees=["sarah-chen"],
+        kg=kg,
+    )
+    assert ctx.attendees[0].coherence_warnings == []
+
+
+def test_render_page_emits_contradiction_callout() -> None:
+    """render_page accepts an optional coherence_warnings kwarg."""
+    from memory_mission.memory import CoherenceWarning
+    from memory_mission.memory.pages import render_page
+
+    page = new_page(
+        slug="sarah-chen",
+        title="Sarah Chen",
+        domain="people",
+        compiled_truth="Sarah works at Acme.",
+    )
+    warning = CoherenceWarning(
+        subject="sarah-chen",
+        predicate="works_at",
+        new_object="beta-fund",
+        new_tier="decision",
+        conflicting_object="acme-corp",
+        conflicting_tier="doctrine",
+    )
+    rendered = render_page(page, coherence_warnings=[warning])
+    assert "[!contradiction]" in rendered
+    assert "sarah-chen works_at = beta-fund" in rendered
+    assert "sarah-chen works_at = acme-corp" in rendered
+    # Callout appears above the body, not in the timeline / frontmatter
+    callout_line = rendered.index("[!contradiction]")
+    body_line = rendered.index("Sarah works at Acme")
+    assert callout_line < body_line
+
+
+def test_render_page_no_callout_by_default() -> None:
+    """Pages with no warnings kwarg render as before — no callout."""
+    from memory_mission.memory.pages import render_page
+
+    page = new_page(
+        slug="x",
+        title="X",
+        domain="concepts",
+        compiled_truth="body",
+    )
+    assert "[!contradiction]" not in render_page(page)

@@ -1,0 +1,108 @@
+# Memory Mission firm-plane dashboard — native Obsidian Bases view.
+#
+# Copy this file to ``<vault_root>/firm/dashboard.base`` (or anywhere
+# under ``firm/`` — Bases discovers ``.base`` files automatically).
+# Open in Obsidian v1.9.10 or later.
+#
+# Five views, all filtered to firm-plane pages only:
+#
+# 1. Recent changes — last 7 days of updates, grouped by tier
+# 2. Low confidence — pages flagged by the KG as under-corroborated
+# 3. Stale — not touched in 90+ days, OR never explicitly reviewed
+# 4. Constitution + doctrine — authoritative tier content
+# 5. By domain — browse by MECE category (people / companies / ...)
+#
+# Pages on the personal plane are intentionally excluded. Personal
+# context is for the owning employee's agent, not the firm dashboard.
+
+filters:
+  and:
+    - file.inFolder("firm")
+    - 'file.ext == "md"'
+
+formulas:
+  age_days: '(now() - file.mtime).days'
+  needs_review: 'if(reviewed_at, false, true)'
+
+properties:
+  type:
+    displayName: "Type"
+  tier:
+    displayName: "Tier"
+  confidence:
+    displayName: "Confidence"
+  domain:
+    displayName: "Domain"
+  reviewed_at:
+    displayName: "Reviewed"
+  formula.age_days:
+    displayName: "Age (days)"
+  formula.needs_review:
+    displayName: "Needs review"
+
+views:
+  - type: table
+    name: "Recent changes"
+    limit: 25
+    filters:
+      and:
+        - 'formula.age_days <= 7'
+    order:
+      - file.name
+      - tier
+      - domain
+      - confidence
+      - formula.age_days
+    groupBy:
+      property: tier
+      direction: DESC
+
+  - type: table
+    name: "Low confidence"
+    limit: 30
+    filters:
+      and:
+        - 'confidence < 0.7'
+    order:
+      - file.name
+      - tier
+      - confidence
+      - formula.age_days
+    groupBy:
+      property: domain
+      direction: ASC
+
+  - type: table
+    name: "Stale or unreviewed"
+    limit: 50
+    filters:
+      or:
+        - 'formula.age_days > 90'
+        - 'formula.needs_review == true'
+    order:
+      - file.name
+      - tier
+      - confidence
+      - reviewed_at
+      - formula.age_days
+
+  - type: list
+    name: "Constitution + doctrine"
+    filters:
+      or:
+        - 'tier == "constitution"'
+        - 'tier == "doctrine"'
+    order:
+      - tier
+      - file.name
+
+  - type: table
+    name: "By domain"
+    order:
+      - file.name
+      - tier
+      - confidence
+      - formula.age_days
+    groupBy:
+      property: domain
+      direction: ASC

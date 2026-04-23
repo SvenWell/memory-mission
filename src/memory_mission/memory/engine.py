@@ -56,6 +56,7 @@ from memory_mission.memory.search import (
 )
 from memory_mission.memory.tiers import Tier, is_at_least
 from memory_mission.observability.api import log_retrieval
+from memory_mission.permissions.policy import Policy, can_read
 
 SearchTier = Literal["navigate", "cascade", "discover"]
 
@@ -124,6 +125,8 @@ class BrainEngine(Protocol):
         *,
         plane: Plane,
         employee_id: str | None = None,
+        viewer_id: str | None = None,
+        policy: Policy | None = None,
     ) -> Page | None:  # pragma: no cover
         ...
 
@@ -163,6 +166,8 @@ class BrainEngine(Protocol):
         plane: Plane | None = None,
         employee_id: str | None = None,
         tier_floor: Tier | None = None,
+        viewer_id: str | None = None,
+        policy: Policy | None = None,
     ) -> list[SearchHit]:  # pragma: no cover
         ...
 
@@ -175,6 +180,8 @@ class BrainEngine(Protocol):
         plane: Plane | None = None,
         employee_id: str | None = None,
         tier_floor: Tier | None = None,
+        viewer_id: str | None = None,
+        policy: Policy | None = None,
     ) -> list[SearchHit]:  # pragma: no cover
         ...
 
@@ -236,9 +243,17 @@ class InMemoryEngine:
         *,
         plane: Plane,
         employee_id: str | None = None,
+        viewer_id: str | None = None,
+        policy: Policy | None = None,
     ) -> Page | None:
         _validate_plane_args(plane, employee_id)
-        return self._pages.get(PageKey(plane=plane, slug=slug, employee_id=employee_id))
+        key = PageKey(plane=plane, slug=slug, employee_id=employee_id)
+        page = self._pages.get(key)
+        if page is None:
+            return None
+        if not _viewer_can_read(key, page, viewer_id=viewer_id, policy=policy):
+            return None
+        return page
 
     def put_page(
         self,
@@ -302,6 +317,8 @@ class InMemoryEngine:
         plane: Plane | None = None,
         employee_id: str | None = None,
         tier_floor: Tier | None = None,
+        viewer_id: str | None = None,
+        policy: Policy | None = None,
     ) -> list[SearchHit]:
         """Naive substring search over title + compiled_truth.
 
@@ -313,6 +330,13 @@ class InMemoryEngine:
         tier. E.g., ``tier_floor="doctrine"`` returns only constitution +
         doctrine pages, hiding policy + decision. Leave ``None`` to
         return every tier (backwards-compatible default).
+
+        ``viewer_id`` + ``policy`` together enable permission-aware read
+        filtering (Move 5). Firm-plane pages outside the viewer's scopes
+        are dropped via ``can_read``; personal-plane pages that don't
+        belong to the viewer are dropped unconditionally. When either
+        is None, no permission filtering is applied — callers who need
+        enforcement must supply both.
         """
         _validate_scope_filter(plane, employee_id)
         q = query.strip().lower()
@@ -323,6 +347,8 @@ class InMemoryEngine:
                 if not _in_scope(key, plane, employee_id):
                     continue
                 if not _in_tier(page, tier_floor):
+                    continue
+                if not _viewer_can_read(key, page, viewer_id=viewer_id, policy=policy):
                     continue
                 score = _keyword_score(page, q)
                 if score > 0:
@@ -348,6 +374,8 @@ class InMemoryEngine:
         plane: Plane | None = None,
         employee_id: str | None = None,
         tier_floor: Tier | None = None,
+        viewer_id: str | None = None,
+        policy: Policy | None = None,
     ) -> list[SearchHit]:
         """Hybrid search: keyword + vector, RRF-fused with compiled-truth boost.
 
@@ -367,6 +395,12 @@ class InMemoryEngine:
         the given doctrinal tier (Step 15). Useful for workflow agents
         that only want authoritative pages — meeting-prep might ask for
         ``tier_floor="policy"`` to skip low-authority decisions.
+
+        Optional ``viewer_id`` + ``policy`` enable permission-aware read
+        filtering (Move 5). When both are supplied, results are filtered
+        to pages the viewer is allowed to read. Firm-plane pages go
+        through ``can_read(policy, viewer_id, page)``; personal-plane
+        pages are dropped unless the viewer owns them.
         """
         _validate_scope_filter(plane, employee_id)
         q = question.strip().lower()
@@ -377,7 +411,9 @@ class InMemoryEngine:
         in_scope = {
             key: page
             for key, page in self._pages.items()
-            if _in_scope(key, plane, employee_id) and _in_tier(page, tier_floor)
+            if _in_scope(key, plane, employee_id)
+            and _in_tier(page, tier_floor)
+            and _viewer_can_read(key, page, viewer_id=viewer_id, policy=policy)
         }
 
         keyword_scored: list[tuple[PageKey, float]] = [
@@ -532,6 +568,36 @@ def _in_tier(page: Page, tier_floor: Tier | None) -> bool:
     if tier_floor is None:
         return True
     return is_at_least(page.frontmatter.tier, tier_floor)
+
+
+def _viewer_can_read(
+    key: PageKey,
+    page: Page,
+    *,
+    viewer_id: str | None,
+    policy: Policy | None,
+) -> bool:
+    """True when the viewer is allowed to read this page.
+
+    Move 5 (Google Knowledge Catalog pattern): permissions enforced at
+    read time, not only at write time. Two-plane rule:
+
+    - **Personal plane.** Pages are scoped to their owning employee.
+      The viewer must equal ``key.employee_id`` to see them.
+    - **Firm plane.** Scopes come from page frontmatter (`scope:` via
+      extras) and are checked against the viewer's policy entry via
+      ``can_read``. Public scope is always visible to any employee in
+      the policy; unknown scopes fail closed.
+
+    When ``viewer_id`` or ``policy`` is None, no filtering is applied —
+    the caller has not opted into enforcement. This keeps every
+    existing caller that does not supply both backwards-compatible.
+    """
+    if viewer_id is None or policy is None:
+        return True
+    if key.plane == "personal":
+        return key.employee_id == viewer_id
+    return can_read(policy, viewer_id, page)
 
 
 def _key_token(key: PageKey) -> str:

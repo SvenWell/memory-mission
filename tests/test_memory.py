@@ -14,6 +14,7 @@ from memory_mission.memory import (
     InMemoryEngine,
     Page,
     PageFrontmatter,
+    PageKey,
     TimelineEntry,
     curated_root,
     is_valid_domain,
@@ -29,6 +30,7 @@ from memory_mission.observability import (
     RetrievalEvent,
     observability_scope,
 )
+from memory_mission.permissions.policy import EmployeeEntry, Policy, Scope
 
 # ---------- Page parsing / serialization ----------
 
@@ -210,6 +212,32 @@ def test_frontmatter_slug_accepts_valid_shapes() -> None:
 def test_timeline_entry_render_format() -> None:
     entry = TimelineEntry(entry_date=date(2026, 4, 15), source_id="src-1", text="hello")
     assert entry.render() == "2026-04-15 [src-1]: hello"
+
+
+def test_frontmatter_reviewed_at_defaults_to_none() -> None:
+    """Move 2: reviewed_at is optional; default None means the Bases
+    Stale view will flag this page as needing review."""
+    fm = PageFrontmatter(slug="t", title="T", domain="people")
+    assert fm.reviewed_at is None
+
+
+def test_frontmatter_reviewed_at_round_trips() -> None:
+    """Reviewer-set timestamp survives parse/render."""
+    from datetime import UTC, datetime
+
+    reviewed = datetime(2026, 4, 22, 14, 30, tzinfo=UTC)
+    page = new_page(
+        slug="t",
+        title="T",
+        domain="concepts",
+        compiled_truth="body",
+    )
+    page = page.model_copy(
+        update={"frontmatter": page.frontmatter.model_copy(update={"reviewed_at": reviewed})}
+    )
+    rendered = render_page(page)
+    reparsed = parse_page(rendered)
+    assert reparsed.frontmatter.reviewed_at == reviewed
 
 
 # ---------- MECE schema ----------
@@ -768,3 +796,196 @@ def test_engine_search_tier_floor_filters_by_authority() -> None:
         hits_doctrine = engine.search("capital", tier_floor="doctrine")
     assert {h.slug for h in hits_all} == {"mission", "low"}
     assert {h.slug for h in hits_doctrine} == {"mission"}
+
+
+# ---------- Move 5: Permission-aware read path ----------
+
+
+def _scoped_firm_page(slug: str, scope: str, *, title: str = "T") -> Page:
+    """Helper — firm page with an explicit scope in frontmatter."""
+    page = new_page(slug=slug, title=title, domain="concepts", compiled_truth=f"body of {slug}")
+    # PageFrontmatter allows extras — inject scope directly so it survives.
+    fm = page.frontmatter.model_copy(update={"scope": scope})
+    return page.model_copy(update={"frontmatter": fm})
+
+
+def _partner_policy() -> Policy:
+    """Policy where alice has only public, bob has public + partner-only."""
+    return Policy(
+        firm_id="acme",
+        scopes={
+            "partner-only": Scope(name="partner-only", description="Partners"),
+        },
+        employees={
+            "alice": EmployeeEntry(employee_id="alice", scopes=frozenset()),
+            "bob": EmployeeEntry(employee_id="bob", scopes=frozenset({"partner-only"})),
+        },
+    )
+
+
+def test_get_page_without_policy_returns_everything() -> None:
+    """Backwards compat: no policy / no viewer_id means no filtering."""
+    engine = InMemoryEngine()
+    page = _scoped_firm_page("secret", "partner-only")
+    engine.put_page(page, plane="firm")
+    # Without policy: returned
+    assert engine.get_page("secret", plane="firm") is not None
+
+
+def test_get_page_firm_blocks_viewer_outside_scope() -> None:
+
+    engine = InMemoryEngine()
+    engine.put_page(_scoped_firm_page("secret", "partner-only"), plane="firm")
+    engine.put_page(_scoped_firm_page("memo", "public"), plane="firm")
+
+    policy: Policy = _partner_policy()
+    # Alice has no partner-only access
+    assert engine.get_page("secret", plane="firm", viewer_id="alice", policy=policy) is None
+    # Alice can read public
+    assert engine.get_page("memo", plane="firm", viewer_id="alice", policy=policy) is not None
+    # Bob can read both
+    assert engine.get_page("secret", plane="firm", viewer_id="bob", policy=policy) is not None
+    assert engine.get_page("memo", plane="firm", viewer_id="bob", policy=policy) is not None
+
+
+def test_get_page_personal_blocks_non_owner() -> None:
+
+    engine = InMemoryEngine()
+    engine.put_page(_sample_page("alice-note", "concepts"), plane="personal", employee_id="alice")
+
+    policy: Policy = _partner_policy()
+    # Alice owns the page
+    assert (
+        engine.get_page(
+            "alice-note",
+            plane="personal",
+            employee_id="alice",
+            viewer_id="alice",
+            policy=policy,
+        )
+        is not None
+    )
+    # Bob is not the owner — permission check blocks him even though the
+    # plane / employee_id lookup keys do match. Callers who pass the
+    # wrong employee_id would short-circuit on the key lookup; this
+    # guard handles the case where viewer_id != key.employee_id.
+    assert (
+        engine.get_page(
+            "alice-note",
+            plane="personal",
+            employee_id="alice",
+            viewer_id="bob",
+            policy=policy,
+        )
+        is None
+    )
+
+
+def test_search_filters_firm_pages_by_scope(tmp_path: Path) -> None:
+
+    engine = InMemoryEngine()
+    engine.put_page(_scoped_firm_page("public-memo", "public", title="Public memo"), plane="firm")
+    engine.put_page(
+        _scoped_firm_page("partner-memo", "partner-only", title="Partner memo"),
+        plane="firm",
+    )
+    # Inject a keyword shared by both so search ranks both.
+    engine._pages[PageKey(plane="firm", slug="public-memo")] = engine._pages[  # noqa: SLF001
+        PageKey(plane="firm", slug="public-memo")
+    ].model_copy(update={"compiled_truth": "quarterly review"})
+    engine._pages[PageKey(plane="firm", slug="partner-memo")] = engine._pages[  # noqa: SLF001
+        PageKey(plane="firm", slug="partner-memo")
+    ].model_copy(update={"compiled_truth": "quarterly review"})
+
+    policy: Policy = _partner_policy()
+
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        # Alice: only public-memo
+        alice_hits = engine.search("quarterly", viewer_id="alice", policy=policy)
+        # Bob: both
+        bob_hits = engine.search("quarterly", viewer_id="bob", policy=policy)
+        # No policy: both
+        open_hits = engine.search("quarterly")
+
+    assert {h.slug for h in alice_hits} == {"public-memo"}
+    assert {h.slug for h in bob_hits} == {"public-memo", "partner-memo"}
+    assert {h.slug for h in open_hits} == {"public-memo", "partner-memo"}
+
+
+def test_search_filters_personal_pages_to_owner(tmp_path: Path) -> None:
+
+    engine = InMemoryEngine()
+    engine.put_page(
+        _sample_page("alice-note", "concepts", "quarterly review"),
+        plane="personal",
+        employee_id="alice",
+    )
+    engine.put_page(
+        _sample_page("bob-note", "concepts", "quarterly review"),
+        plane="personal",
+        employee_id="bob",
+    )
+
+    policy: Policy = _partner_policy()
+
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        alice_hits = engine.search("quarterly", viewer_id="alice", policy=policy)
+        bob_hits = engine.search("quarterly", viewer_id="bob", policy=policy)
+
+    # Each employee only sees their own personal page
+    assert {h.slug for h in alice_hits} == {"alice-note"}
+    assert {h.slug for h in bob_hits} == {"bob-note"}
+
+
+def test_query_applies_permission_filter(tmp_path: Path) -> None:
+
+    engine = InMemoryEngine()
+    engine.put_page(
+        _scoped_firm_page("public-memo", "public", title="Public memo"),
+        plane="firm",
+    )
+    engine.put_page(
+        _scoped_firm_page("partner-memo", "partner-only", title="Partner memo"),
+        plane="firm",
+    )
+    # Inject keyword both share so both are candidates
+    for slug in ("public-memo", "partner-memo"):
+        key = PageKey(plane="firm", slug=slug)
+        engine._pages[key] = engine._pages[key].model_copy(  # noqa: SLF001
+            update={"compiled_truth": "quarterly review"}
+        )
+
+    policy: Policy = _partner_policy()
+
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        alice_hits = engine.query("quarterly review", viewer_id="alice", policy=policy)
+    assert {h.slug for h in alice_hits} == {"public-memo"}
+
+
+def test_permission_filter_fails_closed_on_unknown_employee(tmp_path: Path) -> None:
+    """Per can_read: unknown employee → always False. No sneaking by with a made-up ID."""
+
+    engine = InMemoryEngine()
+    engine.put_page(_scoped_firm_page("public-memo", "public"), plane="firm")
+    policy: Policy = _partner_policy()
+
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        hits = engine.search("body", viewer_id="stranger", policy=policy)
+    assert hits == []
+
+
+def test_permission_filter_missing_one_argument_means_no_filter() -> None:
+    """If only viewer_id is supplied or only policy, treat as no-filter.
+
+    This keeps the contract explicit: permission enforcement requires
+    BOTH arguments. Half-configured callers are not silently stricter.
+    """
+
+    engine = InMemoryEngine()
+    engine.put_page(_scoped_firm_page("secret", "partner-only"), plane="firm")
+    policy: Policy = _partner_policy()
+
+    # viewer_id alone: not enforced (page returned)
+    assert engine.get_page("secret", plane="firm", viewer_id="alice") is not None
+    # policy alone: not enforced (page returned)
+    assert engine.get_page("secret", plane="firm", policy=policy) is not None

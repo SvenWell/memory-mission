@@ -8,6 +8,20 @@ threshold so working memory doesn't accumulate forever.
 Vault-friendly format — opens cleanly in Obsidian; the user can hand-
 edit at any time. Same convention as agentic-stack's ``working/``
 layer adapted to the firm context.
+
+**Hot-cache hook pattern (recommended).** Instead of hand-editing
+``WORKSPACE.md``, wire host-agent hooks so the file is a session
+cache maintained by the employee's agent:
+
+- ``Stop`` hook rewrites the file with a ~500-word session summary.
+- ``SessionStart`` hook reads it back on next open so the agent
+  starts warm.
+- ``PostCompact`` hook re-reads after context compression.
+- ``PostToolUse`` auto-commits to git so the cache is versioned.
+
+See ``docs/recipes/personal-hot-cache.md`` for the full recipe +
+``hooks.json`` snippet. Personal plane only — the recipe explicitly
+forbids the hook from touching the firm plane (governance).
 """
 
 from __future__ import annotations

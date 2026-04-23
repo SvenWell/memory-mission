@@ -4,6 +4,8 @@ Status: **planning doc, Phase 1.** No code yet. This is the eval strategy the pr
 
 Audience: senior IC picking up the eval work. Assumes you've read the roadmap and know the components in `src/memory_mission/`.
 
+**Stance.** Context construction is measurable engineering, not guesswork. Every primitive in Memory Mission that feeds an agent (extraction output, retrieval results, compiled agent context, coherence warnings, federated candidates) ships with binary-pass/fail criteria and a labeled fixture set. Generic "helpfulness" and 5-star scales don't appear anywhere in this document. When we say "the federated detector is accurate," we mean precision ≥ 0.90 on a named fixture set, not a vibe.
+
 ---
 
 ## 1. Universal principles

@@ -15,10 +15,15 @@ from datetime import UTC, date, datetime
 
 from memory_mission.identity.base import IdentityResolver
 from memory_mission.memory.engine import BrainEngine
-from memory_mission.memory.knowledge_graph import KnowledgeGraph, Triple
+from memory_mission.memory.knowledge_graph import (
+    CoherenceWarning,
+    KnowledgeGraph,
+    Triple,
+)
 from memory_mission.memory.pages import Page
 from memory_mission.memory.schema import Plane
 from memory_mission.memory.tiers import Tier
+from memory_mission.observability.api import coherence_warnings_for
 from memory_mission.synthesis.context import (
     AgentContext,
     AttendeeContext,
@@ -166,6 +171,27 @@ def _compile_attendee_context(
         employee_id=employee_id,
     )
 
+    # Coherence warnings (Move 3): pulled from the observability log
+    # when a scope is active. Best-effort — if no scope is open, the
+    # field stays empty and the render shows no callout.
+    warnings: list[CoherenceWarning] = []
+    try:
+        events_for_entity = coherence_warnings_for(attendee_id)
+    except RuntimeError:
+        events_for_entity = []
+    for event in events_for_entity:
+        warnings.append(
+            CoherenceWarning(
+                subject=event.subject,
+                predicate=event.predicate,
+                new_object=event.new_object,
+                new_tier=event.new_tier,
+                conflicting_object=event.conflicting_object,
+                conflicting_tier=event.conflicting_tier,
+                conflict_type=event.conflict_type,
+            )
+        )
+
     return AttendeeContext(
         attendee_id=attendee_id,
         canonical_name=canonical_name,
@@ -174,6 +200,7 @@ def _compile_attendee_context(
         events=events,
         preferences=preferences,
         related_pages=related_pages,
+        coherence_warnings=warnings,
     )
 
 
