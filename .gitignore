@@ -79,3 +79,8 @@ Thumbs.db
 .observability/          # Audit logs per firm (runtime-generated)
 wiki/                    # Firm wiki (runtime-generated per deployment)
 .context/                # Workspace-local scratch (Conductor)
+
+# Developer tooling (per-contributor, not part of the repo)
+# claude-mem regenerates AGENTS.md at repo root as a session-context cache.
+# Our canonical agent instructions live at docs/AGENTS.md — see Move 4 + ADR-0008.
+/AGENTS.md

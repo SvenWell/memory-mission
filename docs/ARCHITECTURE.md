@@ -202,6 +202,31 @@ Composio SDK is a stub today — the `ComposioClient` Protocol is defined; live 
 
 Per-employee four-layer brain: `working/WORKSPACE.md` (current task state, 2-day archive), `episodic/AGENT_LEARNINGS.jsonl` (salience-ranked), `semantic/<domain>/<slug>.md` (curated pages — existing shape moved under `semantic/`), `preferences/PREFERENCES.md`, `lessons/lessons.jsonl` + rendered `LESSONS.md`. Workflow agents read these before drafting anything.
 
+### `src/memory_mission/synthesis/` — Step 17 (V1 close)
+
+First workflow-level primitive. `compile_agent_context(role, task, attendees, kg, *, engine=None, plane="firm", tier_floor=None, as_of=None, identity_resolver=None) -> AgentContext` reads across the full stack and returns a structured context package.
+
+- `AgentContext` — top-level Pydantic. Fields: `role`, `task`, `plane`, `as_of`, `tier_floor`, `attendees: list[AttendeeContext]`, `doctrine: DoctrineContext`, `generated_at`. `.render()` produces markdown for the host-agent LLM. Structured form is authoritative; rendering is a convenience.
+- `AttendeeContext` — per-attendee neighborhood (Tolaria Neighborhood-mode shape via ADR-0069): `outgoing_triples`, `incoming_triples`, `events`, `preferences`, `related_pages`, plus `coherence_warnings: list[CoherenceWarning]` (Move 3, populated from the observability log when a scope is active).
+- `DoctrineContext` — firm-plane pages at or above `tier_floor`, sorted highest-tier first.
+
+Invalidated triples are always excluded. Events are sorted newest-first. Classification is predicate-based: `event` → events, `prefers` → preferences, everything else → outgoing_triples. Rendering emits an Obsidian-native `> [!contradiction]` callout above each attendee when unresolved coherence warnings exist.
+
+Consumed by `skills/meeting-prep/`. Other workflow skills (email-draft, deal-memo, CRM-update) reuse the same primitive with different `role` values — the package is composable.
+
+---
+
+## V1 polish pass (post-Step 17)
+
+Six targeted additions drawn from comparative reviews of Tolaria, claude-obsidian, Google Knowledge Catalog, and Ricky's cloud-code agent stack. All additive, all backwards-compatible.
+
+- **Move 1 — Hot-cache hook recipe.** `docs/recipes/personal-hot-cache.md` documents how to wire host-agent `Stop` / `SessionStart` / `PostCompact` / `PostToolUse` hooks around `personal/<emp>/working/WORKSPACE.md` so the personal plane becomes a live session cache. Personal plane only — firm plane is never session-scoped.
+- **Move 2 — Obsidian Bases dashboard + `reviewed_at` frontmatter.** New `PageFrontmatter.reviewed_at: datetime | None = None` field plus a drop-in `src/memory_mission/memory/templates/dashboard.base` with five views (Recent changes / Low confidence / Stale or unreviewed / Constitution + doctrine / By domain). Install guide in `docs/recipes/vault-dashboard.md`. Requires Obsidian ≥ v1.9.10.
+- **Move 3 — Contradiction callout rendering.** New `coherence_warnings_for(entity_id, *, since=None)` helper in `observability.api` reads unresolved `CoherenceWarningEvent` rows from the active scope. `render_page()` and `AttendeeContext` rendering emit `> [!contradiction]` callouts when warnings exist, with full subject / predicate / tier detail. Eval-corpus-ready via the structured event stream.
+- **Move 4 — AGENTS.md canonical + CLAUDE.md shim.** `docs/AGENTS.md` is canonical (Codex / Gemini / Cursor / Windsurf convention); `CLAUDE.md` at repo root is a one-line `@docs/AGENTS.md` shim. Canonical lives under `docs/` because the repo-root `AGENTS.md` is claimed by the claude-mem session-context tool.
+- **Move 5 — Permission-aware `BrainEngine` read path.** `get_page()` / `search()` / `query()` accept optional `viewer_id: str | None` + `policy: Policy | None`. When both supplied, results filtered via `can_read(policy, viewer_id, page)`. Firm-plane pages outside the viewer's scopes drop; personal pages not owned by the viewer drop unconditionally. Closes the read-time permission gap — `can_read` was advisory until now.
+- **Move 6 — "Context engine" framing.** VISION / README / EVALS updated to call Memory Mission a "governed context engine for agents" rather than "memory system." Matches how Google Knowledge Catalog markets the pattern; clarifies that we build the layer under the agent, not the agent itself.
+
 ---
 
 ## Runtime composition
