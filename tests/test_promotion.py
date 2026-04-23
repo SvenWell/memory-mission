@@ -939,3 +939,72 @@ def test_promote_preference_corroborates(
     prefs = kg.query_relationship("prefers")
     assert len(prefs) == 1
     assert prefs[0].corroboration_count == 1
+
+
+# ---------- Scope propagation (bugfix regression) ----------
+
+
+def test_promote_copies_target_scope_onto_triples(
+    store: ProposalStore,
+    kg: KnowledgeGraph,
+    tmp_path: Path,
+) -> None:
+    """Approving a partner-only proposal must stamp its triples partner-only.
+
+    Before the fix, target_scope was dropped on approval and triples
+    landed at the schema default 'public', letting MCP get_triples
+    return the fact to any employee with READ scope.
+    """
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        p = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="ceo",
+            facts=[_rel("ceo", "compensation", "7m")],
+            source_report_path="/tmp/board.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="alice",
+            target_scope="partner-only",
+        )
+        promote(store, kg, p.proposal_id, reviewer_id="reviewer", rationale="verified")
+
+    triples = kg.query_entity("ceo")
+    assert len(triples) == 1
+    assert triples[0].scope == "partner-only"
+
+
+def test_promote_corroborating_mismatched_scope_raises(
+    store: ProposalStore,
+    kg: KnowledgeGraph,
+    tmp_path: Path,
+) -> None:
+    """A second proposal corroborating under a different scope must raise.
+
+    Surfaces the conflict to the reviewer so they split the proposal or
+    reject — silent scope drift is not allowed on approval.
+    """
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        p1 = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="ceo",
+            facts=[_rel("ceo", "compensation", "7m")],
+            source_report_path="/tmp/a.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="alice",
+            target_scope="partner-only",
+        )
+        promote(store, kg, p1.proposal_id, reviewer_id="reviewer", rationale="source 1")
+
+        p2 = create_proposal(
+            store,
+            target_plane="firm",
+            target_entity="ceo",
+            facts=[_rel("ceo", "compensation", "7m")],
+            source_report_path="/tmp/b.json",
+            proposer_agent_id="extract-from-staging-v1",
+            proposer_employee_id="bob",
+            target_scope="public",
+        )
+        with pytest.raises(ValueError, match="scope mismatch"):
+            promote(store, kg, p2.proposal_id, reviewer_id="reviewer", rationale="source 2")

@@ -382,6 +382,7 @@ def _apply_facts(
     """
     source_closet = _source_closet(proposal)
     source_file = proposal.source_report_path
+    target_scope = proposal.target_scope
     strict = bool(policy is not None and policy.constitutional_mode)
 
     # Pass 1: coherence scan. Collect every warning, log each one, and
@@ -422,6 +423,7 @@ def _apply_facts(
                 confidence=fact.confidence,
                 source_closet=source_closet,
                 source_file=source_file,
+                scope=target_scope,
             )
         elif isinstance(fact, PreferenceFact):
             kg.add_entity(fact.subject)
@@ -433,6 +435,7 @@ def _apply_facts(
                 confidence=fact.confidence,
                 source_closet=source_closet,
                 source_file=source_file,
+                scope=target_scope,
             )
         elif isinstance(fact, EventFact):
             kg.add_entity(fact.entity_name)
@@ -445,6 +448,7 @@ def _apply_facts(
                 confidence=fact.confidence,
                 source_closet=source_closet,
                 source_file=source_file,
+                scope=target_scope,
             )
         elif isinstance(fact, UpdateFact):
             kg.add_entity(fact.subject)
@@ -464,6 +468,7 @@ def _apply_facts(
                 confidence=fact.confidence,
                 source_closet=source_closet,
                 source_file=source_file,
+                scope=target_scope,
             )
         elif isinstance(fact, OpenQuestion):
             continue  # open questions never promote
@@ -530,12 +535,18 @@ def _add_or_corroborate(
     source_closet: str | None,
     source_file: str | None,
     tier: Tier = DEFAULT_TIER,
+    scope: str = "public",
 ) -> None:
     """Corroborate a matching currently-true triple, or add a new one.
 
     Central injection point for the promotion-time Bayesian update.
     If no currently-true match exists, falls back to ``add_triple`` so
     the fact lands with its provenance seeded into ``triple_sources``.
+
+    ``scope`` is copied from the proposal's ``target_scope`` and is
+    load-bearing for access control — corroboration raises
+    ``ValueError`` on scope mismatch rather than letting a restricted
+    fact silently become public (or vice versa).
     """
     existing = kg.find_current_triple(subject, predicate, obj)
     if existing is not None:
@@ -546,6 +557,7 @@ def _add_or_corroborate(
             confidence=confidence,
             source_closet=source_closet,
             source_file=source_file,
+            scope=scope,
         )
         return
     kg.add_triple(
@@ -557,6 +569,7 @@ def _add_or_corroborate(
         source_closet=source_closet,
         source_file=source_file,
         tier=tier,
+        scope=scope,
     )
 
 

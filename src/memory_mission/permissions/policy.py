@@ -129,6 +129,23 @@ def can_read(policy: Policy, employee_id: str, page: Page) -> bool:
     return scope_name in entry.scopes
 
 
+def viewer_scopes(policy: Policy, employee_id: str) -> frozenset[str]:
+    """Return the effective scope set this employee reads under.
+
+    Includes ``PUBLIC_SCOPE`` implicitly — known employees always see
+    public pages. Returns the empty frozenset for unknown employees, so
+    KG query filters fail closed when the viewer isn't in the policy.
+
+    Use this at read time whenever you have a policy + employee_id and
+    need to filter KG results (``query_entity``, ``query_relationship``,
+    ``timeline``) by their ``viewer_scopes`` kwarg.
+    """
+    entry = policy.employee(employee_id)
+    if entry is None:
+        return frozenset()
+    return frozenset(entry.scopes) | {PUBLIC_SCOPE}
+
+
 def can_propose(policy: Policy, employee_id: str, proposed_scope: str) -> bool:
     """Return True if ``employee_id`` may propose a firm-plane promotion
     targeting ``proposed_scope`` under ``policy``.

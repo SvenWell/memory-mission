@@ -76,7 +76,15 @@ class Entity(BaseModel):
 
 
 class Triple(BaseModel):
-    """One (subject, predicate, object) fact with validity + provenance."""
+    """One (subject, predicate, object) fact with validity + provenance.
+
+    ``scope`` carries the page-level access-control scope this fact lives
+    under (``"public"`` / ``"partner-only"`` / firm-defined names).
+    Copied from the source ``Proposal.target_scope`` on promotion. Read
+    paths that want permission filtering pass ``viewer_scopes`` into
+    ``query_entity`` / ``query_relationship`` / ``timeline`` and the KG
+    drops rows whose scope is outside the viewer's set.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -90,6 +98,7 @@ class Triple(BaseModel):
     source_file: str | None = None
     corroboration_count: int = 0
     tier: Tier = DEFAULT_TIER
+    scope: str = "public"
 
     @field_validator("confidence")
     @classmethod
@@ -226,7 +235,8 @@ CREATE TABLE IF NOT EXISTS triples (
     source_file TEXT,
     created_at TEXT NOT NULL,
     corroboration_count INTEGER NOT NULL DEFAULT 0,
-    tier TEXT NOT NULL DEFAULT 'decision'
+    tier TEXT NOT NULL DEFAULT 'decision',
+    scope TEXT NOT NULL DEFAULT 'public'
 );
 
 CREATE INDEX IF NOT EXISTS idx_triples_subject ON triples(subject);
@@ -297,6 +307,10 @@ class KnowledgeGraph:
         if "tier" not in triple_cols:
             self._conn.execute(
                 "ALTER TABLE triples ADD COLUMN tier TEXT NOT NULL DEFAULT 'decision'"
+            )
+        if "scope" not in triple_cols:
+            self._conn.execute(
+                "ALTER TABLE triples ADD COLUMN scope TEXT NOT NULL DEFAULT 'public'"
             )
 
     # ---------- Lifecycle ----------
@@ -378,6 +392,7 @@ class KnowledgeGraph:
         source_closet: str | None = None,
         source_file: str | None = None,
         tier: Tier = DEFAULT_TIER,
+        scope: str = "public",
     ) -> Triple:
         """Insert a new triple. Triples are append-only; use ``invalidate``
         to end the validity of an existing triple instead of overwriting.
@@ -392,6 +407,11 @@ class KnowledgeGraph:
         ``doctrine`` / ``constitution`` is a deliberate editorial act by
         the reviewer; the default makes most everyday extractions
         land safely as decisions that higher tiers can override.
+
+        ``scope`` carries the page-level access-control scope (``public``
+        by default). Read paths filter by this field when the caller
+        passes ``viewer_scopes``; promotion copies the
+        ``Proposal.target_scope`` onto each triple it writes.
         """
         triple = Triple(
             subject=subject,
@@ -403,6 +423,7 @@ class KnowledgeGraph:
             source_closet=source_closet,
             source_file=source_file,
             tier=tier,
+            scope=scope,
         )
         now = _utcnow_iso()
         with self._tx() as cur:
@@ -411,8 +432,8 @@ class KnowledgeGraph:
                 INSERT INTO triples
                     (subject, predicate, object, valid_from, valid_to,
                      confidence, source_closet, source_file, created_at,
-                     corroboration_count, tier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                     corroboration_count, tier, scope)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                 """,
                 (
                     subject,
@@ -425,6 +446,7 @@ class KnowledgeGraph:
                     source_file,
                     now,
                     tier,
+                    scope,
                 ),
             )
             triple_id = cur.lastrowid
@@ -472,6 +494,7 @@ class KnowledgeGraph:
         confidence: float,
         source_closet: str | None = None,
         source_file: str | None = None,
+        scope: str = "public",
     ) -> Triple | None:
         """Bump confidence on a matching currently-true triple.
 
@@ -488,13 +511,21 @@ class KnowledgeGraph:
         strengthen belief, not create a duplicate. The cap keeps
         certainty (1.0) reachable only through explicit human override,
         never via accumulated agent corroboration.
+
+        Raises ``ValueError`` when the incoming ``scope`` differs from
+        the existing triple's scope. Scope changes are editorial — the
+        reviewer must reject the proposal or handle the scope delta
+        explicitly (via ``invalidate`` + re-add under the new scope).
+        Silent scope drift would let a ``partner-only`` proposal weaken
+        an existing ``partner-only`` fact to ``public`` (or vice versa)
+        without a human on the path.
         """
         if not 0.0 <= confidence <= 1.0:
             raise ValueError(f"confidence must be in [0, 1], got {confidence}")
 
         row = self._conn.execute(
             """
-            SELECT id, confidence, corroboration_count FROM triples
+            SELECT id, confidence, corroboration_count, scope FROM triples
             WHERE subject = ? AND predicate = ? AND object = ?
               AND valid_to IS NULL
             ORDER BY id DESC
@@ -504,6 +535,15 @@ class KnowledgeGraph:
         ).fetchone()
         if row is None:
             return None
+
+        existing_scope = row["scope"] if row["scope"] is not None else "public"
+        if existing_scope != scope:
+            raise ValueError(
+                f"scope mismatch on corroborate ({subject!r}, {predicate!r}, "
+                f"{obj!r}): existing={existing_scope!r} incoming={scope!r} — "
+                "split the proposal, change scope deliberately via invalidate, "
+                "or reject"
+            )
 
         triple_id = row["id"]
         old_confidence = row["confidence"]
@@ -779,6 +819,7 @@ class KnowledgeGraph:
         *,
         as_of: date | None = None,
         direction: Direction = "outgoing",
+        viewer_scopes: frozenset[str] | None = None,
     ) -> list[Triple]:
         """Return triples involving ``name``.
 
@@ -787,6 +828,10 @@ class KnowledgeGraph:
         - ``direction="both"``: union of the above
 
         When ``as_of`` is set, only triples valid on that date are returned.
+
+        When ``viewer_scopes`` is set, triples whose scope isn't in the
+        viewer's set are dropped. ``None`` disables the filter (callers
+        without a policy context, and internal promotion-side callers).
         """
         clauses = []
         params: list[Any] = []
@@ -804,6 +849,8 @@ class KnowledgeGraph:
         triples = [_row_to_triple(r) for r in rows]
         if as_of is not None:
             triples = [t for t in triples if t.is_valid_at(as_of)]
+        if viewer_scopes is not None:
+            triples = [t for t in triples if t.scope in viewer_scopes]
         return triples
 
     def query_relationship(
@@ -811,18 +858,32 @@ class KnowledgeGraph:
         predicate: str,
         *,
         as_of: date | None = None,
+        viewer_scopes: frozenset[str] | None = None,
     ) -> list[Triple]:
-        """Return all triples using ``predicate``, optionally filtered by date."""
+        """Return all triples using ``predicate``, optionally filtered by date.
+
+        ``viewer_scopes`` — same semantics as ``query_entity``.
+        """
         rows = self._conn.execute(
             "SELECT * FROM triples WHERE predicate = ?", (predicate,)
         ).fetchall()
         triples = [_row_to_triple(r) for r in rows]
         if as_of is not None:
             triples = [t for t in triples if t.is_valid_at(as_of)]
+        if viewer_scopes is not None:
+            triples = [t for t in triples if t.scope in viewer_scopes]
         return triples
 
-    def timeline(self, entity_name: str | None = None) -> list[Triple]:
-        """Return triples ordered by ``valid_from`` (NULLs first)."""
+    def timeline(
+        self,
+        entity_name: str | None = None,
+        *,
+        viewer_scopes: frozenset[str] | None = None,
+    ) -> list[Triple]:
+        """Return triples ordered by ``valid_from`` (NULLs first).
+
+        ``viewer_scopes`` — same semantics as ``query_entity``.
+        """
         if entity_name is None:
             rows = self._conn.execute(
                 "SELECT * FROM triples ORDER BY "
@@ -840,7 +901,10 @@ class KnowledgeGraph:
                 """,
                 (entity_name, entity_name),
             ).fetchall()
-        return [_row_to_triple(r) for r in rows]
+        triples = [_row_to_triple(r) for r in rows]
+        if viewer_scopes is not None:
+            triples = [t for t in triples if t.scope in viewer_scopes]
+        return triples
 
     # ---------- Entity merge ----------
 
@@ -1017,6 +1081,10 @@ def _row_to_triple(row: sqlite3.Row) -> Triple:
         tier_value = row["tier"]
     except (IndexError, KeyError):
         tier_value = DEFAULT_TIER
+    try:
+        scope_value = row["scope"]
+    except (IndexError, KeyError):
+        scope_value = "public"
     return Triple(
         subject=row["subject"],
         predicate=row["predicate"],
@@ -1028,6 +1096,7 @@ def _row_to_triple(row: sqlite3.Row) -> Triple:
         source_file=row["source_file"],
         corroboration_count=count if count is not None else 0,
         tier=tier_value if tier_value is not None else DEFAULT_TIER,
+        scope=scope_value if scope_value is not None else "public",
     )
 
 

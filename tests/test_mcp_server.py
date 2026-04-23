@@ -97,6 +97,48 @@ def _read_only_context(context: McpContext, scopes: frozenset[Scope]) -> McpCont
     )
 
 
+def _context_with_policy_and_viewer(
+    context: McpContext,
+    *,
+    viewer_id: str,
+    viewer_policy_scopes: list[str],
+) -> McpContext:
+    """Rebuild an McpContext with a firm Policy and a specific viewer identity.
+
+    Use for the scope-enforcement regression tests — the base fixture has
+    ``policy=None``, which disables all policy-level filtering.
+    """
+    from memory_mission.permissions import EmployeeEntry as _EmployeeEntry
+    from memory_mission.permissions import Policy as _Policy
+    from memory_mission.permissions import Scope as _PolicyScope
+
+    policy = _Policy(
+        firm_id="acme",
+        scopes={
+            "public": _PolicyScope(name="public"),
+            "partner-only": _PolicyScope(name="partner-only"),
+        },
+        employees={
+            viewer_id: _EmployeeEntry(
+                employee_id=viewer_id,
+                scopes=frozenset(viewer_policy_scopes),
+            ),
+        },
+    )
+    client = ClientEntry(employee_id=viewer_id, scopes=ALL_SCOPES)
+    return McpContext(
+        firm_root=context.firm_root,
+        firm_id=context.firm_id,
+        client=client,
+        observability_root=context.observability_root,
+        engine=context.engine,
+        kg=context.kg,
+        store=context.store,
+        identity=context.identity,
+        policy=policy,
+    )
+
+
 # ---------- Manifest tests ----------
 
 
@@ -545,3 +587,156 @@ def test_server_ctx_raises_when_uninitialized() -> None:
     server.reset()
     with pytest.raises(RuntimeError, match="not initialized"):
         server._ctx()
+
+
+# ---------- Scope enforcement regression tests ----------
+#
+# Three bugs discovered in the first review of Step 18:
+# 1. Proposal target_scope was dropped on approval — triples land
+#    unscoped, so MCP get_triples returned partner-only facts to public
+#    viewers.
+# 2. compile_agent_context bypassed viewer_id/policy — partner-only
+#    doctrine pages leaked into the context packet regardless of viewer.
+# 3. create_proposal ignored can_propose — PROPOSE-scoped employees
+#    could stage partner-only facts outside their policy scopes.
+#
+# These tests lock in the fixes.
+
+
+def test_get_triples_drops_restricted_scope_after_approval(context: McpContext) -> None:
+    """Bug 1 regression — approved partner-only proposal is not readable by public viewers."""
+    alice = _context_with_policy_and_viewer(
+        context,
+        viewer_id="alice@acme.com",
+        viewer_policy_scopes=["public", "partner-only"],
+    )
+
+    proposal = create_proposal_tool(
+        alice,
+        target_entity="ceo",
+        facts=[_relationship_fact("ceo", "compensation", "7m")],
+        source_report_path="/tmp/r.json",
+        target_scope="partner-only",
+    )
+    approve_proposal_tool(
+        alice,
+        proposal_id=proposal.proposal_id,
+        rationale="verified from board packet",
+    )
+
+    # Alice (partner) sees it.
+    alice_triples = get_triples_tool(alice, entity_name="ceo")
+    assert any(t.predicate == "compensation" and t.object == "7m" for t in alice_triples)
+    assert all(t.scope == "partner-only" for t in alice_triples if t.predicate == "compensation")
+
+    # Bob (public-only) does not.
+    bob = _context_with_policy_and_viewer(
+        context,
+        viewer_id="bob@acme.com",
+        viewer_policy_scopes=["public"],
+    )
+    bob_triples = get_triples_tool(bob, entity_name="ceo")
+    assert not any(t.predicate == "compensation" and t.object == "7m" for t in bob_triples), (
+        "partner-only triple leaked to public-only viewer"
+    )
+
+
+def test_compile_agent_context_drops_restricted_doctrine(context: McpContext) -> None:
+    """Bug 2 regression — partner-only firm doctrine pages don't leak to public viewers."""
+    from memory_mission.memory.pages import Page, PageFrontmatter
+
+    secret = Page(
+        frontmatter=PageFrontmatter(
+            title="Secret Playbook",
+            slug="secret-playbook",
+            domain="concepts",
+            confidence=0.9,
+            tier="doctrine",
+            scope="partner-only",
+        ),
+        compiled_truth="Partner-only deal strategy.",
+        timeline=[],
+    )
+    context.engine.put_page(secret, plane="firm")
+
+    bob = _context_with_policy_and_viewer(
+        context,
+        viewer_id="bob@acme.com",
+        viewer_policy_scopes=["public"],
+    )
+    packet = compile_agent_context_tool(
+        bob,
+        role="meeting-prep",
+        task="brief on ceo",
+        attendees=["ceo"],
+        tier_floor="doctrine",
+    )
+    assert hasattr(packet, "doctrine")
+    doctrine_slugs = [p.frontmatter.slug for p in packet.doctrine.pages]  # type: ignore[union-attr]
+    assert "secret-playbook" not in doctrine_slugs, (
+        "partner-only doctrine page leaked to public-only viewer"
+    )
+
+
+def test_create_proposal_enforces_can_propose(context: McpContext) -> None:
+    """Bug 3 regression — PROPOSE scope is not enough to propose into a restricted scope."""
+    bob = _context_with_policy_and_viewer(
+        context,
+        viewer_id="bob@acme.com",
+        viewer_policy_scopes=["public"],
+    )
+    with pytest.raises(AuthError, match="cannot propose into scope 'partner-only'"):
+        create_proposal_tool(
+            bob,
+            target_entity="ceo",
+            facts=[_relationship_fact("ceo", "compensation", "7m")],
+            source_report_path="/tmp/r.json",
+            target_scope="partner-only",
+        )
+
+    # But Alice (partner) can.
+    alice = _context_with_policy_and_viewer(
+        context,
+        viewer_id="alice@acme.com",
+        viewer_policy_scopes=["public", "partner-only"],
+    )
+    proposal = create_proposal_tool(
+        alice,
+        target_entity="ceo",
+        facts=[_relationship_fact("ceo", "compensation", "7m")],
+        source_report_path="/tmp/r.json",
+        target_scope="partner-only",
+    )
+    assert proposal.target_scope == "partner-only"
+
+
+def test_create_proposal_allows_public_when_policy_public_only(context: McpContext) -> None:
+    """Positive case — public-only employee can still propose into public."""
+    bob = _context_with_policy_and_viewer(
+        context,
+        viewer_id="bob@acme.com",
+        viewer_policy_scopes=["public"],
+    )
+    proposal = create_proposal_tool(
+        bob,
+        target_entity="alice",
+        facts=[_identity_fact("alice")],
+        source_report_path="/tmp/r.json",
+        target_scope="public",
+    )
+    assert proposal.target_scope == "public"
+
+
+def test_get_triples_no_filter_when_policy_none(context: McpContext) -> None:
+    """Back-compat — firms without a policy still see everything via get_triples."""
+    context.kg.add_triple(
+        subject="alice",
+        predicate="works_at",
+        obj="acme",
+        source_closet="firm",
+        source_file="fixture",
+        scope="partner-only",
+    )
+    triples = get_triples_tool(context, entity_name="alice")
+    assert len(triples) == 1
+    assert triples[0].scope == "partner-only"
