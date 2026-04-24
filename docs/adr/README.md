@@ -55,12 +55,23 @@ proposed → active → superseded
 |----|-------|--------|
 | [0001](0001-bayesian-corroboration.md) | Bayesian corroboration via Noisy-OR with 0.99 cap | active |
 | [0002](0002-two-plane-split.md) | Two-plane split (personal / firm) with one-way promotion bridge | active |
+| [0003](0003-mcp-as-agent-surface.md) | MCP as the multi-agent access surface | active |
+| [0004](0004-personal-layer-substrate-decision.md) | Personal-layer substrate — MemPalace, custom, or defer | proposed |
+| [0005](0005-sqlite-per-firm.md) | SQLite per firm for all persistent state | active |
 
-More ADRs will land as decisions accumulate. Good candidates for the next few:
+Pending ADRs — will be written as the corresponding phase lands (see `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md`):
 
-- `0003` — LLM lives with the host agent (no SDK imports)
-- `0004` — Constitutional mode as opt-in firm-level flag (not default strict)
-- `0005` — Identity resolver Protocol + adapter pattern (Composio-shaped)
-- `0006` — Independence threshold on federated detector (distinct source_files, not just employees)
-- `0007` — SQL-over-KG as read-only primitive (Step 16.5)
-- `0008` — AGENTS.md canonical under `docs/` because claude-mem owns repo-root (Move 4)
+- `0006` — Grounded evidence pack pattern (Spanner-inspired interface, SQLite backend) — lands with P4
+- `0007` — Capability-based connector roles + normalized source-item envelope — lands with P1
+- `0008` — Typed outbound mutations for approved-fact sync-back — lands with P3
+- `0009` — Firm-plane auto-wiring typed edges at promote time (GBrain pattern) — lands with P5
+- `0010` — Graphify as optional multimodal ingestion adapter — only if P8 spike succeeds
+
+Retroactive candidates (decisions made but not yet written up):
+
+- LLM lives with the host agent (no SDK imports)
+- Constitutional mode as opt-in firm-level flag
+- Identity resolver Protocol + adapter pattern
+- Independence threshold on federated detector (distinct source_files)
+- SQL-over-KG as read-only primitive, removed from MCP
+- AGENTS.md canonical under `docs/`
