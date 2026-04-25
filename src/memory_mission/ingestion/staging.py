@@ -44,6 +44,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+from memory_mission.ingestion.roles import NormalizedSourceItem
 from memory_mission.memory.schema import (
     Plane,
     staging_source_dir,
@@ -167,6 +168,38 @@ class StagingWriter:
 
         return self._make_staged_item(item_id, raw_path, md_path)
 
+    def write_envelope(self, item: NormalizedSourceItem) -> StagedItem:
+        """Write a ``NormalizedSourceItem`` envelope to staging (P2).
+
+        The writer is constructed for one (concrete_app, target_plane,
+        employee_id) tuple. Mismatching envelopes are rejected
+        immediately so a Gmail-bound writer never silently writes a
+        Granola transcript, and a personal-bound writer never receives
+        a firm-plane envelope.
+
+        Frontmatter carries the envelope's structural fields
+        (``source_role``, ``external_object_type``, ``target_scope``,
+        ``container_id``, ``url``, ``modified_at``) so reviewers and
+        downstream extraction see the firm-shaped scope without parsing
+        the raw payload again.
+        """
+        if item.target_plane != self._target_plane:
+            raise ValueError(
+                f"envelope target_plane={item.target_plane!r} does not match "
+                f"writer target_plane={self._target_plane!r}"
+            )
+        if item.concrete_app != self._source:
+            raise ValueError(
+                f"envelope concrete_app={item.concrete_app!r} does not match "
+                f"writer source={self._source!r}"
+            )
+        return self.write(
+            item_id=item.external_id,
+            raw=item.raw,
+            markdown_body=_render_envelope_body(item),
+            frontmatter_extras=_envelope_frontmatter_extras(item),
+        )
+
     def get(self, item_id: str) -> StagedItem | None:
         """Return a pointer to the staged item if both files exist."""
         _validate_segment(item_id, name="item_id")
@@ -251,6 +284,35 @@ def _atomic_write_text(path: Path, content: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     tmp.replace(path)
+
+
+def _render_envelope_body(item: NormalizedSourceItem) -> str:
+    """Render a NormalizedSourceItem as markdown ready for the staging file."""
+    title = item.title.strip()
+    body = item.body.strip()
+    if title and body:
+        return f"# {title}\n\n{body}"
+    return title or body
+
+
+def _envelope_frontmatter_extras(item: NormalizedSourceItem) -> dict[str, Any]:
+    """Pick the envelope fields that should land in staging frontmatter.
+
+    Skips fields the base ``write()`` already canonicalizes
+    (``source``, ``source_id``, ``target_plane``, ``ingested_at``,
+    ``employee_id``).
+    """
+    extras: dict[str, Any] = {
+        "source_role": item.source_role.value,
+        "external_object_type": item.external_object_type,
+        "target_scope": item.target_scope,
+        "modified_at": item.modified_at.isoformat(),
+    }
+    if item.container_id is not None:
+        extras["container_id"] = item.container_id
+    if item.url is not None:
+        extras["url"] = item.url
+    return extras
 
 
 __all__ = ["StagedItem", "StagingWriter"]
