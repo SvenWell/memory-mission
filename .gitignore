@@ -79,8 +79,10 @@ Thumbs.db
 .observability/          # Audit logs per firm (runtime-generated)
 wiki/                    # Firm wiki (runtime-generated per deployment)
 .context/                # Workspace-local scratch (Conductor)
-tmp-review-proof*/       # Per-firm SQLite scratch from /review skill runs
-uv.lock                  # Per-machine resolver output; pip-installable from pyproject.toml
+# Per-firm SQLite scratch from /review skill runs
+tmp-review-proof*/
+# Per-machine resolver output; pip-installable from pyproject.toml
+uv.lock
 
 # Developer tooling (per-contributor, not part of the repo)
 # claude-mem regenerates AGENTS.md at repo root as a session-context cache.
