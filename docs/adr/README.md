@@ -59,6 +59,7 @@ proposed → active → superseded
 | [0004](0004-personal-layer-substrate-decision.md) | Personal-layer substrate — MemPalace adopted via adapter | active |
 | [0005](0005-sqlite-per-firm.md) | SQLite per firm for all persistent state | active |
 | [0007](0007-capability-based-connectors.md) | Capability-based connector roles + fail-closed visibility mapping | active |
+| [0011](0011-chat-system-role.md) | `chat_system` role for Slack-shape integrations (per-message envelope + helper-side plane override) | active |
 
 Pending ADRs — will be written as the corresponding phase lands (see `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md`):
 
