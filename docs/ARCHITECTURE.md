@@ -153,15 +153,21 @@ Terminal states are respected: a completed thread cannot be flipped back to runn
 
 `ModelCall` / `ModelResponse` are frozen Pydantic — middleware uses `model_copy(update=...)` to produce the next-in-chain value; accidental mutation is structurally blocked.
 
-### `src/memory_mission/connectors/` — component 1.3
+### `src/memory_mission/ingestion/` — Steps 5 + 7 + P2 + venture-pack
 
-`Connector` Protocol + local test doubles + Composio-backed implementations for Gmail, Granola, Drive. Every invocation flows through a shared harness (`invoke()`) that threads observability + PII scrub + trace_id correlation.
+The full ingestion stack lives here: connectors (1.3), capability-based binding manifest (P2), per-app envelope helpers, staging writer, and mention tracking.
 
-Composio SDK is a stub today — the `ComposioClient` Protocol is defined; live wiring happens when a firm deploys. Granola's coverage confirmed by the user; Gmail harness ships without live test per Step 5 scope.
+**`connectors/`** — `Connector` Protocol + local test doubles + Composio-backed implementations for **Gmail, Outlook, Google Calendar, Granola, Google Drive, OneDrive/SharePoint, Affinity, Attio, Notion, Slack** (10 apps). Every invocation flows through a shared harness (`invoke()`) that threads observability + PII scrub + trace_id correlation. The Composio SDK is a stub — the `ComposioClient` Protocol is defined; the host injects a real client at deploy time, or a host using MCP servers directly skips the harness and calls envelope helpers + `StagingWriter.write_envelope` directly.
 
-### `src/memory_mission/ingestion/` — Step 7
+**`roles.py`** — `ConnectorRole` StrEnum (`EMAIL` / `CALENDAR` / `TRANSCRIPT` / `DOCUMENT` / `WORKSPACE` / `CHAT` — see ADR-0011 for the chat addition) + `NormalizedSourceItem` Pydantic envelope (frozen, `extra="forbid"`). Every connector emits this single shape before staging — no per-connector special-cases downstream.
 
-`StagingWriter` writes pulled items to `<wiki_root>/staging/<plane>/<source>/` with atomic `.tmp → rename` and path-safety checks. `MentionTracker` is a per-firm SQLite store of entity counts; `record()` returns `(prev_tier, new_tier)` so the extraction skill can fire higher-tier enrichment on threshold crossings (GBrain's 1 / 3 / 8 thresholds).
+**`systems_manifest.py`** — `SystemsManifest` + `RoleBinding` + `VisibilityRule` Pydantic + `load_systems_manifest(path)` loader + `map_visibility(metadata, *, role, manifest) -> str` runtime primitive. Loaded from `firm/systems.yaml`. Mapping is **fail-closed by default**: a binding without `default_visibility` raises `VisibilityMappingError` on unmappable items. ADR-0007. Operator recipe at `docs/recipes/systems-yaml.md`.
+
+**`envelopes.py`** — 10 per-app helpers (`gmail_message_to_envelope`, `outlook_message_to_envelope`, `calendar_event_to_envelope`, `granola_transcript_to_envelope`, `drive_file_to_envelope`, `onedrive_item_to_envelope`, `affinity_record_to_envelope`, `attio_record_to_envelope`, `notion_page_to_envelope`, `slack_message_to_envelope`). Each is a pure function that picks the per-app visibility surface out of the raw payload, calls `map_visibility`, and emits a `NormalizedSourceItem`. The Slack helper additionally encodes a structural plane override — DMs/MPDMs are always `target_plane="personal"` regardless of binding (ADR-0011).
+
+**`staging.py`** — `StagingWriter` writes envelopes to `<wiki_root>/staging/<plane>/<source>/` via `write_envelope(item)` — atomic `.tmp → rename`, path-safety checks, structural frontmatter (`target_scope`, `source_role`, `external_object_type`, `container_id`, `url`, `modified_at`). The pre-existing `write()` method stays for ad-hoc / non-envelope cases.
+
+**`mentions.py`** — `MentionTracker` per-firm SQLite store of entity counts; `record()` returns `(prev_tier, new_tier)` so the extraction skill can fire higher-tier enrichment on threshold crossings (GBrain's 1 / 3 / 8 thresholds).
 
 ### `src/memory_mission/memory/` — components 0.1 + 0.2 + Steps 6, 13, 15
 
@@ -271,12 +277,12 @@ See BUILD_LOG commits `7f01c66 d50913d 889be9e b9e6505 fb85446 33d50f3` for deta
 
 The plan lives at `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md`. Architectural touchpoints:
 
-- **Capability-based connector roles.** New `src/memory_mission/ingestion/roles.py` introduces `ConnectorRole` (`EMAIL` / `CALENDAR` / `TRANSCRIPT` / `DOCUMENT` / `WORKSPACE`). Per-firm `firm/systems.yaml` binds roles to concrete apps (Notion, Monday, Salesforce, Attio, Affinity, ...). Every connector normalizes to a single `NormalizedSourceItem` envelope before staging. Same app can fulfil multiple roles. ADR-0007 when landed.
+- **~~Capability-based connector roles.~~ SHIPPED.** `src/memory_mission/ingestion/roles.py` defines `ConnectorRole` (`EMAIL` / `CALENDAR` / `TRANSCRIPT` / `DOCUMENT` / `WORKSPACE` / `CHAT`). Per-firm `firm/systems.yaml` binds roles → concrete apps; envelope helpers normalize each app's raw payload. ADR-0007 (active) + ADR-0011 (`chat` role for Slack-shape integrations, active). Venture-pack of 10 connectors landed on `main` at `42c66e2`.
 - **Typed sync-back.** New `src/memory_mission/sync_back/` for outbound mutations on approved facts only (`FieldUpdate`, `StatusChange`, `NoteAppend`, `TaskCreate`, `StructuredSummaryPublish`, `OwnerAssignment`). Idempotent via `(proposal_id, external_id, mutation_kind)`. MCP tool `sync_back_mutation` at REVIEW scope. ADR-0008 when landed.
 - **Evidence-pack MCP tool.** `get_evidence_pack(question, plane, tier_floor, limit)` returns `{triples, citations, confidence_aggregate, summary}` without generating prose. Composes over existing `kg.query_*` + hybrid search. Host LLM does prose from the pack. Spanner-inspired pattern, SQLite backend. ADR-0006 when landed.
 - **Firm-plane auto-wiring.** `src/memory_mission/promotion/autowire.py` extracts typed entity references from `support_quote` via regex + predicate vocab at `_apply_facts` time. Adds typed edges (`works_at`, `invested_in`, `advises`, `founded`) with zero LLM calls. ADR-0009 when landed.
 - **Venture reference overlay.** `overlays/venture/*` — manifest template, extraction-prompt tuning, permission presets, constitution seed. PE + wealth become overlays on the same core.
-- **Personal-layer substrate.** MemPalace is adopted behind `PersonalMemoryBackend`; every employee gets an isolated palace under `personal/<employee_id>/mempalace/`. ADR-0004 records the decision.
+- **~~Personal-layer substrate.~~ SHIPPED.** MemPalace is adopted behind `PersonalMemoryBackend`; every employee gets an isolated palace under `personal/<employee_id>/mempalace/`. ADR-0004 (active). Hardening pass added a deterministic `MM_SOURCE_ID` marker so search hits resolve to their exact source instead of a content-fuzzy lookup, plus path-traversal defense via `validate_employee_id` before palace path construction.
 - **Multimodal spike (optional).** Graphify as optional `pip install graphifyy` dep. `ingest-firm-corpus` skill on onboarding to seed firm KG from PDFs / decks / videos. Must still route through proposal review — cannot bypass governance.
 - **Benchmark publication.** `benchmarks/longmemeval.py` (inherits from MemPalace if adopted) + `benchmarks/firm_coherence.py` (ours, unique). Reproducible scripts + dated results under `benchmarks/RESULTS.md`.
 
@@ -288,13 +294,20 @@ A typical end-to-end flow composes like this:
 
 ```python
 with observability_scope(observability_root=..., firm_id="acme", employee_id="alice"):
+    manifest = load_systems_manifest(Path("firm/systems.yaml"))
+    connector = make_gmail_connector(client=composio_client)
+    staging = StagingWriter(
+        wiki_root=..., source="gmail",
+        target_plane="personal", employee_id="alice",
+    )
     with durable_run(store=..., thread_id="gmail-backfill-2026-q2", firm_id="acme") as run:
         # Every step checkpointed — resume-on-crash works.
-        for message in connector.invoke("list_messages", params={...}):
-            run.step(message["id"])
-            staging.write(message, source="gmail", target_plane="personal",
-                          employee_id="alice")
-            run.mark_done(message["id"])
+        for message_id in invoke(connector, "list_message_ids", {}).data["ids"]:
+            run.step(message_id)
+            raw = invoke(connector, "get_message", {"message_id": message_id}).data
+            item = gmail_message_to_envelope(raw, manifest=manifest)
+            staging.write_envelope(item)  # fail-closed if visibility unmappable
+            run.mark_done(message_id)
 
 # ...later, extraction...
 with observability_scope(...):

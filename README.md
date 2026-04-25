@@ -2,7 +2,7 @@
 
 **A governed context engine for agents: turn a firm's scattered knowledge into one queryable, auditable layer that AI agents can act on safely.**
 
-Python infrastructure for pulling data from external sources (email, transcripts, calendars, Drive), distilling it into git-versioned markdown the firm owns, and surfacing it through a hybrid-search retrieval interface — with every extraction, promotion, and retrieval logged for compliance audit.
+Python infrastructure for pulling data from external sources (email + calendar + transcripts + documents + venture CRMs + Slack), distilling it into git-versioned markdown the firm owns, and surfacing it through a hybrid-search retrieval interface — with every extraction, promotion, and retrieval logged for compliance audit.
 
 Two planes (personal and firm) separated by a PR-model review gate. Every fact traces to a source, a reviewer, and a rationale. Nothing lands on firm-plane memory without an explicit human decision.
 
@@ -79,7 +79,7 @@ V1 complete + Step 18 MCP surface shipped + MemPalace personal substrate adopted
 | Layer | What you can do today |
 |---|---|
 | **Foundations** | Append-only observability log per firm; checkpointed durable execution with resume-on-crash; PII-redacted middleware around every LLM call |
-| **Connectors** | `Connector` Protocol + `invoke()` harness. Composio-backed Gmail / Granola / Drive adapters (SDK is a stub; host wires the client) |
+| **Connectors** | `Connector` Protocol + `invoke()` harness. Composio-backed adapters (SDK stub; host wires the client) for **Gmail, Outlook, Google Calendar, Granola, Google Drive, OneDrive/SharePoint, Affinity, Attio, Notion, Slack** — 10 apps across 6 capability roles (`email` / `calendar` / `transcript` / `document` / `workspace` / `chat`). Per-firm `firm/systems.yaml` binds roles → apps; envelope helpers normalize each app's raw payload to `NormalizedSourceItem` with fail-closed visibility mapping (ADR-0007 + ADR-0011) |
 | **Memory** | Compiled-truth + timeline page format (Obsidian-compatible); SQLite temporal knowledge graph with Bayesian corroboration (Noisy-OR, 0.99 cap); hybrid search (RRF + cosine + compiled-truth boost); tier-aware authority hierarchy; read-only SQL surface for ad-hoc queries |
 | **Identity** | `IdentityResolver` Protocol + SQLite-backed local resolver; stable `p_<id>` / `o_<id>` across email / LinkedIn / Twitter / phone; `merge_entities` with reviewer gate |
 | **Extraction** | Six-bucket `ExtractedFact` Pydantic union with mandatory support-quote; `EXTRACTION_PROMPT` markdown template; ingest-time canonicalization to stable IDs; zero LLM-SDK imports in-repo |
@@ -89,7 +89,7 @@ V1 complete + Step 18 MCP surface shipped + MemPalace personal substrate adopted
 | **Synthesis** | `compile_agent_context(role, task, attendees, ...)` returns a structured `AgentContext` package; Tolaria Neighborhood-mode shape; Obsidian `[!contradiction]` callouts on rendered pages |
 | **MCP surface** | FastMCP server (`memory-mission/v1`, 14 tools: 8 read + 6 write). One process per employee. Per-firm `mcp_clients.yaml` manifest with NFKC + dup-key + symlink rejection. Every mutating tool opens an `observability_scope` — audit trail coverage complete over MCP, not just over Python API |
 | **Scope enforcement** | Fail-closed when no policy configured. `viewer_scopes` filter on KG triples. `can_propose` no-escalation on `create_proposal`. Scope column on every triple; pre-flight scope scan in `_apply_facts` so scope mismatches never leave partial KG writes. WAL + busy_timeout on all per-firm SQLite DBs |
-| **Skills** | Seven shipped: `backfill-gmail`, `backfill-granola`, `backfill-firm-artefacts`, `extract-from-staging`, `review-proposals`, `detect-firm-candidates`, `meeting-prep` |
+| **Skills** | 14 shipped. **Personal-source backfills** (employee plane): `backfill-gmail`, `backfill-outlook`, `backfill-granola`, `backfill-calendar`. **Firm-source backfills** (firm plane, admin-run): `backfill-firm-artefacts` (Drive), `backfill-onedrive` (OneDrive + SharePoint), `backfill-affinity`, `backfill-attio`, `backfill-notion`. **Mixed-plane** (per-message split via helper override): `backfill-slack`. **Workflow**: `extract-from-staging`, `review-proposals`, `detect-firm-candidates`, `meeting-prep` |
 
 Full per-step chronology in [`BUILD_LOG.md`](BUILD_LOG.md).
 
@@ -97,8 +97,8 @@ Full per-step chronology in [`BUILD_LOG.md`](BUILD_LOG.md).
 
 Each layer reads from the one below without rewriting it.
 
-1. A **connector** pulls from Gmail / Granola / Drive through the `invoke()` harness — PII-scrubbed, durable-checkpointed, logged as a `ConnectorInvocationEvent`.
-2. **Staging** lands the payload as `staging/<plane>/<source>/<id>.md` plus a raw sidecar. Hand-reviewable, plane-scoped, filesystem-level.
+1. A **connector** pulls from any of the 10 supported apps through the `invoke()` harness — PII-scrubbed, durable-checkpointed, logged as a `ConnectorInvocationEvent`.
+2. The connector's raw payload feeds an **envelope helper** (`gmail_message_to_envelope`, `slack_message_to_envelope`, etc.) which consults `firm/systems.yaml` for the firm-shaped `target_scope` and `target_plane`. **Staging** then writes the `NormalizedSourceItem` envelope to `staging/<plane>/<source>/<id>.md` plus a raw sidecar via `StagingWriter.write_envelope`. Visibility mapping is fail-closed by default — items whose visibility metadata can't map to a firm scope are rejected, not silently defaulted.
 3. The **`extract-from-staging` skill** runs the host agent's LLM against `EXTRACTION_PROMPT`. Response JSON parses into `ExtractionReport`; `ingest_facts` canonicalizes entity names via the `IdentityResolver` and writes structured facts to fact-staging.
 4. **`create_proposal`** groups facts by entity into a `Proposal`. Deterministic `proposal_id` — idempotent under re-extraction.
 5. The **`review-proposals` skill** surfaces each proposal to a human reviewer. Coherence warnings on tier conflicts surface as forcing questions. Approve / reject / reopen always requires rationale.
