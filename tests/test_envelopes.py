@@ -28,6 +28,7 @@ from memory_mission.ingestion.envelopes import (
     drive_file_to_envelope,
     gmail_message_to_envelope,
     granola_transcript_to_envelope,
+    notion_page_to_envelope,
     onedrive_item_to_envelope,
     outlook_message_to_envelope,
 )
@@ -946,3 +947,160 @@ def test_attio_envelope_rejects_wrong_app_binding() -> None:
     raw = {"id": {"record_id": "x"}, "values": {}, "updated_at": "2026-04-01T09:00:00Z"}
     with pytest.raises(ValueError, match="bound to app='affinity'"):
         attio_record_to_envelope(raw, object_slug="companies", manifest=manifest)
+
+
+# ---------- Notion ----------
+
+
+def _notion_manifest() -> SystemsManifest:
+    return SystemsManifest(
+        firm_id="northpoint",
+        bindings={
+            ConnectorRole.WORKSPACE: RoleBinding(
+                app="notion",
+                target_plane="firm",
+                visibility_rules=(
+                    VisibilityRule(
+                        if_field={"notion_parent_id": "db-investments"},
+                        scope="partner-only",
+                    ),
+                    # Pages with a public_url string are share-to-web public.
+                    # `if_field` does equality, so this rule only matches when
+                    # the value is the literal True placeholder; leave it for
+                    # demonstration and rely on the default for other public
+                    # pages until the matcher gets richer support.
+                ),
+                default_visibility="firm-internal",
+            ),
+        },
+    )
+
+
+def test_notion_page_envelope_round_trip_workspace_parent() -> None:
+    raw = {
+        "object": "page",
+        "id": "page-abc-123",
+        "parent": {"type": "workspace", "workspace": True},
+        "properties": {
+            "Name": {
+                "title": [{"plain_text": "Northpoint Constitution"}],
+            }
+        },
+        "url": "https://www.notion.so/Northpoint-Constitution-page-abc-123",
+        "last_edited_time": "2026-04-01T09:00:00Z",
+        "created_time": "2026-01-01T09:00:00Z",
+        "archived": False,
+    }
+    item = notion_page_to_envelope(raw, manifest=_notion_manifest())
+
+    assert item.source_role == ConnectorRole.WORKSPACE
+    assert item.concrete_app == "notion"
+    assert item.external_object_type == "notion_page"
+    assert item.external_id == "page-abc-123"
+    assert item.container_id == "workspace"
+    assert item.url == "https://www.notion.so/Northpoint-Constitution-page-abc-123"
+    assert item.target_plane == "firm"
+    assert item.target_scope == "firm-internal"  # default
+    assert item.title == "Northpoint Constitution"
+    assert item.body.startswith("# Northpoint Constitution")
+    assert item.modified_at == datetime(2026, 4, 1, 9, 0, tzinfo=UTC)
+    assert item.visibility_metadata["notion_parent_type"] == "workspace"
+    assert item.visibility_metadata["notion_parent_id"] == "workspace"
+    assert item.visibility_metadata["notion_archived"] is False
+
+
+def test_notion_database_row_envelope_uses_database_row_object_type() -> None:
+    raw = {
+        "object": "page",
+        "id": "row-1",
+        "parent": {"type": "database_id", "database_id": "db-investments"},
+        "properties": {
+            "Name": {"title": [{"plain_text": "Acme Series A"}]},
+        },
+        "last_edited_time": "2026-04-01T09:00:00Z",
+    }
+    item = notion_page_to_envelope(raw, manifest=_notion_manifest())
+    assert item.external_object_type == "notion_database_row"
+    assert item.container_id == "db-investments"
+    assert item.target_scope == "partner-only"  # parent_id rule fires
+    assert item.title == "Acme Series A"
+
+
+def test_notion_envelope_uses_pre_flattened_block_content_when_present() -> None:
+    raw = {
+        "object": "page",
+        "id": "page-2",
+        "parent": {"type": "workspace", "workspace": True},
+        "properties": {"Name": {"title": [{"plain_text": "Memo"}]}},
+        "last_edited_time": "2026-04-01T09:00:00Z",
+        "block_content": "## Section 1\n\nFirst paragraph of memo.",
+    }
+    item = notion_page_to_envelope(raw, manifest=_notion_manifest())
+    assert item.body == "## Section 1\n\nFirst paragraph of memo."
+
+
+def test_notion_envelope_falls_back_to_id_title() -> None:
+    raw = {
+        "object": "page",
+        "id": "untitled-page",
+        "parent": {"type": "workspace", "workspace": True},
+        "properties": {},
+        "last_edited_time": "2026-04-01T09:00:00Z",
+    }
+    item = notion_page_to_envelope(raw, manifest=_notion_manifest())
+    assert item.title == "untitled-page"
+
+
+def test_notion_envelope_extracts_title_from_top_level_for_databases() -> None:
+    raw = {
+        "object": "database",
+        "id": "db-1",
+        "parent": {"type": "page_id", "page_id": "parent-page"},
+        "title": [{"plain_text": "Pipeline"}],
+        "last_edited_time": "2026-04-01T09:00:00Z",
+    }
+    item = notion_page_to_envelope(raw, manifest=_notion_manifest())
+    assert item.title == "Pipeline"
+    assert item.container_id == "parent-page"
+
+
+def test_notion_envelope_missing_id_raises() -> None:
+    raw = {
+        "object": "page",
+        "parent": {"type": "workspace", "workspace": True},
+        "properties": {},
+        "last_edited_time": "2026-04-01T09:00:00Z",
+    }
+    with pytest.raises(ValueError, match="missing required string field"):
+        notion_page_to_envelope(raw, manifest=_notion_manifest())
+
+
+def test_notion_envelope_missing_last_edited_time_raises() -> None:
+    raw = {
+        "object": "page",
+        "id": "x",
+        "parent": {"type": "workspace", "workspace": True},
+        "properties": {},
+    }
+    with pytest.raises(ValueError, match="missing required datetime field"):
+        notion_page_to_envelope(raw, manifest=_notion_manifest())
+
+
+def test_notion_envelope_rejects_wrong_app_binding() -> None:
+    manifest = SystemsManifest(
+        firm_id="x",
+        bindings={
+            ConnectorRole.WORKSPACE: RoleBinding(
+                app="affinity",
+                target_plane="firm",
+                default_visibility="firm-internal",
+            ),
+        },
+    )
+    raw = {
+        "id": "x",
+        "parent": {"type": "workspace", "workspace": True},
+        "last_edited_time": "2026-04-01T09:00:00Z",
+    }
+    with pytest.raises(ValueError, match="bound to app='affinity'"):
+        notion_page_to_envelope(raw, manifest=manifest)

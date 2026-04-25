@@ -43,6 +43,10 @@ from memory_mission.ingestion.connectors.granola import (
     GRANOLA_ACTIONS,
     make_granola_connector,
 )
+from memory_mission.ingestion.connectors.notion import (
+    NOTION_ACTIONS,
+    make_notion_connector,
+)
 from memory_mission.ingestion.connectors.onedrive import (
     ONEDRIVE_ACTIONS,
     make_onedrive_connector,
@@ -60,6 +64,7 @@ __all__ = [
     "DRIVE_ACTIONS",
     "GMAIL_ACTIONS",
     "GRANOLA_ACTIONS",
+    "NOTION_ACTIONS",
     "ONEDRIVE_ACTIONS",
     "OUTLOOK_ACTIONS",
     "ComposioClient",
@@ -75,6 +80,7 @@ __all__ = [
     "make_drive_connector",
     "make_gmail_connector",
     "make_granola_connector",
+    "make_notion_connector",
     "make_onedrive_connector",
     "make_outlook_connector",
 ]

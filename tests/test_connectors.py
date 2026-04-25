@@ -18,6 +18,7 @@ from memory_mission.ingestion.connectors import (
     DRIVE_ACTIONS,
     GMAIL_ACTIONS,
     GRANOLA_ACTIONS,
+    NOTION_ACTIONS,
     ONEDRIVE_ACTIONS,
     OUTLOOK_ACTIONS,
     ComposioConnector,
@@ -32,6 +33,7 @@ from memory_mission.ingestion.connectors import (
     make_drive_connector,
     make_gmail_connector,
     make_granola_connector,
+    make_notion_connector,
     make_onedrive_connector,
     make_outlook_connector,
 )
@@ -552,6 +554,68 @@ def test_attio_requires_client_for_invoke() -> None:
     conn = make_attio_connector()
     with pytest.raises(NotImplementedError, match="no client attached"):
         conn.invoke("list_records", {"object": "companies"})
+
+
+# ---------- Notion factory ----------
+
+
+def test_notion_exposes_read_actions() -> None:
+    conn = make_notion_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "search",
+        "list_users",
+        "get_page",
+        "get_block_children",
+        "query_database",
+        "get_database",
+        "get_comments",
+    }
+    assert conn.name == "notion"
+
+
+def test_notion_actions_match_exported_constant() -> None:
+    assert make_notion_connector().list_actions() == list(NOTION_ACTIONS)
+
+
+def test_notion_preview_includes_object_type_parent_and_title() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "object": "page",
+                "parent": {"type": "database_id", "database_id": "db-1"},
+                "properties": {
+                    "Name": {
+                        "title": [{"plain_text": "Q3 Investment Memo"}],
+                    }
+                },
+            }
+
+    conn = make_notion_connector(client=FakeClient())
+    result = conn.invoke("get_page", {"page_id": "page-1"})
+    assert "page" in result.preview
+    assert "database_id" in result.preview
+    assert "Q3 Investment Memo" in result.preview
+
+
+def test_notion_preview_falls_back_to_top_level_title_for_databases() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "object": "database",
+                "title": [{"plain_text": "Deal Pipeline"}],
+                "parent": {"type": "workspace"},
+            }
+
+    conn = make_notion_connector(client=FakeClient())
+    result = conn.invoke("get_database", {"database_id": "db-1"})
+    assert "Deal Pipeline" in result.preview
+
+
+def test_notion_requires_client_for_invoke() -> None:
+    conn = make_notion_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("get_page", {"page_id": "x"})
 
 
 # ---------- Harness invoke() ----------

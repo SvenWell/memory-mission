@@ -221,6 +221,75 @@ def granola_transcript_to_envelope(
     )
 
 
+def notion_page_to_envelope(
+    raw: dict[str, Any],
+    *,
+    manifest: SystemsManifest,
+) -> NormalizedSourceItem:
+    """Map a Composio Notion page (or database row) payload to a ``NormalizedSourceItem``.
+
+    Notion's API treats database rows as pages with a ``database_id``
+    parent, so this helper handles both. Standalone databases (the
+    schema-defining objects) are a different shape and need a
+    separate helper if you want to backfill them as items.
+
+    Visibility surface:
+
+    - ``notion_parent_type`` — ``workspace`` / ``page_id`` /
+      ``database_id``. Operators typically write ``if_field`` rules
+      that scope pages by parent type or by specific
+      ``notion_parent_id``.
+    - ``notion_parent_id`` — the parent's id, for per-database or
+      per-page-tree scoping.
+    - ``notion_public_url`` — string when the page is share-to-web
+      enabled. Treat as the strongest "public" signal.
+    - ``notion_archived`` — bool; archived pages can map to a
+      different scope.
+    - ``labels`` — empty by default; a firm can populate via custom
+      property values if it has a tagging convention.
+
+    Body comes from ``raw["block_content"]`` when the caller has
+    pre-flattened the page's blocks tree into markdown. Otherwise
+    the body is a thin summary (title + parent metadata) and the
+    skill should fetch blocks separately if content is needed.
+    """
+    binding = _binding_for(ConnectorRole.WORKSPACE, expected_app="notion", manifest=manifest)
+    parent = raw.get("parent") if isinstance(raw.get("parent"), dict) else {}
+    if not isinstance(parent, dict):
+        parent = {}
+    parent_type = str(parent.get("type", "workspace"))
+    parent_id = _notion_parent_id(parent)
+    page_id = _require_str(raw, ("id", "page_id"), source="notion")
+    public_url = raw.get("public_url")
+    archived = bool(raw.get("archived", False))
+    visibility: dict[str, Any] = {
+        "labels": list(raw.get("labels", [])),
+        "notion_parent_type": parent_type,
+        "notion_parent_id": parent_id,
+        "notion_public_url": public_url if isinstance(public_url, str) else None,
+        "notion_archived": archived,
+    }
+    target_scope = map_visibility(visibility, role=ConnectorRole.WORKSPACE, manifest=manifest)
+    object_type = "notion_database_row" if parent_type == "database_id" else "notion_page"
+    title = _notion_page_title(raw, fallback=page_id)
+    body = _notion_page_body(raw, title=title, parent_type=parent_type, parent_id=parent_id)
+    return NormalizedSourceItem(
+        source_role=ConnectorRole.WORKSPACE,
+        concrete_app="notion",
+        external_object_type=object_type,
+        external_id=page_id,
+        container_id=parent_id,
+        url=_optional_str(raw, ("url",)),
+        modified_at=_require_datetime(raw, ("last_edited_time", "created_time"), source="notion"),
+        visibility_metadata=visibility,
+        target_scope=target_scope,
+        target_plane=binding.target_plane,
+        title=title,
+        body=body,
+        raw=dict(raw),
+    )
+
+
 def attio_record_to_envelope(
     raw: dict[str, Any],
     *,
@@ -503,6 +572,69 @@ def _parse_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _notion_parent_id(parent: dict[str, Any]) -> str | None:
+    for key in ("workspace", "page_id", "database_id", "block_id"):
+        value = parent.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, bool) and key == "workspace":
+            return "workspace"
+    return None
+
+
+def _notion_page_title(raw: dict[str, Any], *, fallback: str) -> str:
+    """Pull a Notion page title out of its properties (or top-level title)."""
+    title_block = raw.get("title")
+    if isinstance(title_block, list):
+        plain = "".join(_notion_rich_text_plain_value(rt) for rt in title_block)
+        if plain:
+            return plain
+    props = raw.get("properties")
+    if isinstance(props, dict):
+        for key in ("title", "Title", "Name", "name"):
+            block = props.get(key)
+            if isinstance(block, dict):
+                title_arr = block.get("title")
+                if isinstance(title_arr, list):
+                    plain = "".join(_notion_rich_text_plain_value(rt) for rt in title_arr)
+                    if plain:
+                        return plain
+    return fallback
+
+
+def _notion_rich_text_plain_value(rt: Any) -> str:
+    if not isinstance(rt, dict):
+        return ""
+    plain = rt.get("plain_text")
+    if isinstance(plain, str):
+        return plain
+    text = rt.get("text")
+    if isinstance(text, dict):
+        content = text.get("content")
+        if isinstance(content, str):
+            return content
+    return ""
+
+
+def _notion_page_body(
+    raw: dict[str, Any],
+    *,
+    title: str,
+    parent_type: str,
+    parent_id: str | None,
+) -> str:
+    """Prefer pre-flattened block_content; otherwise emit a thin metadata summary."""
+    block_content = raw.get("block_content")
+    if isinstance(block_content, str) and block_content.strip():
+        return block_content
+    parts: list[str] = []
+    if title:
+        parts.append(f"# {title}")
+    if parent_type:
+        parts.append(f"Parent: {parent_type}" + (f" ({parent_id})" if parent_id else ""))
+    return "\n".join(parts)
+
+
 def _attio_require_record_id(raw: dict[str, Any]) -> str:
     id_block = raw.get("id")
     if isinstance(id_block, dict):
@@ -771,6 +903,7 @@ __all__ = [
     "drive_file_to_envelope",
     "gmail_message_to_envelope",
     "granola_transcript_to_envelope",
+    "notion_page_to_envelope",
     "onedrive_item_to_envelope",
     "outlook_message_to_envelope",
 ]
