@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from memory_mission.durable import CheckpointStore, durable_run
 from memory_mission.ingestion.connectors import (
+    AFFINITY_ACTIONS,
     CALENDAR_ACTIONS,
     DRIVE_ACTIONS,
     GMAIL_ACTIONS,
@@ -22,6 +23,7 @@ from memory_mission.ingestion.connectors import (
     ConnectorResult,
     InMemoryConnector,
     invoke,
+    make_affinity_connector,
     make_calendar_connector,
     make_drive_connector,
     make_gmail_connector,
@@ -342,6 +344,63 @@ def test_calendar_requires_client_for_invoke() -> None:
     conn = make_calendar_connector()
     with pytest.raises(NotImplementedError, match="no client attached"):
         conn.invoke("list_events", {})
+
+
+# ---------- Affinity factory ----------
+
+
+def test_affinity_exposes_read_actions() -> None:
+    conn = make_affinity_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "list_organizations",
+        "get_organization",
+        "list_persons",
+        "get_person",
+        "list_opportunities",
+        "get_opportunity",
+        "list_lists",
+        "get_list_metadata",
+        "list_list_entries",
+    }
+    assert conn.name == "affinity"
+
+
+def test_affinity_actions_match_exported_constant() -> None:
+    assert make_affinity_connector().list_actions() == list(AFFINITY_ACTIONS)
+
+
+def test_affinity_preview_uses_organization_name_and_domain() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {"id": 42, "name": "Northpoint Capital", "domain": "northpoint.fund"}
+
+    conn = make_affinity_connector(client=FakeClient())
+    result = conn.invoke("get_organization", {"organization_id": 42})
+    assert "Northpoint Capital" in result.preview
+    assert "northpoint.fund" in result.preview
+
+
+def test_affinity_preview_uses_person_name_and_email() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": 7,
+                "first_name": "Sarah",
+                "last_name": "Chen",
+                "primary_email": "sarah@example.com",
+            }
+
+    conn = make_affinity_connector(client=FakeClient())
+    result = conn.invoke("get_person", {"person_id": 7})
+    assert "Sarah Chen" in result.preview
+    assert "sarah@example.com" in result.preview
+
+
+def test_affinity_requires_client_for_invoke() -> None:
+    conn = make_affinity_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_organizations", {})
 
 
 # ---------- Harness invoke() ----------

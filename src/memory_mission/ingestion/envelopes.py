@@ -99,6 +99,86 @@ def granola_transcript_to_envelope(
     )
 
 
+_AFFINITY_OBJECT_TYPES: tuple[str, ...] = ("organization", "person", "opportunity")
+_AFFINITY_ID_PREFIX: dict[str, str] = {
+    "organization": "org",
+    "person": "person",
+    "opportunity": "opp",
+}
+
+
+def affinity_record_to_envelope(
+    raw: dict[str, Any],
+    *,
+    object_type: str,
+    manifest: SystemsManifest,
+) -> NormalizedSourceItem:
+    """Map a Composio Affinity record (org / person / opportunity) to an envelope.
+
+    ``object_type`` is set by the caller (the skill knows which connector
+    action it called). It must be one of ``organization`` / ``person`` /
+    ``opportunity``.
+
+    Visibility surface:
+
+    - ``labels`` — one entry per Affinity list the record is in
+      (``list:<list_id>``) plus ``"global"`` when Affinity flags the
+      record as a globally-known entity. Operator visibility rules
+      typically match on ``if_label: list:<id>``.
+    - ``affinity_object_type`` — for ``if_field`` rules that want to
+      treat orgs / persons / opps differently.
+    - ``affinity_owner_id`` — Affinity creator or owner id when present.
+
+    Affinity records are not documents; the envelope ``body`` is a
+    structured summary (key fields rendered as text) so downstream
+    extraction has something to read without parsing the raw payload.
+    """
+    if object_type not in _AFFINITY_OBJECT_TYPES:
+        raise ValueError(
+            f"object_type must be one of {list(_AFFINITY_OBJECT_TYPES)}; got {object_type!r}"
+        )
+    binding = _binding_for(ConnectorRole.WORKSPACE, expected_app="affinity", manifest=manifest)
+    list_ids = _affinity_list_ids(raw)
+    labels: list[str] = [f"list:{lid}" for lid in list_ids]
+    if raw.get("global") is True:
+        labels.append("global")
+    visibility: dict[str, Any] = {
+        "labels": labels,
+        "affinity_object_type": object_type,
+        "affinity_owner_id": _affinity_owner_id(raw),
+    }
+    target_scope = map_visibility(visibility, role=ConnectorRole.WORKSPACE, manifest=manifest)
+    record_id = _require_int_id(raw, ("id",), source="affinity")
+    external_id = f"{_AFFINITY_ID_PREFIX[object_type]}_{record_id}"
+    title = _affinity_title(raw, object_type=object_type, fallback=external_id)
+    body = _affinity_body(raw, object_type=object_type)
+    return NormalizedSourceItem(
+        source_role=ConnectorRole.WORKSPACE,
+        concrete_app="affinity",
+        external_object_type=object_type,
+        external_id=external_id,
+        container_id=_affinity_primary_list(list_ids),
+        url=_optional_str(raw, ("url",)),
+        modified_at=_require_datetime(
+            raw,
+            (
+                "interaction_dates_last_interaction_date",
+                "dates_modified_date",
+                "dates_created_date",
+                "modified_at",
+                "created_at",
+            ),
+            source="affinity",
+        ),
+        visibility_metadata=visibility,
+        target_scope=target_scope,
+        target_plane=binding.target_plane,
+        title=title,
+        body=body,
+        raw=dict(raw),
+    )
+
+
 def calendar_event_to_envelope(
     raw: dict[str, Any],
     *,
@@ -240,6 +320,93 @@ def _parse_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _require_int_id(raw: dict[str, Any], keys: tuple[str, ...], *, source: str) -> int:
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    raise ValueError(f"{source} payload missing required integer id; tried keys={list(keys)}")
+
+
+def _affinity_list_ids(raw: dict[str, Any]) -> list[int]:
+    """Extract list ids from an Affinity record's list_entries."""
+    entries = raw.get("list_entries")
+    if not isinstance(entries, list):
+        return []
+    out: list[int] = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            lid = entry.get("list_id")
+            if isinstance(lid, int) and not isinstance(lid, bool):
+                out.append(lid)
+            elif isinstance(lid, str) and lid.isdigit():
+                out.append(int(lid))
+    return out
+
+
+def _affinity_primary_list(list_ids: list[int]) -> str | None:
+    """Use the first list id as the envelope container_id (ordering = Affinity's order)."""
+    if not list_ids:
+        return None
+    return f"list_{list_ids[0]}"
+
+
+def _affinity_owner_id(raw: dict[str, Any]) -> int | None:
+    for key in ("creator_id", "owner_id", "current_user_id"):
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _affinity_title(raw: dict[str, Any], *, object_type: str, fallback: str) -> str:
+    if object_type == "organization":
+        return str(raw.get("name", "")) or fallback
+    if object_type == "person":
+        first = str(raw.get("first_name", "")).strip()
+        last = str(raw.get("last_name", "")).strip()
+        full = f"{first} {last}".strip()
+        if full:
+            return full
+        return str(raw.get("primary_email", "")) or fallback
+    # opportunity
+    return str(raw.get("name", raw.get("title", ""))) or fallback
+
+
+def _affinity_body(raw: dict[str, Any], *, object_type: str) -> str:
+    """Render a structured summary as text — Affinity records aren't documents."""
+    parts: list[str] = []
+    if object_type == "organization":
+        domain = str(raw.get("domain", "")).strip()
+        if domain:
+            parts.append(f"Domain: {domain}")
+        domains = raw.get("domains") or []
+        if isinstance(domains, list) and len(domains) > 1:
+            parts.append("Other domains: " + ", ".join(str(d) for d in domains[1:]))
+    elif object_type == "person":
+        email = str(raw.get("primary_email", "")).strip()
+        if email:
+            parts.append(f"Email: {email}")
+        emails = raw.get("emails") or []
+        if isinstance(emails, list) and len(emails) > 1:
+            parts.append("Other emails: " + ", ".join(str(e) for e in emails[1:]))
+        org_ids = raw.get("organization_ids") or []
+        if isinstance(org_ids, list) and org_ids:
+            parts.append(f"Organizations: {', '.join(str(o) for o in org_ids)}")
+    elif object_type == "opportunity":
+        list_id = raw.get("list_id")
+        if list_id is not None:
+            parts.append(f"List: {list_id}")
+    last_interaction = raw.get("interaction_dates_last_interaction_date") or raw.get(
+        "dates_last_interaction_date"
+    )
+    if last_interaction:
+        parts.append(f"Last interaction: {last_interaction}")
+    return "\n".join(parts)
+
+
 def _attendee_emails(attendees: Any) -> list[str]:
     """Extract email-shaped strings from Google Calendar attendees list."""
     if not isinstance(attendees, list):
@@ -263,6 +430,7 @@ def _drive_grants_anyone(permissions: list[Any]) -> bool:
 
 
 __all__ = [
+    "affinity_record_to_envelope",
     "calendar_event_to_envelope",
     "drive_file_to_envelope",
     "gmail_message_to_envelope",

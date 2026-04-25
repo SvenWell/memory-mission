@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 import pytest
 
 from memory_mission.ingestion.envelopes import (
+    affinity_record_to_envelope,
     calendar_event_to_envelope,
     drive_file_to_envelope,
     gmail_message_to_envelope,
@@ -417,3 +418,159 @@ def test_drive_envelope_rejects_wrong_app_binding() -> None:
     raw = {"id": "x", "name": "x", "modified_time": "2026-03-31T18:00:00Z", "permissions": []}
     with pytest.raises(ValueError, match="bound to app='sharepoint'"):
         drive_file_to_envelope(raw, manifest=manifest)
+
+
+# ---------- Affinity ----------
+
+
+def _affinity_manifest() -> SystemsManifest:
+    return SystemsManifest(
+        firm_id="northpoint",
+        bindings={
+            ConnectorRole.WORKSPACE: RoleBinding(
+                app="affinity",
+                target_plane="firm",
+                visibility_rules=(
+                    VisibilityRule(if_label="list:42", scope="partner-only"),
+                    VisibilityRule(if_label="list:91", scope="firm-internal"),
+                    VisibilityRule(if_label="global", scope="external-shared"),
+                ),
+                default_visibility="firm-internal",
+            ),
+        },
+    )
+
+
+def test_affinity_organization_envelope_round_trip() -> None:
+    raw = {
+        "id": 12345,
+        "name": "Northpoint Capital",
+        "domain": "northpoint.fund",
+        "domains": ["northpoint.fund", "northpoint.vc"],
+        "global": False,
+        "list_entries": [
+            {"id": 1, "list_id": 42, "entity_id": 12345, "entity_type": "organization"},
+            {"id": 2, "list_id": 91, "entity_id": 12345, "entity_type": "organization"},
+        ],
+        "interaction_dates_last_interaction_date": "2026-04-01T09:00:00Z",
+        "creator_id": 7,
+    }
+    item = affinity_record_to_envelope(
+        raw, object_type="organization", manifest=_affinity_manifest()
+    )
+
+    assert item.source_role == ConnectorRole.WORKSPACE
+    assert item.concrete_app == "affinity"
+    assert item.external_object_type == "organization"
+    assert item.external_id == "org_12345"
+    assert item.container_id == "list_42"  # first list_id
+    assert item.target_plane == "firm"
+    assert item.target_scope == "partner-only"  # first matching rule (list:42)
+    assert item.title == "Northpoint Capital"
+    assert "Domain: northpoint.fund" in item.body
+    assert "Other domains: northpoint.vc" in item.body
+    assert "Last interaction: 2026-04-01T09:00:00Z" in item.body
+    assert item.modified_at == datetime(2026, 4, 1, 9, 0, tzinfo=UTC)
+    assert item.visibility_metadata["labels"] == ["list:42", "list:91"]
+    assert item.visibility_metadata["affinity_object_type"] == "organization"
+    assert item.visibility_metadata["affinity_owner_id"] == 7
+
+
+def test_affinity_global_organization_maps_to_external_shared() -> None:
+    raw = {
+        "id": 99,
+        "name": "Apple",
+        "domain": "apple.com",
+        "global": True,
+        "list_entries": [],
+        "dates_modified_date": "2026-03-15T10:00:00Z",
+    }
+    item = affinity_record_to_envelope(
+        raw, object_type="organization", manifest=_affinity_manifest()
+    )
+    assert item.target_scope == "external-shared"
+    assert "global" in item.visibility_metadata["labels"]
+
+
+def test_affinity_record_with_no_lists_uses_default_visibility() -> None:
+    raw = {
+        "id": 1,
+        "name": "Stealth Co",
+        "global": False,
+        "list_entries": [],
+        "dates_created_date": "2026-04-01T09:00:00Z",
+    }
+    item = affinity_record_to_envelope(
+        raw, object_type="organization", manifest=_affinity_manifest()
+    )
+    assert item.target_scope == "firm-internal"  # default_visibility
+    assert item.container_id is None
+
+
+def test_affinity_person_envelope_uses_first_last_email() -> None:
+    raw = {
+        "id": 7,
+        "first_name": "Sarah",
+        "last_name": "Chen",
+        "primary_email": "sarah@example.com",
+        "emails": ["sarah@example.com", "sarah.chen@northpoint.fund"],
+        "organization_ids": [12345],
+        "global": False,
+        "list_entries": [{"list_id": 91, "entity_id": 7, "entity_type": "person"}],
+        "dates_modified_date": "2026-04-01T09:00:00Z",
+    }
+    item = affinity_record_to_envelope(raw, object_type="person", manifest=_affinity_manifest())
+    assert item.external_object_type == "person"
+    assert item.external_id == "person_7"
+    assert item.title == "Sarah Chen"
+    assert "Email: sarah@example.com" in item.body
+    assert "Other emails: sarah.chen@northpoint.fund" in item.body
+    assert "Organizations: 12345" in item.body
+    assert item.target_scope == "firm-internal"  # list:91
+
+
+def test_affinity_opportunity_envelope_uses_name_and_list() -> None:
+    raw = {
+        "id": 555,
+        "name": "Acme Corp Series A",
+        "list_id": 42,
+        "list_entries": [{"list_id": 42, "entity_id": 555, "entity_type": "opportunity"}],
+        "global": False,
+        "dates_created_date": "2026-04-01T09:00:00Z",
+    }
+    item = affinity_record_to_envelope(
+        raw, object_type="opportunity", manifest=_affinity_manifest()
+    )
+    assert item.external_object_type == "opportunity"
+    assert item.external_id == "opp_555"
+    assert item.title == "Acme Corp Series A"
+    assert "List: 42" in item.body
+    assert item.target_scope == "partner-only"  # list:42
+
+
+def test_affinity_envelope_rejects_unknown_object_type() -> None:
+    raw = {"id": 1, "dates_created_date": "2026-04-01T09:00:00Z"}
+    with pytest.raises(ValueError, match="object_type must be one of"):
+        affinity_record_to_envelope(raw, object_type="bogus", manifest=_affinity_manifest())
+
+
+def test_affinity_envelope_rejects_missing_id() -> None:
+    raw = {"name": "x", "dates_created_date": "2026-04-01T09:00:00Z", "list_entries": []}
+    with pytest.raises(ValueError, match="missing required integer id"):
+        affinity_record_to_envelope(raw, object_type="organization", manifest=_affinity_manifest())
+
+
+def test_affinity_envelope_rejects_wrong_app_binding() -> None:
+    manifest = SystemsManifest(
+        firm_id="x",
+        bindings={
+            ConnectorRole.WORKSPACE: RoleBinding(
+                app="attio",
+                target_plane="firm",
+                default_visibility="firm-internal",
+            ),
+        },
+    )
+    raw = {"id": 1, "name": "x", "dates_created_date": "2026-04-01T09:00:00Z", "list_entries": []}
+    with pytest.raises(ValueError, match="bound to app='attio'"):
+        affinity_record_to_envelope(raw, object_type="organization", manifest=manifest)
