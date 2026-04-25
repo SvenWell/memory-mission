@@ -2367,3 +2367,71 @@ to invoke the envelope helpers + `write_envelope`, and rewire the
 personal substrate (`MemPalaceAdapter`) to consume the resulting
 `NormalizedSourceItem` shape end-to-end. Calendar connector +
 envelope helper land here.
+
+## P3-prep — Calendar connector + envelope helper + skill rewires (2026-04-25)
+
+Stage-setting work for P3 (personal-source ingestion). Adds the
+missing Calendar connector + envelope helper, rewires the Gmail and
+Granola skills onto the P2 envelope path, and lands an operator
+recipe for `firm/systems.yaml`. After this, an external host agent
+(Sven's personal agent, or any host with Composio credentials) can
+backfill Gmail / Granola / Calendar end-to-end against the
+`MemPalaceAdapter` personal substrate.
+
+### What landed
+
+- **Calendar connector** —
+  `src/memory_mission/ingestion/connectors/calendar.py`. Composio-backed
+  with `list_events` + `get_event` actions and a `summary | start —
+  N attendees` preview formatter. Connector name is `gcal` so it
+  composes cleanly with the manifest binding `app: gcal`.
+- **`calendar_event_to_envelope`** —
+  `src/memory_mission/ingestion/envelopes.py`. Visibility surface
+  carries `gcal_visibility` (Google Calendar's built-in
+  `default`/`public`/`private`/`confidential`) as a top-level metadata
+  key so `if_field` rules match it directly. Handles both attendee-
+  dict form (`{"email": "...", "responseStatus": "..."}`) and raw-
+  string form. Falls back from `updated` to `created` if `updated` is
+  absent.
+- **Skill rewires** — `skills/backfill-gmail/SKILL.md` and
+  `skills/backfill-granola/SKILL.md` rewritten to load
+  `firm/systems.yaml`, call the envelope helpers, and route through
+  `StagingWriter.write_envelope`. New constraint: `VisibilityMappingError`
+  halts the loop (no silent fallback). Versions bumped to 2026-04-25.
+  `skills/backfill-calendar/SKILL.md` created from scratch (mirrors the
+  Gmail shape, with calendar-specific notes on recurring events,
+  non-primary calendars, and the `gcal_visibility` field).
+  `skills/_index.md` and `skills/_manifest.jsonl` updated to register
+  the new skill and reflect the new tool / precondition / constraint
+  surface.
+- **`docs/recipes/systems-yaml.md`** — operator recipe. Includes a
+  one-person personal-test firm template (Gmail + Granola + Calendar,
+  fail-closed-with-employee-private-default), a strict-by-default
+  firm template, a firm-plane Drive template, the binding +
+  `VisibilityRule` schema reference, and the per-app
+  `visibility_metadata` shape table.
+
+### What's deliberately out of scope
+
+- **Notion / Attio / workspace connectors** — P4.
+- **Live Composio credentials wiring in this codebase** — connectors
+  stay credential-free. Sven's host agent injects the client.
+- **End-to-end test against real-shape Composio responses** — that
+  validation comes from the actual host-agent backfill run.
+
+### Verification
+
+- [x] `pytest` — 763/763 passed (+15 since P2: 5 calendar-connector +
+      9 calendar-envelope, plus 1 ordering bump)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 74 source files (+1)
+- [x] `skills/_manifest.jsonl` parses as valid JSONL (8 entries; was 7)
+
+### Next
+
+P3 proper begins when an external host agent (Sven's, or another
+operator's) actually runs `backfill-gmail` / `backfill-granola` /
+`backfill-calendar` against live data. Findings from that run drive
+the typed-Python convenience wrappers (e.g.
+`src/memory_mission/ingestion/backfill_runner.py`) that codify the
+skill workflow into a callable Python entry point.

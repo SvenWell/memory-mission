@@ -4,21 +4,31 @@ Read this file first. Full `SKILL.md` contents load only when a skill's
 triggers match the current task. Machine-readable equivalent:
 `skills/_manifest.jsonl`. Conventions: `skills/_writing-skills.md`.
 
+**8 skills shipped** as of 2026-04-25. The three personal-source
+backfills (gmail, granola, calendar) all route through P2's envelope
+path: load `firm/systems.yaml`, call the per-app envelope helper, and
+write via `StagingWriter.write_envelope`. Visibility maps to firm
+scope per the manifest — fail-closed by default (ADR-0007).
+
 ## backfill-gmail
 
-Pull historical email through the Gmail connector (Composio-backed) into
-the **employee's personal staging plane**
-(`<wiki_root>/staging/personal/<employee_id>/gmail/`) for the extraction
-agent (Step 9) to consume. Each message becomes a checkpointed step
-under a durable run, so a crash mid-loop resumes from the last processed
-message. No LLM calls, no extraction, no firm-plane writes.
+Pull historical email through the Gmail connector (Composio-backed),
+normalize each message to a `NormalizedSourceItem` via
+`gmail_message_to_envelope`, and write the envelope into the
+**employee's personal staging plane**
+(`<wiki_root>/staging/personal/<employee_id>/gmail/`) via
+`StagingWriter.write_envelope`. Each message becomes a checkpointed
+step under a durable run. Visibility maps to firm scope per
+`firm/systems.yaml` — fail-closed by default (ADR-0007). No LLM calls,
+no extraction, no firm-plane writes.
 
 Triggers: "backfill gmail", "import email history", "sync gmail mailbox",
 "pull historical email"
 
-Constraints: personal plane only (never firm staging), no writes to
-curated wiki pages, no LLM inside the loop, every fetch flows through
-the connector harness.
+Constraints: personal plane only (never firm staging), envelope path
+only (`write_envelope`, never raw `write` for envelope-shaped items),
+`VisibilityMappingError` halts the loop (no silent fallback), every
+fetch flows through the connector harness, no LLM inside the loop.
 
 ## extract-from-staging
 
@@ -40,16 +50,40 @@ match source target_plane.
 ## backfill-granola
 
 Pull historical meeting transcripts through the Granola connector
-(Composio-backed) into the **employee's personal staging plane**
-(`<wiki_root>/staging/personal/<employee_id>/granola/`) for the
-extraction agent (Step 9) to consume. Same shape as backfill-gmail,
-different source. Each transcript is a checkpointed step.
+(Composio-backed), normalize via `granola_transcript_to_envelope`, and
+write the envelope into the **employee's personal staging plane**
+(`<wiki_root>/staging/personal/<employee_id>/granola/`) via
+`StagingWriter.write_envelope`. Same shape as backfill-gmail, different
+source. Each transcript is a checkpointed step. Visibility maps to firm
+scope per `firm/systems.yaml` — most firms set `default_visibility` on
+the `transcript` binding since transcripts rarely carry rich metadata.
 
 Triggers: "backfill granola", "import meeting transcripts",
 "sync granola transcripts", "pull historical meetings"
 
-Constraints: personal plane only, every fetch through the harness,
-no LLM, no firm-plane writes.
+Constraints: personal plane only, envelope path only (`write_envelope`),
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM.
+
+## backfill-calendar
+
+Pull historical Google Calendar events through the Calendar connector
+(Composio-backed), normalize via `calendar_event_to_envelope`, and
+write the envelope into the **employee's personal staging plane**
+(`<wiki_root>/staging/personal/<employee_id>/gcal/`) via
+`StagingWriter.write_envelope`. Each event is a checkpointed step.
+Visibility maps from Google Calendar's built-in `visibility` field
+(`default` / `public` / `private` / `confidential`) to firm scope per
+`firm/systems.yaml`. Recurring event instances are processed
+individually; non-primary calendars use a separate durable run per
+`calendar_id`.
+
+Triggers: "backfill calendar", "import calendar history", "sync gcal",
+"pull historical events", "import meetings"
+
+Constraints: personal plane only, envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM.
 
 ## backfill-firm-artefacts
 

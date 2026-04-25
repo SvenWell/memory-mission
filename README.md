@@ -28,7 +28,7 @@ cd memory-mission
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
-make check          # ruff + format + mypy --strict + 748 tests
+make check          # ruff + format + mypy --strict + 763 tests
 python -m memory_mission info
 ```
 
@@ -74,7 +74,7 @@ briefing = context.render()       # markdown for the host-agent LLM
 
 ## What shipped
 
-V1 complete + Step 18 MCP surface shipped + MemPalace personal substrate adopted + P2 capability-based connector manifest. 18 build steps + six-move polish pass + a three-reviewer security-response pass (21 fixes across B1-B28). **748 tests passing**, `mypy --strict` clean on 73 source files. Step 18 security response merged to `main` at `35c73fb`.
+V1 complete + Step 18 MCP surface shipped + MemPalace personal substrate adopted + P2 capability-based connector manifest + Calendar connector + envelope-path skill rewires. 18 build steps + six-move polish pass + a three-reviewer security-response pass (21 fixes across B1-B28). **763 tests passing**, `mypy --strict` clean on 74 source files. P0–P2 merged to `main` at `123346f`.
 
 | Layer | What you can do today |
 |---|---|
@@ -149,7 +149,7 @@ src/memory_mission/
 └── mcp/                    # FastMCP server — 14 tools over stdio (Step 18)
 
 skills/                     # 7 shipped, markdown + YAML frontmatter
-tests/                      # 748 passing
+tests/                      # 763 passing
 docs/                       # VISION + ARCHITECTURE + ABSTRACTIONS + EVALS + AGENTS + adr/ + recipes/
 BUILD_LOG.md                # per-step record
 ```
