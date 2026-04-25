@@ -55,6 +55,10 @@ from memory_mission.ingestion.connectors.outlook import (
     OUTLOOK_ACTIONS,
     make_outlook_connector,
 )
+from memory_mission.ingestion.connectors.slack import (
+    SLACK_ACTIONS,
+    make_slack_connector,
+)
 from memory_mission.ingestion.connectors.testing import InMemoryConnector
 
 __all__ = [
@@ -67,6 +71,7 @@ __all__ = [
     "NOTION_ACTIONS",
     "ONEDRIVE_ACTIONS",
     "OUTLOOK_ACTIONS",
+    "SLACK_ACTIONS",
     "ComposioClient",
     "ComposioConnector",
     "Connector",
@@ -83,4 +88,5 @@ __all__ = [
     "make_notion_connector",
     "make_onedrive_connector",
     "make_outlook_connector",
+    "make_slack_connector",
 ]

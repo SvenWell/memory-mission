@@ -18,6 +18,7 @@ that:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -31,6 +32,7 @@ from memory_mission.ingestion.envelopes import (
     notion_page_to_envelope,
     onedrive_item_to_envelope,
     outlook_message_to_envelope,
+    slack_message_to_envelope,
 )
 from memory_mission.ingestion.roles import ConnectorRole
 from memory_mission.ingestion.systems_manifest import (
@@ -1104,3 +1106,217 @@ def test_notion_envelope_rejects_wrong_app_binding() -> None:
     }
     with pytest.raises(ValueError, match="bound to app='affinity'"):
         notion_page_to_envelope(raw, manifest=manifest)
+
+
+# ---------- Slack ----------
+
+
+def _slack_manifest() -> SystemsManifest:
+    return SystemsManifest(
+        firm_id="northpoint",
+        bindings={
+            ConnectorRole.CHAT: RoleBinding(
+                app="slack",
+                target_plane="firm",  # default for non-DM; helper overrides for is_im/is_mpim
+                # Order matters: DMs in Slack are also is_private, so the
+                # is_im / is_mpim rules MUST fire before the is_private rule.
+                visibility_rules=(
+                    VisibilityRule(if_field={"slack_is_im": True}, scope="employee-private"),
+                    VisibilityRule(if_field={"slack_is_mpim": True}, scope="employee-private"),
+                    VisibilityRule(if_field={"slack_is_ext_shared": True}, scope="external-shared"),
+                    VisibilityRule(if_field={"slack_is_private": True}, scope="partner-only"),
+                ),
+                default_visibility="firm-internal",
+            ),
+        },
+    )
+
+
+def _public_channel() -> dict[str, Any]:
+    return {
+        "id": "C07DEALS",
+        "name": "deals",
+        "is_im": False,
+        "is_mpim": False,
+        "is_private": False,
+        "is_shared": False,
+        "is_ext_shared": False,
+        "num_members": 8,
+    }
+
+
+def _private_channel() -> dict[str, Any]:
+    return {
+        "id": "G07PARTNERS",
+        "name": "partners",
+        "is_im": False,
+        "is_mpim": False,
+        "is_private": True,
+        "is_shared": False,
+        "is_ext_shared": False,
+        "num_members": 4,
+    }
+
+
+def _ext_shared_channel() -> dict[str, Any]:
+    return {
+        "id": "C07PORTCO",
+        "name": "acme-corp-shared",
+        "is_im": False,
+        "is_mpim": False,
+        "is_private": False,
+        "is_shared": True,
+        "is_ext_shared": True,
+        "num_members": 12,
+    }
+
+
+def _dm_channel() -> dict[str, Any]:
+    return {
+        "id": "D07ALICE",
+        "name": "",
+        "is_im": True,
+        "is_mpim": False,
+        "is_private": True,
+        "is_shared": False,
+        "is_ext_shared": False,
+    }
+
+
+def _mpim_channel() -> dict[str, Any]:
+    return {
+        "id": "G07MPIM",
+        "name": "mpim-alice-bob-sarah",
+        "is_im": False,
+        "is_mpim": True,
+        "is_private": True,
+        "is_shared": False,
+        "is_ext_shared": False,
+    }
+
+
+def test_slack_envelope_round_trip_public_channel() -> None:
+    raw = {
+        "ts": "1745601000.000100",
+        "user": "U07ALICE",
+        "text": "Following up on the Acme term sheet — pushing for next Tuesday close.",
+        "permalink": "https://northpoint.slack.com/archives/C07DEALS/p1745601000000100",
+    }
+    item = slack_message_to_envelope(raw, channel=_public_channel(), manifest=_slack_manifest())
+
+    assert item.source_role == ConnectorRole.CHAT
+    assert item.concrete_app == "slack"
+    assert item.external_object_type == "message"
+    assert item.external_id == "C07DEALS_1745601000.000100"
+    assert item.container_id == "C07DEALS"
+    assert item.url == "https://northpoint.slack.com/archives/C07DEALS/p1745601000000100"
+    assert item.target_plane == "firm"
+    assert item.target_scope == "firm-internal"  # default (no rule matches public channel)
+    assert "term sheet" in item.body
+    assert item.modified_at == datetime.fromtimestamp(1745601000.0001, tz=UTC)
+    assert item.visibility_metadata["slack_channel_id"] == "C07DEALS"
+    assert item.visibility_metadata["slack_is_im"] is False
+    assert item.visibility_metadata["slack_is_private"] is False
+    assert item.visibility_metadata["slack_thread_ts"] is None
+
+
+def test_slack_envelope_private_channel_maps_to_partner_only() -> None:
+    raw = {
+        "ts": "1745601000.000200",
+        "user": "U07PARTNER",
+        "text": "Carry split discussion.",
+    }
+    item = slack_message_to_envelope(raw, channel=_private_channel(), manifest=_slack_manifest())
+    assert item.target_scope == "partner-only"
+    assert item.target_plane == "firm"
+
+
+def test_slack_envelope_external_shared_channel_maps_to_external_shared() -> None:
+    raw = {
+        "ts": "1745601000.000300",
+        "user": "U07ALICE",
+        "text": "Welcome the Acme team to the shared channel.",
+    }
+    item = slack_message_to_envelope(raw, channel=_ext_shared_channel(), manifest=_slack_manifest())
+    assert item.target_scope == "external-shared"
+    assert item.target_plane == "firm"
+
+
+def test_slack_envelope_dm_overrides_plane_to_personal() -> None:
+    raw = {
+        "ts": "1745601000.000400",
+        "user": "U07ALICE",
+        "text": "Hey, can you take a look at the Acme deck?",
+    }
+    item = slack_message_to_envelope(raw, channel=_dm_channel(), manifest=_slack_manifest())
+    # Manifest binding says target_plane=firm, but is_im triggers helper override.
+    assert item.target_plane == "personal"
+    assert item.target_scope == "employee-private"
+
+
+def test_slack_envelope_mpim_overrides_plane_to_personal() -> None:
+    raw = {
+        "ts": "1745601000.000500",
+        "user": "U07ALICE",
+        "text": "Group DM about the deal.",
+    }
+    item = slack_message_to_envelope(raw, channel=_mpim_channel(), manifest=_slack_manifest())
+    assert item.target_plane == "personal"
+    assert item.target_scope == "employee-private"
+
+
+def test_slack_envelope_thread_reply_carries_thread_ts() -> None:
+    raw = {
+        "ts": "1745601100.000100",
+        "thread_ts": "1745601000.000100",
+        "user": "U07BOB",
+        "text": "Agreed — let's push for Tuesday.",
+    }
+    item = slack_message_to_envelope(raw, channel=_public_channel(), manifest=_slack_manifest())
+    assert item.visibility_metadata["slack_thread_ts"] == "1745601000.000100"
+
+
+def test_slack_envelope_thread_root_has_no_thread_ts() -> None:
+    """Slack returns thread_ts == ts for the root message; the helper drops that."""
+    raw = {
+        "ts": "1745601000.000100",
+        "thread_ts": "1745601000.000100",  # equal to ts → root message
+        "user": "U07ALICE",
+        "text": "Starting a thread.",
+    }
+    item = slack_message_to_envelope(raw, channel=_public_channel(), manifest=_slack_manifest())
+    assert item.visibility_metadata["slack_thread_ts"] is None
+
+
+def test_slack_envelope_missing_channel_raises() -> None:
+    raw = {"ts": "1745601000.000100", "text": "x"}
+    with pytest.raises(ValueError, match="non-empty channel dict"):
+        slack_message_to_envelope(raw, channel={}, manifest=_slack_manifest())
+
+
+def test_slack_envelope_missing_ts_raises() -> None:
+    raw = {"text": "x"}
+    with pytest.raises(ValueError, match="missing required string field"):
+        slack_message_to_envelope(raw, channel=_public_channel(), manifest=_slack_manifest())
+
+
+def test_slack_envelope_invalid_ts_raises() -> None:
+    raw = {"ts": "not-a-timestamp", "text": "x"}
+    with pytest.raises(ValueError, match="epoch.microseconds"):
+        slack_message_to_envelope(raw, channel=_public_channel(), manifest=_slack_manifest())
+
+
+def test_slack_envelope_rejects_wrong_app_binding() -> None:
+    manifest = SystemsManifest(
+        firm_id="x",
+        bindings={
+            ConnectorRole.CHAT: RoleBinding(
+                app="microsoft_teams",
+                target_plane="firm",
+                default_visibility="firm-internal",
+            ),
+        },
+    )
+    raw = {"ts": "1745601000.000100", "text": "x"}
+    with pytest.raises(ValueError, match="bound to app='microsoft_teams'"):
+        slack_message_to_envelope(raw, channel=_public_channel(), manifest=manifest)

@@ -27,6 +27,7 @@ from memory_mission.ingestion.systems_manifest import (
     SystemsManifest,
     map_visibility,
 )
+from memory_mission.memory.schema import Plane
 
 
 def outlook_message_to_envelope(
@@ -217,6 +218,100 @@ def granola_transcript_to_envelope(
         target_plane=binding.target_plane,
         title=str(raw.get("title", "")),
         body=str(raw.get("transcript", raw.get("body", ""))),
+        raw=dict(raw),
+    )
+
+
+def slack_message_to_envelope(
+    raw: dict[str, Any],
+    *,
+    channel: dict[str, Any],
+    manifest: SystemsManifest,
+) -> NormalizedSourceItem:
+    """Map a Slack message + channel-context payload to a ``NormalizedSourceItem``.
+
+    Atomic unit is a single message (mirrors Gmail). The caller passes
+    the ``channel`` metadata (from ``conversations.info`` or
+    ``conversations.list``) so the helper can compute channel-type
+    flags without re-fetching.
+
+    **Plane override:** Slack mixes planes within one binding — DMs
+    (``is_im``) and group DMs (``is_mpim``) are always
+    ``target_plane="personal"`` regardless of the manifest binding's
+    ``target_plane``; everything else uses the binding's plane (the
+    operator declares ``firm`` for the dominant non-DM case). The
+    override is structural — there is no manifest rule that can route
+    a DM to the firm plane. See ADR-0011.
+
+    Visibility surface:
+
+    - ``slack_channel_id`` / ``slack_channel_name`` — the channel
+      this message lives in.
+    - ``slack_is_im`` / ``slack_is_mpim`` — DM and group-DM flags.
+    - ``slack_is_private`` — private channel.
+    - ``slack_is_shared`` / ``slack_is_ext_shared`` — shared with
+      multiple workspaces / externally shared.
+    - ``slack_member_count`` — int when known.
+    - ``slack_thread_ts`` — present when the message is a reply.
+    - ``labels`` — empty by default.
+    """
+    binding = _binding_for(ConnectorRole.CHAT, expected_app="slack", manifest=manifest)
+    if not isinstance(channel, dict) or not channel:
+        raise ValueError("slack_message_to_envelope requires a non-empty channel dict")
+
+    channel_id = _require_str(channel, ("id", "channel_id"), source="slack")
+    channel_name = str(channel.get("name", "")) or channel_id
+    is_im = bool(channel.get("is_im"))
+    is_mpim = bool(channel.get("is_mpim"))
+    is_private = bool(channel.get("is_private"))
+    is_shared = bool(channel.get("is_shared"))
+    is_ext_shared = bool(channel.get("is_ext_shared"))
+
+    ts = _require_str(raw, ("ts", "message_ts"), source="slack")
+    thread_ts_raw = raw.get("thread_ts")
+    thread_ts: str | None = (
+        thread_ts_raw if isinstance(thread_ts_raw, str) and thread_ts_raw else None
+    )
+    # Slack's reply messages have thread_ts == ts when they're the root;
+    # only true replies have thread_ts != ts.
+    if thread_ts == ts:
+        thread_ts = None
+
+    visibility: dict[str, Any] = {
+        "labels": list(raw.get("labels", [])),
+        "slack_channel_id": channel_id,
+        "slack_channel_name": channel_name,
+        "slack_is_im": is_im,
+        "slack_is_mpim": is_mpim,
+        "slack_is_private": is_private,
+        "slack_is_shared": is_shared,
+        "slack_is_ext_shared": is_ext_shared,
+        "slack_member_count": int(channel["num_members"])
+        if isinstance(channel.get("num_members"), int)
+        else None,
+        "slack_thread_ts": thread_ts,
+    }
+    target_scope = map_visibility(visibility, role=ConnectorRole.CHAT, manifest=manifest)
+
+    # Plane override: DMs and group DMs are always personal.
+    target_plane: Plane = "personal" if (is_im or is_mpim) else binding.target_plane
+
+    text = str(raw.get("text", ""))
+    title = text[:80].splitlines()[0] if text else ts
+
+    return NormalizedSourceItem(
+        source_role=ConnectorRole.CHAT,
+        concrete_app="slack",
+        external_object_type="message",
+        external_id=f"{channel_id}_{ts}",
+        container_id=channel_id,
+        url=_optional_str(raw, ("permalink",)),
+        modified_at=_slack_ts_to_datetime(ts),
+        visibility_metadata=visibility,
+        target_scope=target_scope,
+        target_plane=target_plane,
+        title=title,
+        body=text,
         raw=dict(raw),
     )
 
@@ -572,6 +667,15 @@ def _parse_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _slack_ts_to_datetime(ts: str) -> datetime:
+    """Slack timestamps are 'epoch.microseconds' strings."""
+    try:
+        seconds = float(ts)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"slack ts must be 'epoch.microseconds' string; got {ts!r}") from exc
+    return datetime.fromtimestamp(seconds, tz=UTC)
+
+
 def _notion_parent_id(parent: dict[str, Any]) -> str | None:
     for key in ("workspace", "page_id", "database_id", "block_id"):
         value = parent.get(key)
@@ -906,4 +1010,5 @@ __all__ = [
     "notion_page_to_envelope",
     "onedrive_item_to_envelope",
     "outlook_message_to_envelope",
+    "slack_message_to_envelope",
 ]

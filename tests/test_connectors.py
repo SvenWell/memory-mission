@@ -21,6 +21,7 @@ from memory_mission.ingestion.connectors import (
     NOTION_ACTIONS,
     ONEDRIVE_ACTIONS,
     OUTLOOK_ACTIONS,
+    SLACK_ACTIONS,
     ComposioConnector,
     Connector,
     ConnectorAction,
@@ -36,6 +37,7 @@ from memory_mission.ingestion.connectors import (
     make_notion_connector,
     make_onedrive_connector,
     make_outlook_connector,
+    make_slack_connector,
 )
 from memory_mission.middleware import PIIRedactionMiddleware
 from memory_mission.observability import (
@@ -616,6 +618,50 @@ def test_notion_requires_client_for_invoke() -> None:
     conn = make_notion_connector()
     with pytest.raises(NotImplementedError, match="no client attached"):
         conn.invoke("get_page", {"page_id": "x"})
+
+
+# ---------- Slack factory ----------
+
+
+def test_slack_exposes_read_actions() -> None:
+    conn = make_slack_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "list_channels",
+        "get_channel",
+        "list_messages",
+        "get_replies",
+        "search_messages",
+        "list_users",
+        "get_user",
+    }
+    assert conn.name == "slack"
+
+
+def test_slack_actions_match_exported_constant() -> None:
+    assert make_slack_connector().list_actions() == list(SLACK_ACTIONS)
+
+
+def test_slack_preview_includes_user_channel_and_text() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "user": "U07ALICE",
+                "channel": "C07DEALS",
+                "text": "Following up on the Acme term sheet.",
+            }
+
+    conn = make_slack_connector(client=FakeClient())
+    result = conn.invoke("list_messages", {"channel": "C07DEALS"})
+    assert "U07ALICE" in result.preview
+    assert "C07DEALS" in result.preview
+    assert "Acme term sheet" in result.preview
+
+
+def test_slack_requires_client_for_invoke() -> None:
+    conn = make_slack_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_channels", {})
 
 
 # ---------- Harness invoke() ----------
