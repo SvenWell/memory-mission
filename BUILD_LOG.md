@@ -2293,3 +2293,77 @@ Dogfood real Gmail + Granola through MCP for two weeks, then review
 `personal_brain/working.py`, `personal_brain/lessons.py`, and
 `permissions/policy.py` for evidence-based cuts. ADR-0004 for
 identity channel extension is the natural next ADR.
+
+## P2 — Capability-based connector manifest + fail-closed visibility (2026-04-25)
+
+First half of the next-chapter sequence (P0–P9 in
+`/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md`).
+Closes the loop between the `NormalizedSourceItem` envelope (landed in
+P0 Track C) and the per-firm config that drives capability binding +
+fail-closed visibility mapping.
+
+### What landed
+
+- **`SystemsManifest` + visibility map** —
+  `src/memory_mission/ingestion/systems_manifest.py`. Pydantic
+  `SystemsManifest` / `RoleBinding` / `VisibilityRule`, YAML loader at
+  `load_systems_manifest(path)`, and the `map_visibility(metadata, *,
+  role, manifest) -> str` runtime primitive. Fail-closed by default;
+  `default_visibility=None` means no rule match → raise
+  `VisibilityMappingError`. Operators opt into a fallback explicitly.
+
+- **Per-app envelope helpers** —
+  `src/memory_mission/ingestion/envelopes.py`. Three pure functions
+  (`gmail_message_to_envelope`, `granola_transcript_to_envelope`,
+  `drive_file_to_envelope`) take a Composio-shape raw dict + manifest
+  and return a `NormalizedSourceItem`. Helpers refuse to run against a
+  manifest binding that names a different concrete app.
+
+- **`StagingWriter.write_envelope`** —
+  `src/memory_mission/ingestion/staging.py`. Higher-level write path
+  that takes a `NormalizedSourceItem`, validates plane + concrete-app
+  alignment with the writer's scope, and persists raw + markdown +
+  structural frontmatter (including `target_scope`, `source_role`,
+  `external_object_type`, `modified_at`) into the staging zone. The
+  pre-existing `write()` stays for ad-hoc / non-envelope writes.
+
+- **ADR-0007** — `docs/adr/0007-capability-based-connectors.md`
+  documents the role/manifest/envelope/visibility design + fail-closed
+  default + helper-vs-binding sanity check.
+
+### What's deliberately out of scope for P2
+
+- Calendar / Notion / Attio connectors and their envelope helpers —
+  they don't exist as connectors yet. P3 / P4 land them.
+- Skill markdown updates (`backfill-gmail/`, `backfill-granola/`) —
+  P3 reroutes them through the envelope helpers + `write_envelope`.
+- Live Composio credentials. Connectors stay credential-free; envelope
+  helpers test against fake raw dicts shaped like documented Composio
+  responses.
+
+### Verification
+
+- [x] `pytest` — 748/748 passed (+38 since the MemPalace hardening
+      pass: 19 manifest, 12 envelope, 7 staging-envelope)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 73 source files (+2)
+- [x] Manifest rejects non-mapping YAML, missing `firm_id`, unknown
+      role keys, unknown `target_plane`
+- [x] `VisibilityRule` requires at least one matcher
+- [x] `map_visibility` first-match-wins; fail-closed when no rule
+      matches and no default; uses operator-set default when present
+- [x] Each helper extracts the right id / title / body /
+      modified_at; preserves raw verbatim under `item.raw`
+- [x] Helpers raise `ValueError` when invoked against a manifest
+      binding that names a different concrete app
+- [x] `write_envelope` rejects plane and concrete-app mismatches;
+      writes `target_scope` + `source_role` + `external_object_type`
+      into staging frontmatter
+
+### Next
+
+P3 — personal-source ingestion. Wire Gmail + Granola backfill skills
+to invoke the envelope helpers + `write_envelope`, and rewire the
+personal substrate (`MemPalaceAdapter`) to consume the resulting
+`NormalizedSourceItem` shape end-to-end. Calendar connector +
+envelope helper land here.

@@ -28,7 +28,7 @@ cd memory-mission
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
-make check          # ruff + format + mypy --strict + 710 tests
+make check          # ruff + format + mypy --strict + 748 tests
 python -m memory_mission info
 ```
 
@@ -74,7 +74,7 @@ briefing = context.render()       # markdown for the host-agent LLM
 
 ## What shipped
 
-V1 complete + Step 18 MCP surface shipped + MemPalace personal substrate adopted. 18 build steps + six-move polish pass + a three-reviewer security-response pass (21 fixes across B1-B28). **710 tests passing**, `mypy --strict` clean on 71 source files. Step 18 security response merged to `main` at `35c73fb`.
+V1 complete + Step 18 MCP surface shipped + MemPalace personal substrate adopted + P2 capability-based connector manifest. 18 build steps + six-move polish pass + a three-reviewer security-response pass (21 fixes across B1-B28). **748 tests passing**, `mypy --strict` clean on 73 source files. Step 18 security response merged to `main` at `35c73fb`.
 
 | Layer | What you can do today |
 |---|---|
@@ -129,7 +129,8 @@ src/memory_mission/
 ├── observability/          # append-only JSONL audit, per-firm scoped
 ├── durable/                # checkpointed runs, resume-on-crash
 ├── middleware/             # LLM-call chain + PII redaction
-├── connectors/             # Composio harness + Gmail/Granola/Drive factories
+├── ingestion/              # connectors (Composio harness + Gmail/Granola/Drive),
+│                           # systems_manifest, envelopes, staging, mentions
 ├── memory/
 │   ├── pages.py            # compiled-truth + timeline format
 │   ├── schema.py           # MECE domains + plane paths
@@ -138,8 +139,7 @@ src/memory_mission/
 │   ├── tiers.py            # constitution / doctrine / policy / decision
 │   ├── search.py           # RRF + cosine + compiled-truth boost
 │   └── templates/          # dashboard.base
-├── ingestion/              # StagingWriter + MentionTracker
-├── personal_brain/         # working / episodic / semantic / preferences / lessons
+├── personal_brain/         # PersonalMemoryBackend Protocol + MemPalaceAdapter
 ├── extraction/             # 6-bucket ExtractedFact + ingest_facts
 ├── identity/               # IdentityResolver Protocol + LocalIdentityResolver
 ├── permissions/            # Policy + can_read / can_propose
@@ -149,7 +149,7 @@ src/memory_mission/
 └── mcp/                    # FastMCP server — 14 tools over stdio (Step 18)
 
 skills/                     # 7 shipped, markdown + YAML frontmatter
-tests/                      # 710 passing
+tests/                      # 748 passing
 docs/                       # VISION + ARCHITECTURE + ABSTRACTIONS + EVALS + AGENTS + adr/ + recipes/
 BUILD_LOG.md                # per-step record
 ```
@@ -180,16 +180,14 @@ pytest -k <pattern>  # run a subset
 
 See `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md` for the full plan. Summary:
 
-- **P0 — Freeze operating model + MemPalace adoption.** MemPalace is now the adopted personal-layer substrate behind `PersonalMemoryBackend` (ADR-0004).
-- **P1 — Capability-based connector manifest + normalized source-item envelope.** Logical roles (`email_system`, `calendar_system`, `transcript_system`, `document_system`, `workspace_system`) per-firm bound to concrete apps (Notion, Monday, Salesforce, Attio, Affinity, etc.) via `firm/systems.yaml`.
-- **P2 — Expand connector pack: calendar + Notion + Attio.** Venture-first.
-- **P3 — Typed outbound mutations for sync-back.** Approved facts only. CRM and workspace systems become first-class operational surfaces without becoming the source of truth.
-- **P4 — Evidence-pack MCP tool.** Grounded retrieval (Spanner-inspired pattern, SQLite backend).
-- **P5 — Firm-plane auto-wiring typed edges.** GBrain pattern, zero LLM calls at promote time.
-- **P6 — Venture reference onboarding pack.** Overlay: vocabulary, prompts, permissions, workflows. PE + wealth as thinner overlays on the same core.
-- **P7 — Benchmark publication.** LongMemEval (inherited if P0 accepts MemPalace) + firm-coherence eval (ours, unique to our wedge).
-- **P8 — Optional spikes.** Graphify multimodal bootstrap (non-blocking).
-- **P9 — Dogfood.** Continuous from P1 onwards.
+- **P0 — DONE.** MemPalace is the adopted personal-layer substrate behind `PersonalMemoryBackend` (ADR-0004).
+- **P2 — DONE.** Capability-based connector manifest + fail-closed visibility mapping. `firm/systems.yaml` binds logical roles (`email`, `calendar`, `transcript`, `document`, `workspace`) to concrete apps; `NormalizedSourceItem` envelope + per-app helpers + `StagingWriter.write_envelope` are the single staging entry path (ADR-0007).
+- **P3 — Personal-source ingestion.** Wire Gmail + Granola + Calendar through the envelope helpers into the personal substrate. Pilot-task acceptance scenarios run against real-shape data.
+- **P4 — Firm-source ingestion + bridge.** Notion / Attio / Drive as `document_system` / `workspace_system`. Promotion review preserves source-side scope.
+- **P5 — Typed sync-back for approved facts.** Reviewed-mode default; per-app `allowed_mutation_kinds` (ADR-0008 when landed).
+- **P6 — Evidence-pack retrieval + firm auto-wiring at promote time** (ADRs 0006 + 0009).
+- **P7 — Venture reference overlay.** PE + wealth as thinner overlays on the same core.
+- **P8 — Pilot rehearsal + benchmarks.** Employee-memory-on-firm-tasks primary; LongMemEval secondary.
 
 ## Post-V1 roadmap (parked)
 

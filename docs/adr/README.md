@@ -58,11 +58,11 @@ proposed → active → superseded
 | [0003](0003-mcp-as-agent-surface.md) | MCP as the multi-agent access surface | active |
 | [0004](0004-personal-layer-substrate-decision.md) | Personal-layer substrate — MemPalace adopted via adapter | active |
 | [0005](0005-sqlite-per-firm.md) | SQLite per firm for all persistent state | active |
+| [0007](0007-capability-based-connectors.md) | Capability-based connector roles + fail-closed visibility mapping | active |
 
 Pending ADRs — will be written as the corresponding phase lands (see `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md`):
 
 - `0006` — Grounded evidence pack pattern (Spanner-inspired interface, SQLite backend) — lands with P4
-- `0007` — Capability-based connector roles + normalized source-item envelope — lands with P1
 - `0008` — Typed outbound mutations for approved-fact sync-back — lands with P3
 - `0009` — Firm-plane auto-wiring typed edges at promote time (GBrain pattern) — lands with P5
 - `0010` — Graphify as optional multimodal ingestion adapter — only if P8 spike succeeds
