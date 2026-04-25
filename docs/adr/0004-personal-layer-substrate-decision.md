@@ -1,84 +1,92 @@
 ---
 type: ADR
 id: "0004"
-title: "Personal-layer substrate — MemPalace, custom, or defer"
+title: "Personal-layer substrate — MemPalace, custom, binary decision at end of P1"
 status: proposed
-date: 2026-04-24
+date: 2026-04-25
 ---
 
-> **Status: proposed.** Decision gate is a bounded 1-week spike on `SvenWell/mempalace-spike` ending 2026-04-30 (or earlier if acceptance gate hits sooner). ADR moves to `active` once the outcome is recorded.
+> **Status: proposed.** Decision gate is the bounded P1 spike on `SvenWell/mempalace-spike`. ADR moves to `active` once the outcome is recorded. **Defer-again is forbidden** unless a single named blocker with a short follow-up path is documented at decision time.
 
-## Context
+## Context (revised 2026-04-25)
 
-Memory Mission's **personal plane** is per-employee private memory. Today it's custom-built: `src/memory_mission/personal_brain/` holds four layers (`working.py` / `episodic.py` / `semantic.py` / `preferences.py` / `lessons.py`), each backed by markdown pages + the shared SQLite KG. Current test count: 707 passing.
+The personal-plane substrate has been **promoted from "non-blocking optional spike" to "pilot-critical infrastructure."** Reason: every pilot firm needs each employee's agent to carry private memory across email / calendar / transcript interactions from day one. Without that, the agent has no context to ground its drafting / synthesis / pre-meeting briefs in. Personal memory is critical infrastructure, even though it is not the moat (the moat remains the governed firm bridge).
 
-The competitive landscape review (2026-04-24) mapped nine open-source memory systems. Relevant to the personal layer:
+Today the personal plane is partly custom-built: `src/memory_mission/personal_brain/` holds four layers (`working.py` / `episodic.py` / `lessons.py` / `preferences.py`) — but **the call-site inventory (P0-B2) found these have zero production callers**. The personal plane in production today flows through plane-scoped calls on the shared `BrainEngine` + `KnowledgeGraph` with `source_closet="personal/<employee>"` tagging. `personal_brain/` is dead-code-with-tests as of 2026-04-25.
 
-- **MemPalace** (`MemPalace/mempalace`, **49,332 stars**, Python / SQLite) — verbatim storage + hybrid retrieval, 29 MCP tools, Claude Code auto-save hooks, **96.6% R@5 on LongMemEval raw (zero LLM)**. Our KG was ported from MemPalace (BUILD_LOG Step 6b). Same language, same storage, same mental model as our existing stack.
-- **GBrain** (`garrytan/gbrain`, 11k stars, TypeScript) — 28 skills, auto-wiring typed edges. Wrong language for adoption; pattern worth stealing separately.
-- **Rowboat** / **Supermemory** — desktop / SaaS products. Wrong shape for substrate adoption.
+Per P0-C of the revised plan, every personal substrate (whether MemPalace, our own, or any future swap) must implement an explicit Python Protocol — `PersonalMemoryBackend` at `src/memory_mission/personal_brain/backend.py` — with these methods:
 
-The question: should the personal plane become a MemPalace instance per employee, or stay custom?
+- `ingest(NormalizedSourceItem, *, employee_id) -> IngestResult`
+- `query(question, *, employee_id, limit) -> list[PersonalHit]`
+- `citations(hit_id, *, employee_id) -> list[Citation]`
+- `resolve_entity(identifiers, *, employee_id) -> EntityRef`
+- `working_context(*, employee_id, task) -> WorkingContext`
+- `candidate_facts(*, employee_id, since) -> Iterable[CandidateFact]`
+
+Acceptance scenarios (in `tests/fixtures/pilot_tasks/scenarios.py`) define the four pilot-task shapes the substrate must satisfy:
+
+1. Company / contact recency summary
+2. Follow-up commitments
+3. Last-meeting deltas
+4. Pre-interaction private context
+
+The competitive landscape review identified MemPalace (49,332 stars, Python / SQLite, 96.6% R@5 on LongMemEval raw) as the leading personal-memory substrate. **Our KG was already ported from MemPalace** (BUILD_LOG Step 6b) — same language, same storage, same mental model. P1 tests whether MemPalace fits cleanly behind the `PersonalMemoryBackend` Protocol, and whether adopting it earns its keep.
 
 ## Options
 
-- **Option A — Adopt MemPalace.** Each employee's personal plane becomes `firm/personal/<employee_id>/mempalace.db` + MemPalace's hooks + MCP tools. Our personal-plane code (`personal_brain/working.py`, `lessons.py`, personal-plane `BrainEngine` / KG wrapping) is deleted or thinned. We inherit MemPalace's 96.6% R@5, community maturity, and continued upstream improvements.
+- **Option A — Accept MemPalace.** Each employee's personal plane becomes `firm/personal/<employee_id>/mempalace.db` + MemPalace's hooks + MCP tools. The `MemPalaceAdapter` implements `PersonalMemoryBackend`. Dead-code `personal_brain/working.py`/`lessons.py` removed. We inherit MemPalace's 96.6% R@5 retrieval, community maturity, and upstream improvements.
 
-- **Option B — Stay custom.** Keep writing our own personal layer. Accept the benchmark gap vs MemPalace. Apply selective pattern-steals (GBrain's auto-wiring, MemPalace's hook shape) without pulling in their stacks.
+- **Option B — Reject MemPalace and harden current personal layer.** Build a minimal `PersonalMemoryBackend` impl on top of the existing `BrainEngine` + `KnowledgeGraph` with plane scoping. Dead-code `personal_brain/` layers removed (no production callers, no replacement needed). Accept the LongMemEval benchmark gap; firm-coherence eval (which we own) becomes the credibility floor instead.
 
-- **Option C — Defer.** Ship the capability-based connector + sync-back + venture-pilot chapter without touching the personal layer. Revisit after pilot feedback tells us whether personal-plane friction is real.
+**Option C — Defer again — is forbidden** unless P1 surfaces a single named blocker with a documented short follow-up path. "Need more dogfood" does not qualify; the synthetic pilot-task harness IS the dogfood per the revised plan.
 
 ## Decision
 
-**DEFERRED — binary at end of 2026-04-30 spike.**
+**Pending** — binary at end of P1 spike.
 
-A bounded spike on branch `SvenWell/mempalace-spike` will answer the question with evidence, not speculation. The spike decides A vs B vs C based on a strict acceptance gate.
+### Acceptance gate (Option A passes only if all five hold)
 
-### Spike acceptance gate (all three must hold to pick Option A)
+1. **Protocol coverage.** `MemPalaceAdapter` implements every method on `PersonalMemoryBackend` without `# TODO: MemPalace can't do X` markers.
 
-1. **Coverage.** `MemPalaceAdapter` must cover every current personal-plane call site without `# TODO: MemPalace can't do X` markers. Inventory lives in the spike's Phase 0-B2 notes. Any gap = reject Option A.
+2. **Acceptance scenarios.** All four pilot-task scenarios in `tests/fixtures/pilot_tasks/scenarios.py` pass when the contract test runs against `MemPalaceAdapter` (parametrized parametrization in `tests/test_personal_backend_contract.py`).
 
-2. **Simplification.** Adopting MemPalace must delete ≥500 LOC from `personal_brain/` without losing behavior that existing tests assert. The point of adoption is to stop rebuilding; if the adapter surface ends up bigger than what we're replacing, we're not gaining anything.
+3. **Employee-private isolation.** The multi-employee fixture asserts that data ingested under `alice@vc.example` is never returned by queries / citations / candidate_facts under `bob@vc.example`. Structural enforcement, not convention.
 
-3. **Flow preservation.** The extraction → staging → proposal → review → promotion pipeline must stay identical. MemPalace is the personal storage substrate; it is NOT allowed to change how facts become proposals or how the review gate works. Governance invariants are non-negotiable.
+4. **Bridge integrity.** `candidate_facts()` produces `CandidateFact.payload` shapes that the existing extraction → proposal pipeline consumes without converters. Specifically: `payload["kind"]` is one of `identity` / `relationship` / `preference` / `event` / `update` / `open_question`.
 
-### Spike outputs
+5. **Net complexity reduction or wash.** Adopting MemPalace + adapter must NOT make the system harder to reason about. Specifically: the adapter file size + any helper code added must be ≤ the LOC removed from `personal_brain/` + any redundant in-house personal-plane wrapping in the engine. If we end up with more code, MemPalace isn't earning its keep.
 
-- `src/memory_mission/personal_brain/mempalace_adapter.py` (on spike branch)
-- `src/memory_mission/personal_brain/call_site_inventory.md` (scratch, not committed long-term)
-- LOC-delta count: `personal_brain/` LOC before − LOC after adapter integration
-- Test run: all 707 tests pass with personal-plane routes delegated
+Thin compatibility shims for working-state are acceptable. A perfect 1:1 replacement of every prior helper is NOT required.
 
 ### Decision outcomes
 
-- **Accept Option A** — this ADR moves to `active`, status flips from "proposed" to "adopted". Work rolls into P1+ with MemPalace as the personal substrate. Follow-up ADR records version pinning, upgrade policy, and adapter boundary.
-- **Reject Option A → fall to Option B** — this ADR moves to `active`, status `rejected-in-favor-of-custom`. Benchmark gap documented. Personal-layer work is parked; pattern-steals (GBrain auto-wiring) land separately on the firm plane.
-- **Reject Option A → fall to Option C** — only valid if the spike reveals ambiguity that can't be resolved in 1 week. ADR moves to `deferred`, lists what we'd need to know to decide, and the question is revisited after pilot feedback.
+- **Accept Option A** — ADR moves to `active`, status `adopted`. Work rolls into P3 with MemPalace as the personal substrate. Spike branch merged. Follow-up ADR records version pinning + upgrade policy + adapter boundary.
 
-Neither outcome blocks P1+ (capability-based connectors, sync-back, evidence pack, venture pilot). Personal-layer substrate is orthogonal to the go-to-market work.
+- **Reject Option A → Option B** — ADR moves to `active`, status `rejected-in-favor-of-custom`. Spike branch discarded. Build the minimal `PersonalMemoryBackend` impl on existing primitives. `personal_brain/` dead code still gets cleaned (it's unwired regardless of substrate choice). LongMemEval benchmark gap accepted; document why our priority is firm-coherence eval instead.
 
-## Rationale for running the spike now (rather than later)
+- **Forbidden: Option C — defer again** — only valid if a single named blocker is documented at decision time with a short follow-up path. Otherwise the decision is forced; defaulting to Option B is preferable to deferral.
 
-1. **MemPalace is our direct lineage.** Our KG was ported from theirs. Rebuilding similar code when they keep shipping improvements is waste we can measure.
+## Rationale for the binary gate
 
-2. **The benchmark gap is real and visible.** MemPalace publishes 96.6% R@5; we publish nothing. A pilot customer will compare, and we need either a number to cite or a principled reason the comparison is invalid.
+1. **Personal substrate is pilot-critical.** Without an answer, the personal-source ingestion in P3 (email/calendar/transcripts) has no destination — and P3 is the demo milestone where employees actually start using the agent. Punting blocks the most visible pilot deliverable.
 
-3. **A 1-week spike is cheap insurance.** If Option A works, we delete 500+ LOC and inherit a benchmark. If it fails, we've learned precisely why and we stay custom with conviction.
+2. **Defer-again has compounding cost.** Every post-spike phase that ships new personal-plane code becomes adoption work to unwind. The acceptance gate exists to FORCE the answer, not delay it.
 
-4. **Deferral has a cost.** Every post-spike phase ships new personal-plane code that adoption would have to unwind. Resolving the question now prevents "adoption would have been easy two months ago" regret.
+3. **The synthetic pilot-task harness is the validation.** P0-C ships four acceptance scenarios in `tests/fixtures/pilot_tasks/`. These are venture-shaped synthetic corpora — small, realistic, reproducible. We're not waiting for "real dogfood data" because Sven explicitly is not personally dogfooding (revised-plan assumption).
 
-## Consequences — pending
+4. **Both outcomes are reasonable.** Accept gives us 49k-star credibility + 96.6% R@5; Reject gives us full ownership and a thinner stack. The wrong move is to defer and ship around the question.
 
-Filled in at spike end:
+## Consequences — pending (filled in at decision time)
 
-- [ ] Final decision: ___ (A / B / C)
-- [ ] LOC delta from `personal_brain/`: ___
-- [ ] Test-suite result: ___ (all 707 / fewer / with skips)
-- [ ] New deps added: ___
+- [ ] Final decision: ___ (A / B / blocker-deferred)
+- [ ] All five acceptance gate items: ___ (pass/fail count)
+- [ ] LOC delta — `personal_brain/` removed: ___; adapter / shim code added: ___; net: ___
+- [ ] Test-suite result: ___ (full count / contract count / acceptance scenarios passing)
+- [ ] New deps added: ___ (`mempalace>=3.3,<4.0` if A; nothing new if B)
 - [ ] Follow-up ADRs triggered: ___
 
 ## Related decisions
 
-- ADR-0002 — Two-plane split (personal vs firm). Personal layer is the scope of this decision; firm layer is out of scope.
-- ADR-0005 — SQLite per firm. MemPalace is also SQLite-backed, so Option A preserves this invariant.
-- The firm plane stays ours regardless — nothing in the competitive landscape has our governance shape.
+- ADR-0002 — Two-plane split (personal vs firm). Personal-substrate decision is scoped to the personal plane; firm plane stays ours regardless of outcome.
+- ADR-0005 — SQLite per firm. MemPalace is also SQLite-backed, so Option A preserves the invariant. Option B uses our existing SQLite KG.
+- ADR-0007 (pending P2) — Capability-based connector roles. The connector layer feeds either substrate via the same `NormalizedSourceItem` envelope; substrate decision is independent of connector work.
