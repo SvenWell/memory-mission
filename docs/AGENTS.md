@@ -10,7 +10,7 @@ Why canonical lives in `docs/` rather than repo root: the repo-root `AGENTS.md` 
 
 **What this is.** Memory Mission is a governed context engine for agents — Python infrastructure that turns a firm's scattered knowledge (email, meetings, memos, CRM) into a structured, auditable memory layer that AI agents can read and write safely. Multi-user, multi-plane, provenance-mandatory. Start with `docs/VISION.md` for the full pitch.
 
-**Shipped state.** V1 complete as of commit `a88f09a`. 17 build steps + 6 polish moves. 643 tests, mypy strict clean on 66 source files. Branch `SvenWell/office-hours` is ahead of `main` by 38 commits.
+**Shipped state.** V1 + Step 18 MCP surface + full 21-fix security-response pass + MemPalace personal substrate + P2 capability-based connector manifest. Step 18 security response merged to `main` at `35c73fb`. 18 build steps + 6 polish moves + security response. 748 tests passing, mypy strict clean on 73 source files. Next chapter is P3 (personal-source ingestion) per `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md`.
 
 **What you're here to do** (in priority order):
 1. If the user invokes a skill, invoke the Skill tool FIRST — don't answer directly. See "Skill routing" below.
@@ -37,10 +37,11 @@ memory-mission/
 │   ├── observability/        ← append-only JSONL audit trail (Step 2)
 │   ├── durable/              ← resume-on-crash checkpointed execution (Step 3)
 │   ├── middleware/           ← PII redaction + frozen ModelCall (Step 4)
-│   ├── connectors/           ← Composio / Gmail / Granola / Drive harness (Step 5)
 │   ├── memory/               ← Pages + KG + tiers + hybrid search (Steps 6a-c, 13, 15, 16.5)
-│   ├── ingestion/            ← StagingWriter + MentionTracker (Step 7)
-│   ├── personal_brain/       ← working / episodic / semantic / preferences / lessons (Step 12)
+│   ├── ingestion/            ← connectors/ (Composio + Gmail/Granola/Drive),
+│   │                            systems_manifest, envelopes, staging,
+│   │                            mentions (Steps 5+7, P2 ADR-0007)
+│   ├── personal_brain/       ← PersonalMemoryBackend Protocol + MemPalaceAdapter (P0+P1, ADR-0004)
 │   ├── extraction/           ← 6-bucket ExtractedFact schema + ingest (Step 9, 14c)
 │   ├── identity/             ← stable Person/Org IDs, resolver Protocol (Step 14)
 │   ├── permissions/          ← Policy + can_read / can_propose (Step 8)
@@ -59,7 +60,7 @@ memory-mission/
 │   ├── meeting-prep/         ← distilled context for workflow agents
 │   └── _index.md             ← human-readable skill registry
 │
-├── tests/                    ← 680 tests, pytest, mypy strict
+├── tests/                    ← 748 tests, pytest, mypy strict
 ├── BUILD_LOG.md              ← per-step history, append-only
 ├── CLAUDE.md                 ← one-line @docs/AGENTS.md shim
 ├── README.md                 ← public entry point

@@ -242,6 +242,46 @@ Six targeted additions drawn from comparative reviews of Tolaria, claude-obsidia
 
 ---
 
+## Step 18 security-response pass (post-MCP)
+
+Three independent reviewers ran adversarial / security / API-contract / Kieran-Python reviews on the Step 18 diff. Twenty-one findings (B1-B28) landed in six atomic commits, all on `main` at `35c73fb`. Headline fixes:
+
+- **Atomic `_apply_facts`.** Pre-flight `_scope_scan` + `_coherence_scan` catch scope / coherence conflicts before any write. `_add_or_corroborate` idempotent by `source_file`, so retries after a failed `store.save` don't double-corroborate.
+- **Fail-closed when `policy=None`.** `_mcp_viewer_scopes` returns `frozenset({"public"})` instead of `None`. `engine._viewer_can_read` requires firm-plane pages to be public when viewer is set but policy is absent. Accidental `protocols/permissions.md` deletion no longer re-exposes scoped data.
+- **`sql_query_readonly` removed from MCP.** MCP scope is orthogonal to Policy scope; raw SQL bypassed `viewer_scopes`. Kept as Python API only. `KnowledgeGraph.sql_query` hardened with `PRAGMA query_only = ON` + `ATTACH` / `DETACH` / `PRAGMA` keyword rejection.
+- **UpdateFact scope-downgrade blocked.** `_scope_scan` also checks `supersedes_object` scope — invalidate + re-add pattern can no longer silently downgrade.
+- **`merge_entities` refuses scope-colocating rewrites.** Pre-check simulates the rewrite; raises if scopes would collide on `(subject, predicate, object)`.
+- **Wiki bootstrap symlink + employee_id validation.** `resolve()` + `is_relative_to` check; `validate_employee_id` on personal-plane paths.
+- **WAL + busy_timeout on all firm SQLite stores.** One MCP process per employee means multiple writers against one DB file.
+- **YAML manifest duplicate-key rejection.** Custom `_NoDupSafeLoader` stops silent "last entry wins" on edit-merge mistakes.
+- **`MAX_FACTS_PER_PROPOSAL = 100`.** DoS cap + rubber-stamp mitigation.
+- **Generic `AuthError` messages.** Structured `employee_id` + `required_scope` on the exception; caller sees `"insufficient scope"` / `"not authorized"`. Prevents scope-taxonomy enumeration.
+- **Typed MCP signatures.** `Direction` / `ProposalStatus` Literal types directly in `@mcp.tool()` registrations — dropped `# type: ignore[arg-type]`.
+- **NFKC normalization on `employee_id`.** Manifest + runtime both reject non-canonical Unicode; blocks homoglyph / fullwidth smuggling.
+- **Typed `parse_facts` adapter.** `TypeAdapter(ExtractedFact).validate_python` replaces the fabricated ExtractionReport pattern.
+- **Structured bootstrap logging.** `_bootstrap_engine_from_wiki` emits `structlog` warnings on every skipped file with a `reason` field.
+- **Server version in name.** `memory-mission/v1` so future v2 can coexist.
+- **`compile_agent_context` / `render_agent_context` split.** No more union-return tool.
+
+See BUILD_LOG commits `7f01c66 d50913d 889be9e b9e6505 fb85446 33d50f3` for detail.
+
+---
+
+## Next chapter (P1+) — forward pointers
+
+The plan lives at `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md`. Architectural touchpoints:
+
+- **Capability-based connector roles.** New `src/memory_mission/ingestion/roles.py` introduces `ConnectorRole` (`EMAIL` / `CALENDAR` / `TRANSCRIPT` / `DOCUMENT` / `WORKSPACE`). Per-firm `firm/systems.yaml` binds roles to concrete apps (Notion, Monday, Salesforce, Attio, Affinity, ...). Every connector normalizes to a single `NormalizedSourceItem` envelope before staging. Same app can fulfil multiple roles. ADR-0007 when landed.
+- **Typed sync-back.** New `src/memory_mission/sync_back/` for outbound mutations on approved facts only (`FieldUpdate`, `StatusChange`, `NoteAppend`, `TaskCreate`, `StructuredSummaryPublish`, `OwnerAssignment`). Idempotent via `(proposal_id, external_id, mutation_kind)`. MCP tool `sync_back_mutation` at REVIEW scope. ADR-0008 when landed.
+- **Evidence-pack MCP tool.** `get_evidence_pack(question, plane, tier_floor, limit)` returns `{triples, citations, confidence_aggregate, summary}` without generating prose. Composes over existing `kg.query_*` + hybrid search. Host LLM does prose from the pack. Spanner-inspired pattern, SQLite backend. ADR-0006 when landed.
+- **Firm-plane auto-wiring.** `src/memory_mission/promotion/autowire.py` extracts typed entity references from `support_quote` via regex + predicate vocab at `_apply_facts` time. Adds typed edges (`works_at`, `invested_in`, `advises`, `founded`) with zero LLM calls. ADR-0009 when landed.
+- **Venture reference overlay.** `overlays/venture/*` — manifest template, extraction-prompt tuning, permission presets, constitution seed. PE + wealth become overlays on the same core.
+- **Personal-layer substrate.** MemPalace is adopted behind `PersonalMemoryBackend`; every employee gets an isolated palace under `personal/<employee_id>/mempalace/`. ADR-0004 records the decision.
+- **Multimodal spike (optional).** Graphify as optional `pip install graphifyy` dep. `ingest-firm-corpus` skill on onboarding to seed firm KG from PDFs / decks / videos. Must still route through proposal review — cannot bypass governance.
+- **Benchmark publication.** `benchmarks/longmemeval.py` (inherits from MemPalace if adopted) + `benchmarks/firm_coherence.py` (ours, unique). Reproducible scripts + dated results under `benchmarks/RESULTS.md`.
+
+---
+
 ## Runtime composition
 
 A typical end-to-end flow composes like this:
@@ -291,17 +331,19 @@ Every layer logs to the same observability scope; every write to memory carries 
 | Models | Pydantic v2 | Typed, frozen, JSON round-trippable |
 | Validation | mypy --strict | On every source file |
 | Lint / format | ruff + ruff format | Fast, canonical |
-| Tests | pytest | 602 tests, every public surface |
+| Tests | pytest | 748 tests, every public surface |
 | Runtime | Hermes Agent (primary), Ironclaw / OpenClaw (others) | Skills are markdown; any host that reads frontmatter can load them |
 
 ---
 
 ## Non-goals
 
-- **Multi-firm SaaS.** V1 is per-firm-instance. Shared-SaaS with RLS is deferred until firm count justifies the infra complexity.
+- **Multi-firm SaaS.** V1 and the venture pilot are per-firm-instance. SQLite per firm is now explicit policy (ADR-0005), not a pre-pilot stopgap. Hosted DB is re-evaluated only when a real customer-ask forces the question.
 - **LLM runtime.** Host agent owns it. We ship prompts and schemas.
 - **UI.** Vault is Obsidian-compatible; review surface is the host agent's chat. A dedicated web UI is a later layer.
 - **Automatic conflict resolution.** Coherence warnings are advisory or blocking — never auto-resolving. The reviewer decides.
+- **Vendor-specific product.** Concrete apps (Notion, Monday, Salesforce, Attio, Affinity, ...) are interchangeable connector bindings via `firm/systems.yaml`. Never hardcoded.
+- **Consumer / personal-memory product.** Tolaria, MemPalace, Rowboat, Supermemory serve that market. Memory Mission is the governed firm-memory substrate; personal-layer optimization is a substrate decision (ADR-0004 pending), not our product identity.
 
 ---
 

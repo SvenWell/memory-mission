@@ -28,7 +28,7 @@ cd memory-mission
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
-make check          # ruff + format + mypy --strict + 643 tests
+make check          # ruff + format + mypy --strict + 748 tests
 python -m memory_mission info
 ```
 
@@ -74,7 +74,7 @@ briefing = context.render()       # markdown for the host-agent LLM
 
 ## What shipped
 
-V1 complete. 17 build steps plus a six-move polish pass. **643 tests passing**, `mypy --strict` clean on 66 source files.
+V1 complete + Step 18 MCP surface shipped + MemPalace personal substrate adopted + P2 capability-based connector manifest. 18 build steps + six-move polish pass + a three-reviewer security-response pass (21 fixes across B1-B28). **748 tests passing**, `mypy --strict` clean on 73 source files. Step 18 security response merged to `main` at `35c73fb`.
 
 | Layer | What you can do today |
 |---|---|
@@ -87,6 +87,8 @@ V1 complete. 17 build steps plus a six-move polish pass. **643 tests passing**, 
 | **Promotion** | `Proposal` + `ProposalStore`; `create_proposal` / `promote` / `reject` / `reopen` with required rationale; coherence check emits structured warnings; opt-in constitutional mode blocks on contradictions |
 | **Federated** | Cross-employee pattern detector with distinct-source-file independence check; stages firm-plane proposals from N≥3 employees' personal planes |
 | **Synthesis** | `compile_agent_context(role, task, attendees, ...)` returns a structured `AgentContext` package; Tolaria Neighborhood-mode shape; Obsidian `[!contradiction]` callouts on rendered pages |
+| **MCP surface** | FastMCP server (`memory-mission/v1`, 14 tools: 8 read + 6 write). One process per employee. Per-firm `mcp_clients.yaml` manifest with NFKC + dup-key + symlink rejection. Every mutating tool opens an `observability_scope` — audit trail coverage complete over MCP, not just over Python API |
+| **Scope enforcement** | Fail-closed when no policy configured. `viewer_scopes` filter on KG triples. `can_propose` no-escalation on `create_proposal`. Scope column on every triple; pre-flight scope scan in `_apply_facts` so scope mismatches never leave partial KG writes. WAL + busy_timeout on all per-firm SQLite DBs |
 | **Skills** | Seven shipped: `backfill-gmail`, `backfill-granola`, `backfill-firm-artefacts`, `extract-from-staging`, `review-proposals`, `detect-firm-candidates`, `meeting-prep` |
 
 Full per-step chronology in [`BUILD_LOG.md`](BUILD_LOG.md).
@@ -127,7 +129,8 @@ src/memory_mission/
 ├── observability/          # append-only JSONL audit, per-firm scoped
 ├── durable/                # checkpointed runs, resume-on-crash
 ├── middleware/             # LLM-call chain + PII redaction
-├── connectors/             # Composio harness + Gmail/Granola/Drive factories
+├── ingestion/              # connectors (Composio harness + Gmail/Granola/Drive),
+│                           # systems_manifest, envelopes, staging, mentions
 ├── memory/
 │   ├── pages.py            # compiled-truth + timeline format
 │   ├── schema.py           # MECE domains + plane paths
@@ -136,17 +139,17 @@ src/memory_mission/
 │   ├── tiers.py            # constitution / doctrine / policy / decision
 │   ├── search.py           # RRF + cosine + compiled-truth boost
 │   └── templates/          # dashboard.base
-├── ingestion/              # StagingWriter + MentionTracker
-├── personal_brain/         # working / episodic / semantic / preferences / lessons
+├── personal_brain/         # PersonalMemoryBackend Protocol + MemPalaceAdapter
 ├── extraction/             # 6-bucket ExtractedFact + ingest_facts
 ├── identity/               # IdentityResolver Protocol + LocalIdentityResolver
 ├── permissions/            # Policy + can_read / can_propose
 ├── promotion/              # Proposal + PR-model review gate
 ├── federated/              # cross-employee pattern detector
-└── synthesis/              # compile_agent_context + AgentContext
+├── synthesis/              # compile_agent_context + AgentContext
+└── mcp/                    # FastMCP server — 14 tools over stdio (Step 18)
 
 skills/                     # 7 shipped, markdown + YAML frontmatter
-tests/                      # 643 passing
+tests/                      # 748 passing
 docs/                       # VISION + ARCHITECTURE + ABSTRACTIONS + EVALS + AGENTS + adr/ + recipes/
 BUILD_LOG.md                # per-step record
 ```
@@ -159,11 +162,11 @@ Configuration is environment-driven via `MM_*` vars (see [`src/memory_mission/co
 |---|---|---|
 | `MM_WIKI_ROOT` | `./wiki` | Root for firm content (curated pages + staging) |
 | `MM_OBSERVABILITY_ROOT` | `./.observability` | Append-only audit log root |
-| `MM_DATABASE_URL` | (empty) | Postgres URL when we move off in-memory |
+| `MM_DATABASE_URL` | (empty) | Unused pre-pilot — SQLite-per-firm is the default (see ADR-0005). Placeholder for a future hosted option if a pilot demands it |
 | `MM_LLM_PROVIDER` | `anthropic` | `anthropic` / `openai` / `gemini` (the host agent uses this; we don't import the SDK) |
 | `MM_LLM_MODEL` | `claude-sonnet-4-6` | Default model identifier |
 
-Per-firm isolation is filesystem-based today: each firm gets its own subdirectory + its own SQLite files (KG, identity, proposals, mentions, durable). Multi-tenant RLS lands post-V1 when firm count justifies it.
+Per-firm isolation is filesystem-based: each firm gets its own subdirectory + its own SQLite files (KG, identity, proposals, mentions, durable). WAL + `busy_timeout=5000` on all stores so multiple MCP processes per employee coexist safely. No hosted DB pre-pilot (ADR-0005).
 
 Day-to-day:
 
@@ -173,18 +176,32 @@ make lint-fix        # auto-apply ruff fixes
 pytest -k <pattern>  # run a subset
 ```
 
-## Post-V1 roadmap
+## Next chapter — venture-first pilot
 
-Deferred items (see `project_post_v1_roadmap.md` in memory or the plan file at `virtual-petting-tarjan.md`):
+See `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md` for the full plan. Summary:
 
-- **Step 18:** Legislative amendment cycle (batched promotions triggered by evidence pressure).
-- **Step 19:** Constitution bootstrap skill (cold-start firm truth from existing strategy docs).
-- **Step 20:** Relationship-strength view + Graph One adapter (needs real interaction volume).
+- **P0 — DONE.** MemPalace is the adopted personal-layer substrate behind `PersonalMemoryBackend` (ADR-0004).
+- **P2 — DONE.** Capability-based connector manifest + fail-closed visibility mapping. `firm/systems.yaml` binds logical roles (`email`, `calendar`, `transcript`, `document`, `workspace`) to concrete apps; `NormalizedSourceItem` envelope + per-app helpers + `StagingWriter.write_envelope` are the single staging entry path (ADR-0007).
+- **P3 — Personal-source ingestion.** Wire Gmail + Granola + Calendar through the envelope helpers into the personal substrate. Pilot-task acceptance scenarios run against real-shape data.
+- **P4 — Firm-source ingestion + bridge.** Notion / Attio / Drive as `document_system` / `workspace_system`. Promotion review preserves source-side scope.
+- **P5 — Typed sync-back for approved facts.** Reviewed-mode default; per-app `allowed_mutation_kinds` (ADR-0008 when landed).
+- **P6 — Evidence-pack retrieval + firm auto-wiring at promote time** (ADRs 0006 + 0009).
+- **P7 — Venture reference overlay.** PE + wealth as thinner overlays on the same core.
+- **P8 — Pilot rehearsal + benchmarks.** Employee-memory-on-firm-tasks primary; LongMemEval secondary.
+
+## Post-V1 roadmap (parked)
+
+Deferred items, each with a real-data trigger. See `project_post_v1_roadmap.md` for triggers.
+
+- **Step 19:** Legislative amendment cycle (batched promotions triggered by evidence pressure).
+- **Step 20:** Constitution bootstrap skill (cold-start firm truth from existing strategy docs).
+- **Step 21:** Relationship-strength view + Graph One adapter (needs real interaction volume).
+- Identity channel extension (Slack/Telegram/WhatsApp/phone/E.164 normalization).
 - 50-scenario federated eval harness (per EVALS § 2.6).
 - Distillation coherence eval (per EVALS § 2.7).
-- MCP server surface exposing KG ops to any MCP-compatible host agent.
 - `CoherenceResolvedEvent` so the contradiction callout hides acknowledged conflicts.
 - `/save` (conversation → personal-plane note) + `/autoresearch` (WebSearch + WebFetch loop) as optional skills.
+- ML-powered query rewriting on hybrid search.
 
 ## License
 

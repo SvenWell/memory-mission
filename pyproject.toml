@@ -24,6 +24,8 @@ dependencies = [
     "PyYAML>=6.0",
     # MCP server surface — exposes memory-mission as tools to host agents
     "mcp>=1.0",
+    # MemPalace — adopted personal-layer substrate behind PersonalMemoryBackend.
+    "mempalace>=3.3,<4.0",
     # LLM providers (used by extraction + workflow agents)
     "anthropic>=0.39",
     "openai>=1.54",
@@ -99,6 +101,10 @@ warn_unused_configs = true
 
 [[tool.mypy.overrides]]
 module = "mcp.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "mempalace.*"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

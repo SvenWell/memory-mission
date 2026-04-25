@@ -49,13 +49,14 @@ The moat is not memory capture. The moat is **trusted promotion from private wor
 
 ### Promotion flow
 
-1. A connector pulls source material (email, meeting transcript, Drive memo) into staging for one plane.
+1. A connector pulls source material (email, meeting transcript, Drive memo, Notion page, CRM record) into staging for one plane.
 2. An extraction skill (driven by the host agent's LLM) reads the source, produces structured facts with required support-quote provenance.
 3. Facts become a `Proposal` grouped by target entity.
 4. A reviewer surfaces proposals via the `review-proposals` skill, approves or rejects each with required rationale.
 5. Approved facts land in the knowledge graph. Coherence warnings surface for tier conflicts; firms in constitutional mode block them.
+6. Optionally, typed outbound mutations sync the approved fact back to CRM or workspace systems (field update, status change, note append, task create, summary publish, owner assignment). Idempotent via `(proposal_id, external_id, mutation_kind)`.
 
-Nothing writes to firm memory without that path.
+Nothing writes to firm memory without that path. Nothing writes back to external systems unless the fact is approved. External systems are both **inputs** (via connector-role bindings) and **approved-output sync targets** — never the source of truth.
 
 ### Federated learning loop
 
@@ -64,6 +65,10 @@ When three employees independently extract the same fact from three different so
 ### Identity as infrastructure
 
 The same person reached via multiple channels (email, LinkedIn, Twitter, phone) resolves to one stable ID. Raw entity names from extraction canonicalize at ingest time. Meeting-prep, federated detection, and every downstream query speak in stable IDs.
+
+### Capability-based connector roles
+
+Concrete apps (Notion, Monday.com, Salesforce, Attio, Affinity, Gmail, Google Calendar, Granola, Drive) are **interchangeable connector bindings**, not separate product architectures. Each firm binds logical roles — `email_system`, `calendar_system`, `transcript_system`, `document_system`, `workspace_system` — to concrete apps via a per-firm `systems.yaml` manifest. The same app can fulfil multiple roles (Notion is often both `document_system` and `workspace_system`). Every connector normalizes its output into a single internal envelope before staging, so one extraction / proposal / promotion pipeline handles every source system without special cases. Switching vendors is a config change, not a rewrite.
 
 ### Bayesian corroboration
 
@@ -86,9 +91,11 @@ The method is only as good as the substrate it runs on. Memory Mission is built 
 
 ## Who it's for
 
-**V1 target:** small-to-mid firms where a handful of knowledge workers share institutional thinking. Venture firms are the cleanest wedge — explicit investment thesis, typed entities (people, companies, deals, mandates), ritualized meeting cadence, real ROI on faster partner-level synthesis.
+**Reference vertical — venture first.** Small firms (5-20 people) with explicit investment theses, typed entities (people, companies, deals, mandates), ritualized meeting cadence, and real ROI on faster partner-level synthesis. The constitutional-mode tier model fits VC thesis documents directly.
 
-**Secondary:** wealth-management shops, boutique consultancies, law firms, corporate strategy teams. Anyone where "the firm believes X" is a load-bearing sentence and drift between what individual people think and what the firm officially believes costs real money.
+**Secondary overlays — PE + wealth.** Same shared core, different vocabulary, prompt examples, permission presets, and workflow entrypoints. PE wrappers surface portfolio-company tracking + LP commitments; wealth wrappers surface client-family entities + regulatory-audit hooks. No core schema changes — only overlay config.
+
+**Tertiary:** boutique consultancies, law firms, corporate strategy teams. Anyone where "the firm believes X" is a load-bearing sentence and drift between individual and institutional belief costs real money.
 
 **Not yet:** large enterprises where IAM integration dominates the conversation. Individual knowledge workers (Tolaria serves them). Open-internet products.
 
@@ -106,3 +113,5 @@ The method is only as good as the substrate it runs on. Memory Mission is built 
 8. **LLM ownership sits with the host** — Memory Mission is a library + skills, not an agent platform.
 9. **Files-first, Obsidian-compatible** — the exit door is always open.
 10. **Composable skills, not monolithic workflow** — small markdown skills with typed frontmatter; host agent routes.
+11. **Capability-based, not vendor-based** — logical connector roles bound to concrete apps via per-firm config. Switching Notion for Monday or Salesforce is one YAML change.
+12. **SQLite per firm** — one firm = one directory + its own SQLite stores (ADR-0005). Simpler, scales vertically with each customer, no hosted DB pre-pilot.
