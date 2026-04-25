@@ -84,6 +84,45 @@ bindings:
     # Items without a recognized label are rejected at ingestion.
 ```
 
+## Venture-CRM example — Affinity as the firm workspace
+
+Affinity is the dominant venture-fund CRM. Records (organizations,
+persons, opportunities) belong to one or more **Lists** — the firm's
+deal pipelines, portfolio tracker, LP network, etc. List membership
+is the primary visibility signal: a "Pipeline" list might be
+partner-only; a "Portfolio" list firm-wide; an "LP Network" list
+partner-only.
+
+```yaml
+firm_id: northpoint
+bindings:
+  workspace:
+    app: affinity
+    target_plane: firm
+    visibility_rules:
+      # Each list_id below is the integer Affinity assigns to a List.
+      # Run `list_lists` once to discover yours; the envelope helper
+      # surfaces each membership as `list:<list_id>` label.
+      - if_label: list:42        # Active Pipeline
+        scope: partner-only
+      - if_label: list:91        # Portfolio Companies
+        scope: firm-internal
+      - if_label: list:104       # LP Network
+        scope: partner-only
+      # Affinity's `global: true` flag means a globally-known company
+      # (anyone with Affinity sees it, not firm-private). Maps to
+      # external-shared by default.
+      - if_label: global
+        scope: external-shared
+    default_visibility: firm-internal
+```
+
+Affinity uses **API-key auth** at the Composio layer (not OAuth2). The
+firm provisions a per-firm Affinity API key in Composio's dashboard
+and the connector picks it up automatically. Backfill is
+administrator-run only — Affinity holds the firm's relationship +
+deal data.
+
 ## Firm-plane example — Drive as the firm document substrate
 
 ```yaml
@@ -134,6 +173,7 @@ lets you write rules that target the right keys.
 | `granola_transcript_to_envelope` | `attendees` (list[str]), `labels` (list[str]) |
 | `calendar_event_to_envelope` | `gcal_visibility` (str: `default` / `public` / `private` / `confidential`), `attendees` (list[str]), `labels` (list[str]) |
 | `drive_file_to_envelope` | `permissions` (list[dict]), `owners` (list[str]), `drive_anyone` (bool — synthesized: True iff any permission grants `type: anyone`), `labels` (list[str]) |
+| `affinity_record_to_envelope` | `labels` (list[str]: one `list:<list_id>` per Affinity list the record sits in, plus `global` when Affinity flags the record as global), `affinity_object_type` (`organization` / `person` / `opportunity`), `affinity_owner_id` (int or null) |
 
 ## Loader API
 

@@ -2435,3 +2435,65 @@ operator's) actually runs `backfill-gmail` / `backfill-granola` /
 the typed-Python convenience wrappers (e.g.
 `src/memory_mission/ingestion/backfill_runner.py`) that codify the
 skill workflow into a callable Python entry point.
+
+## P3-prep continued — Affinity connector (venture-CRM, P4 first venture-app) (2026-04-25)
+
+First venture-specific app connector lands. Affinity is the dominant
+relationship-intelligence CRM at venture firms; covering it is the
+single biggest signal-to-effort move for an actual venture pilot.
+
+### What landed
+
+- **Affinity connector** —
+  `src/memory_mission/ingestion/connectors/affinity.py`. Composio-backed.
+  9 read actions (list/get for organizations, persons, opportunities;
+  plus list_lists, get_list_metadata, list_list_entries that drive
+  visibility mapping). API-key auth at the Composio layer (Affinity
+  doesn't expose OAuth2 publicly).
+- **`affinity_record_to_envelope`** —
+  `src/memory_mission/ingestion/envelopes.py`. Single dispatching helper
+  that takes `object_type` ("organization" / "person" / "opportunity")
+  + manifest and returns a `NormalizedSourceItem`. Visibility surface
+  surfaces each Affinity list-membership as a `list:<list_id>` label
+  (matches `if_label` rules in the manifest); flags globally-known
+  records with a `global` label that typically maps to
+  `external-shared`. `external_id` is type-prefixed (`org_<id>` /
+  `person_<id>` / `opp_<id>`) to avoid id collision across types.
+  Body is a structured text summary (Affinity records aren't
+  documents; reviewers and downstream extraction see key fields
+  without parsing the raw payload).
+- **`backfill-affinity` skill** —
+  `skills/backfill-affinity/SKILL.md`. Three-pass strategy
+  (organizations → persons → opportunities) so identity resolution
+  canonicalizes orgs before persons/opportunities link to them.
+  Per-type durable runs. Administrator-run only.
+- **`docs/recipes/systems-yaml.md`** — venture-CRM example added with
+  list-membership-driven scope mapping. Per-app
+  `visibility_metadata` shape table extended with the Affinity row.
+- **Skill index + manifest** — `skills/_index.md` and
+  `skills/_manifest.jsonl` updated.
+
+### Why Affinity first (vs Outlook / OneDrive / Attio)
+
+The Composio research scan
+(commit `b431df2..` on 2026-04-25) showed Affinity has 20 tools at
+Composio with **API key** auth and a clean read surface. It is the
+single biggest venture wedge — every venture firm in the pilot
+demographic uses it. Cost: ~half day. Outlook + OneDrive are next,
+then Attio + Notion + Slack.
+
+### Verification
+
+- [x] `pytest` — 776/776 passed (+13 since previous: 4 connector
+      + 9 envelope tests)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 75 source files (+1)
+- [x] Manifest parses as valid JSONL (9 entries)
+
+### Next
+
+Outlook + OneDrive (M365 bundle) — single move that swaps the firm's
+primary email + document substrate when a pilot firm is on Microsoft
+365 instead of Google Workspace. Then Attio (second venture CRM),
+Notion (workspace + document dual-binding), and finally Slack with
+its own ADR for the new `chat_system` role.

@@ -85,6 +85,30 @@ Constraints: personal plane only, envelope path only,
 `VisibilityMappingError` halts the loop, every fetch through the
 harness, no LLM.
 
+## backfill-affinity
+
+Pull venture-CRM records (organizations, persons, opportunities) from
+Affinity through Composio (API-key auth), normalize via
+`affinity_record_to_envelope`, and write the envelope into the **firm
+staging plane** (`<wiki_root>/staging/firm/affinity/`) via
+`StagingWriter.write_envelope`. Three-pass strategy: organizations →
+persons → opportunities, so identity resolution canonicalizes orgs
+before persons/opps link to them. Per-type durable runs.
+
+Visibility maps from list-membership: each Affinity list (Pipeline /
+Portfolio / LP Network / etc.) becomes a `list:<id>` label that the
+manifest maps to a firm scope. Globally-known companies get a `global`
+label that typically maps to `external-shared`.
+
+Triggers: "backfill affinity", "import affinity", "sync crm",
+"pull affinity organizations", "pull affinity persons",
+"pull affinity opportunities"
+
+Constraints: firm plane only (administrator-run), envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM. Affinity's pagination yields basic info — always
+`get_*` per id for full field data.
+
 ## backfill-firm-artefacts
 
 Cold-start the firm plane from firm-authored documents (memos,
