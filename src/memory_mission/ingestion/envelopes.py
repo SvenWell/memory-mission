@@ -221,6 +221,67 @@ def granola_transcript_to_envelope(
     )
 
 
+def attio_record_to_envelope(
+    raw: dict[str, Any],
+    *,
+    object_slug: str,
+    manifest: SystemsManifest,
+) -> NormalizedSourceItem:
+    """Map a Composio Attio record to a ``NormalizedSourceItem``.
+
+    Attio is schema-flexible — system objects (people, companies, deals,
+    users, workspaces) coexist with user-defined custom objects. The
+    caller supplies ``object_slug`` (the Attio object identifier the
+    record belongs to); the helper does not try to infer it from the
+    payload.
+
+    Visibility surface:
+
+    - ``labels`` — one entry per Attio list the record sits in
+      (``list:<list_id>``). Lists in Attio are saved views /
+      collections and are the typical scope signal.
+    - ``attio_object_slug`` — for ``if_field`` rules that scope by
+      object type (e.g., treat ``deals`` as partner-only).
+    - ``attio_workspace_id`` — present when the payload includes it.
+
+    Title comes from the record's ``name`` (or ``title`` for custom
+    objects). Body is a structured text dump of attribute values so
+    reviewers and downstream extraction see something readable
+    without parsing Attio's nested ``values`` shape.
+    """
+    if not object_slug or not isinstance(object_slug, str):
+        raise ValueError(f"object_slug must be a non-empty string; got {object_slug!r}")
+    binding = _binding_for(ConnectorRole.WORKSPACE, expected_app="attio", manifest=manifest)
+    record_id = _attio_require_record_id(raw)
+    list_ids = _attio_list_memberships(raw)
+    workspace_id = _attio_workspace_id(raw)
+    visibility: dict[str, Any] = {
+        "labels": [f"list:{lid}" for lid in list_ids],
+        "attio_object_slug": object_slug,
+        "attio_workspace_id": workspace_id,
+    }
+    target_scope = map_visibility(visibility, role=ConnectorRole.WORKSPACE, manifest=manifest)
+    title = _attio_title(raw, fallback=record_id)
+    body = _attio_body(raw)
+    return NormalizedSourceItem(
+        source_role=ConnectorRole.WORKSPACE,
+        concrete_app="attio",
+        external_object_type=object_slug,
+        external_id=f"{object_slug}_{record_id}",
+        container_id=workspace_id,
+        url=_optional_str(raw, ("url",)),
+        modified_at=_require_datetime(
+            raw, ("updated_at", "created_at", "modified_at"), source="attio"
+        ),
+        visibility_metadata=visibility,
+        target_scope=target_scope,
+        target_plane=binding.target_plane,
+        title=title,
+        body=body,
+        raw=dict(raw),
+    )
+
+
 _AFFINITY_OBJECT_TYPES: tuple[str, ...] = ("organization", "person", "opportunity")
 _AFFINITY_ID_PREFIX: dict[str, str] = {
     "organization": "org",
@@ -442,6 +503,104 @@ def _parse_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _attio_require_record_id(raw: dict[str, Any]) -> str:
+    id_block = raw.get("id")
+    if isinstance(id_block, dict):
+        rid = id_block.get("record_id") or id_block.get("id")
+        if isinstance(rid, str) and rid:
+            return rid
+    if isinstance(id_block, str) and id_block:
+        return id_block
+    rid = raw.get("record_id")
+    if isinstance(rid, str) and rid:
+        return rid
+    raise ValueError("attio payload missing required record_id (tried id.record_id, id, record_id)")
+
+
+def _attio_workspace_id(raw: dict[str, Any]) -> str | None:
+    id_block = raw.get("id")
+    if isinstance(id_block, dict):
+        wid = id_block.get("workspace_id")
+        if isinstance(wid, str) and wid:
+            return wid
+    wid = raw.get("workspace_id")
+    if isinstance(wid, str) and wid:
+        return wid
+    return None
+
+
+def _attio_list_memberships(raw: dict[str, Any]) -> list[str]:
+    """Extract Attio list ids from list_memberships or lists fields."""
+    out: list[str] = []
+    for key in ("list_memberships", "lists"):
+        block = raw.get(key)
+        if isinstance(block, list):
+            for entry in block:
+                if isinstance(entry, dict):
+                    lid = entry.get("list_id") or entry.get("id")
+                    if isinstance(lid, str) and lid:
+                        out.append(lid)
+                elif isinstance(entry, str) and entry:
+                    out.append(entry)
+    return out
+
+
+def _attio_title(raw: dict[str, Any], *, fallback: str) -> str:
+    """Extract the most natural title from Attio's versioned values shape."""
+    for attr in ("name", "title", "company_name", "deal_name"):
+        v = _attio_value(raw, attr)
+        if v:
+            return v
+    return fallback
+
+
+def _attio_body(raw: dict[str, Any]) -> str:
+    """Render visible Attio attribute values as a key: value text dump."""
+    values = raw.get("values")
+    if not isinstance(values, dict):
+        return ""
+    parts: list[str] = []
+    for attr_name, attr_block in values.items():
+        if not isinstance(attr_block, list) or not attr_block:
+            continue
+        first = attr_block[0]
+        if not isinstance(first, dict):
+            continue
+        v = first.get("value")
+        if isinstance(v, str | int | float | bool) and v != "":
+            parts.append(f"{attr_name}: {v}")
+        elif isinstance(v, dict):
+            inner = " / ".join(f"{k}={v[k]}" for k in v if v[k] not in (None, ""))
+            if inner:
+                parts.append(f"{attr_name}: {inner}")
+    return "\n".join(parts)
+
+
+def _attio_value(raw: dict[str, Any], attribute: str) -> str:
+    values = raw.get("values")
+    if not isinstance(values, dict):
+        return ""
+    attr_block = values.get(attribute)
+    if not isinstance(attr_block, list) or not attr_block:
+        return ""
+    first = attr_block[0]
+    if not isinstance(first, dict):
+        return ""
+    v = first.get("value")
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict):
+        # name attribute often has {first_name, last_name, full_name}
+        full = v.get("full_name")
+        if isinstance(full, str) and full:
+            return full
+        first_n = str(v.get("first_name", ""))
+        last_n = str(v.get("last_name", ""))
+        out = f"{first_n} {last_n}".strip()
+        return out
+    return ""
+
+
 def _require_int_id(raw: dict[str, Any], keys: tuple[str, ...], *, source: str) -> int:
     for key in keys:
         value = raw.get(key)
@@ -607,6 +766,7 @@ def _drive_grants_anyone(permissions: list[Any]) -> bool:
 
 __all__ = [
     "affinity_record_to_envelope",
+    "attio_record_to_envelope",
     "calendar_event_to_envelope",
     "drive_file_to_envelope",
     "gmail_message_to_envelope",

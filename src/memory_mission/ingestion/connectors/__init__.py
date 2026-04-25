@@ -13,6 +13,10 @@ from memory_mission.ingestion.connectors.affinity import (
     AFFINITY_ACTIONS,
     make_affinity_connector,
 )
+from memory_mission.ingestion.connectors.attio import (
+    ATTIO_ACTIONS,
+    make_attio_connector,
+)
 from memory_mission.ingestion.connectors.base import (
     Connector,
     ConnectorAction,
@@ -51,6 +55,7 @@ from memory_mission.ingestion.connectors.testing import InMemoryConnector
 
 __all__ = [
     "AFFINITY_ACTIONS",
+    "ATTIO_ACTIONS",
     "CALENDAR_ACTIONS",
     "DRIVE_ACTIONS",
     "GMAIL_ACTIONS",
@@ -65,6 +70,7 @@ __all__ = [
     "InMemoryConnector",
     "invoke",
     "make_affinity_connector",
+    "make_attio_connector",
     "make_calendar_connector",
     "make_drive_connector",
     "make_gmail_connector",

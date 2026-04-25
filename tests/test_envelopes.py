@@ -23,6 +23,7 @@ import pytest
 
 from memory_mission.ingestion.envelopes import (
     affinity_record_to_envelope,
+    attio_record_to_envelope,
     calendar_event_to_envelope,
     drive_file_to_envelope,
     gmail_message_to_envelope,
@@ -817,3 +818,131 @@ def test_onedrive_envelope_rejects_wrong_app_binding() -> None:
     }
     with pytest.raises(ValueError, match="bound to app='drive'"):
         onedrive_item_to_envelope(raw, manifest=manifest)
+
+
+# ---------- Attio ----------
+
+
+def _attio_manifest() -> SystemsManifest:
+    return SystemsManifest(
+        firm_id="northpoint",
+        bindings={
+            ConnectorRole.WORKSPACE: RoleBinding(
+                app="attio",
+                target_plane="firm",
+                visibility_rules=(
+                    VisibilityRule(if_label="list:pipeline", scope="partner-only"),
+                    VisibilityRule(if_field={"attio_object_slug": "deals"}, scope="partner-only"),
+                ),
+                default_visibility="firm-internal",
+            ),
+        },
+    )
+
+
+def test_attio_company_envelope_round_trip() -> None:
+    raw = {
+        "id": {
+            "workspace_id": "ws-1",
+            "object_id": "companies",
+            "record_id": "rec-abc-123",
+        },
+        "values": {
+            "name": [{"value": "Acme Corp", "active_from": "2026-01-01"}],
+            "domains": [{"value": "acme.com"}],
+            "stage": [{"value": "Series A"}],
+        },
+        "list_memberships": [
+            {"list_id": "pipeline", "entry_id": "le-1"},
+            {"list_id": "portfolio", "entry_id": "le-2"},
+        ],
+        "updated_at": "2026-04-01T09:00:00Z",
+        "created_at": "2026-01-01T09:00:00Z",
+    }
+    item = attio_record_to_envelope(raw, object_slug="companies", manifest=_attio_manifest())
+
+    assert item.source_role == ConnectorRole.WORKSPACE
+    assert item.concrete_app == "attio"
+    assert item.external_object_type == "companies"
+    assert item.external_id == "companies_rec-abc-123"
+    assert item.container_id == "ws-1"
+    assert item.target_plane == "firm"
+    assert item.target_scope == "partner-only"
+    assert item.title == "Acme Corp"
+    assert "name: Acme Corp" in item.body
+    assert "domains: acme.com" in item.body
+    assert "stage: Series A" in item.body
+    assert item.modified_at == datetime(2026, 4, 1, 9, 0, tzinfo=UTC)
+    assert item.visibility_metadata["labels"] == ["list:pipeline", "list:portfolio"]
+    assert item.visibility_metadata["attio_object_slug"] == "companies"
+    assert item.visibility_metadata["attio_workspace_id"] == "ws-1"
+
+
+def test_attio_deals_object_slug_matches_field_rule() -> None:
+    raw = {
+        "id": {"workspace_id": "ws-1", "record_id": "deal-1"},
+        "values": {"name": [{"value": "Acme Series A"}]},
+        "updated_at": "2026-04-01T09:00:00Z",
+    }
+    item = attio_record_to_envelope(raw, object_slug="deals", manifest=_attio_manifest())
+    assert item.target_scope == "partner-only"
+
+
+def test_attio_record_with_no_lists_uses_default() -> None:
+    raw = {
+        "id": {"record_id": "person-1"},
+        "values": {"name": [{"value": {"first_name": "Sarah", "last_name": "Chen"}}]},
+        "updated_at": "2026-04-01T09:00:00Z",
+    }
+    item = attio_record_to_envelope(raw, object_slug="people", manifest=_attio_manifest())
+    assert item.target_scope == "firm-internal"
+    assert item.title == "Sarah Chen"
+    assert item.external_id == "people_person-1"
+
+
+def test_attio_envelope_handles_flat_id_string() -> None:
+    raw = {
+        "id": "rec-flat-123",
+        "values": {"name": [{"value": "FlatCo"}]},
+        "updated_at": "2026-04-01T09:00:00Z",
+    }
+    item = attio_record_to_envelope(raw, object_slug="companies", manifest=_attio_manifest())
+    assert item.external_id == "companies_rec-flat-123"
+
+
+def test_attio_envelope_falls_back_to_record_id_title() -> None:
+    raw = {
+        "id": {"record_id": "no-name-1"},
+        "values": {},
+        "updated_at": "2026-04-01T09:00:00Z",
+    }
+    item = attio_record_to_envelope(raw, object_slug="custom_obj", manifest=_attio_manifest())
+    assert item.title == "no-name-1"
+
+
+def test_attio_envelope_rejects_empty_object_slug() -> None:
+    raw = {"id": {"record_id": "x"}, "values": {}, "updated_at": "2026-04-01T09:00:00Z"}
+    with pytest.raises(ValueError, match="object_slug must be a non-empty string"):
+        attio_record_to_envelope(raw, object_slug="", manifest=_attio_manifest())
+
+
+def test_attio_envelope_rejects_missing_record_id() -> None:
+    raw = {"values": {"name": [{"value": "x"}]}, "updated_at": "2026-04-01T09:00:00Z"}
+    with pytest.raises(ValueError, match="missing required record_id"):
+        attio_record_to_envelope(raw, object_slug="companies", manifest=_attio_manifest())
+
+
+def test_attio_envelope_rejects_wrong_app_binding() -> None:
+    manifest = SystemsManifest(
+        firm_id="x",
+        bindings={
+            ConnectorRole.WORKSPACE: RoleBinding(
+                app="affinity",
+                target_plane="firm",
+                default_visibility="firm-internal",
+            ),
+        },
+    )
+    raw = {"id": {"record_id": "x"}, "values": {}, "updated_at": "2026-04-01T09:00:00Z"}
+    with pytest.raises(ValueError, match="bound to app='affinity'"):
+        attio_record_to_envelope(raw, object_slug="companies", manifest=manifest)

@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from memory_mission.durable import CheckpointStore, durable_run
 from memory_mission.ingestion.connectors import (
     AFFINITY_ACTIONS,
+    ATTIO_ACTIONS,
     CALENDAR_ACTIONS,
     DRIVE_ACTIONS,
     GMAIL_ACTIONS,
@@ -26,6 +27,7 @@ from memory_mission.ingestion.connectors import (
     InMemoryConnector,
     invoke,
     make_affinity_connector,
+    make_attio_connector,
     make_calendar_connector,
     make_drive_connector,
     make_gmail_connector,
@@ -481,8 +483,7 @@ def test_onedrive_preview_includes_name_and_mime() -> None:
                 "name": "Q4 LP Update.docx",
                 "file": {
                     "mimeType": (
-                        "application/vnd.openxmlformats-officedocument"
-                        ".wordprocessingml.document"
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                     )
                 },
                 "content": "Q4 thesis: lean into vertical AI infrastructure.",
@@ -498,6 +499,59 @@ def test_onedrive_requires_client_for_invoke() -> None:
     conn = make_onedrive_connector()
     with pytest.raises(NotImplementedError, match="no client attached"):
         conn.invoke("list_drive_items", {})
+
+
+# ---------- Attio factory ----------
+
+
+def test_attio_exposes_read_actions() -> None:
+    conn = make_attio_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "list_objects",
+        "get_object_details",
+        "list_records",
+        "find_record",
+        "list_notes",
+        "list_lists",
+    }
+    assert conn.name == "attio"
+
+
+def test_attio_actions_match_exported_constant() -> None:
+    assert make_attio_connector().list_actions() == list(ATTIO_ACTIONS)
+
+
+def test_attio_preview_extracts_name_attribute() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": {"workspace_id": "ws-1", "object_id": "companies", "record_id": "rec-9"},
+                "values": {"name": [{"value": "Acme Corp", "active_from": "2026-01-01"}]},
+            }
+
+    conn = make_attio_connector(client=FakeClient())
+    result = conn.invoke("find_record", {"object": "companies", "record_id": "rec-9"})
+    assert "Acme Corp" in result.preview
+
+
+def test_attio_preview_falls_back_to_record_id_when_no_name() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": {"workspace_id": "ws-1", "record_id": "rec-555"},
+                "values": {},
+            }
+
+    conn = make_attio_connector(client=FakeClient())
+    result = conn.invoke("find_record", {"object": "people", "record_id": "rec-555"})
+    assert "rec-555" in result.preview
+
+
+def test_attio_requires_client_for_invoke() -> None:
+    conn = make_attio_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_records", {"object": "companies"})
 
 
 # ---------- Harness invoke() ----------
