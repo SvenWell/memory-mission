@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 import pytest
 
 from memory_mission.ingestion.envelopes import (
+    calendar_event_to_envelope,
     drive_file_to_envelope,
     gmail_message_to_envelope,
     granola_transcript_to_envelope,
@@ -57,6 +58,17 @@ def _manifest_with_email_default() -> SystemsManifest:
                 target_plane="firm",
                 visibility_rules=(VisibilityRule(if_field={"drive_anyone": True}, scope="public"),),
                 default_visibility="client-confidential",
+            ),
+            ConnectorRole.CALENDAR: RoleBinding(
+                app="gcal",
+                target_plane="personal",
+                visibility_rules=(
+                    VisibilityRule(if_field={"gcal_visibility": "public"}, scope="external-shared"),
+                    VisibilityRule(
+                        if_field={"gcal_visibility": "private"}, scope="employee-private"
+                    ),
+                ),
+                default_visibility="employee-private",
             ),
         },
     )
@@ -257,6 +269,138 @@ def test_drive_envelope_falls_back_to_manifest_default_for_internal_files() -> N
     item = drive_file_to_envelope(raw, manifest=_manifest_with_email_default())
     assert item.target_scope == "client-confidential"
     assert item.visibility_metadata["drive_anyone"] is False
+
+
+# ---------- Calendar ----------
+
+
+def test_calendar_envelope_round_trip_public_event() -> None:
+    raw = {
+        "id": "ev-1",
+        "calendar_id": "primary",
+        "summary": "Q3 partner sync",
+        "description": "Quarterly review with partners",
+        "start": {"dateTime": "2026-09-01T15:00:00Z"},
+        "end": {"dateTime": "2026-09-01T16:00:00Z"},
+        "attendees": [
+            {"email": "alice@northpoint.fund"},
+            {"email": "sarah@example.com", "responseStatus": "accepted"},
+        ],
+        "visibility": "public",
+        "updated": "2026-08-25T09:00:00Z",
+        "htmlLink": "https://calendar.google.com/event?eid=abc",
+    }
+    item = calendar_event_to_envelope(raw, manifest=_manifest_with_email_default())
+
+    assert item.source_role == ConnectorRole.CALENDAR
+    assert item.concrete_app == "gcal"
+    assert item.external_object_type == "event"
+    assert item.external_id == "ev-1"
+    assert item.container_id == "primary"
+    assert item.url == "https://calendar.google.com/event?eid=abc"
+    assert item.title == "Q3 partner sync"
+    assert item.body == "Quarterly review with partners"
+    assert item.target_scope == "external-shared"
+    assert item.target_plane == "personal"
+    assert item.modified_at == datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
+    assert item.visibility_metadata["gcal_visibility"] == "public"
+    assert item.visibility_metadata["attendees"] == [
+        "alice@northpoint.fund",
+        "sarah@example.com",
+    ]
+
+
+def test_calendar_envelope_private_event_maps_to_employee_private() -> None:
+    raw = {
+        "id": "ev-2",
+        "calendar_id": "primary",
+        "summary": "1:1 with Bob",
+        "visibility": "private",
+        "updated": "2026-08-25T09:00:00Z",
+        "attendees": [{"email": "alice@northpoint.fund"}, {"email": "bob@northpoint.fund"}],
+    }
+    item = calendar_event_to_envelope(raw, manifest=_manifest_with_email_default())
+    assert item.target_scope == "employee-private"
+
+
+def test_calendar_envelope_default_visibility_uses_manifest_fallback() -> None:
+    raw = {
+        "id": "ev-3",
+        "calendar_id": "primary",
+        "summary": "Default-vis event",
+        "visibility": "default",  # neither public nor private rule matches
+        "updated": "2026-08-25T09:00:00Z",
+    }
+    item = calendar_event_to_envelope(raw, manifest=_manifest_with_email_default())
+    assert item.target_scope == "employee-private"
+
+
+def test_calendar_envelope_missing_visibility_treated_as_default() -> None:
+    raw = {
+        "id": "ev-4",
+        "summary": "x",
+        "updated": "2026-08-25T09:00:00Z",
+    }
+    item = calendar_event_to_envelope(raw, manifest=_manifest_with_email_default())
+    # Missing visibility => "default" => no rule matches => manifest default
+    assert item.visibility_metadata["gcal_visibility"] == "default"
+    assert item.target_scope == "employee-private"
+
+
+def test_calendar_envelope_extracts_attendee_emails_from_dicts() -> None:
+    raw = {
+        "id": "ev-5",
+        "summary": "x",
+        "visibility": "private",
+        "updated": "2026-08-25T09:00:00Z",
+        "attendees": [
+            {"email": "alice@northpoint.fund", "responseStatus": "accepted"},
+            {"email": "", "responseStatus": "needsAction"},  # filtered out
+            {"displayName": "Bob"},  # no email — filtered out
+            "raw@example.com",  # raw string also accepted
+        ],
+    }
+    item = calendar_event_to_envelope(raw, manifest=_manifest_with_email_default())
+    assert item.visibility_metadata["attendees"] == ["alice@northpoint.fund", "raw@example.com"]
+
+
+def test_calendar_envelope_missing_id_raises() -> None:
+    raw = {"summary": "x", "updated": "2026-08-25T09:00:00Z", "visibility": "private"}
+    with pytest.raises(ValueError, match="missing required string field"):
+        calendar_event_to_envelope(raw, manifest=_manifest_with_email_default())
+
+
+def test_calendar_envelope_missing_updated_raises() -> None:
+    raw = {"id": "ev-x", "summary": "x", "visibility": "private"}
+    with pytest.raises(ValueError, match="missing required datetime field"):
+        calendar_event_to_envelope(raw, manifest=_manifest_with_email_default())
+
+
+def test_calendar_envelope_falls_back_to_created_when_updated_missing() -> None:
+    raw = {
+        "id": "ev-6",
+        "summary": "x",
+        "visibility": "private",
+        "created": "2026-08-25T09:00:00Z",
+    }
+    item = calendar_event_to_envelope(raw, manifest=_manifest_with_email_default())
+    assert item.modified_at == datetime(2026, 8, 25, 9, 0, tzinfo=UTC)
+
+
+def test_calendar_envelope_rejects_wrong_app_binding() -> None:
+    manifest = SystemsManifest(
+        firm_id="x",
+        bindings={
+            ConnectorRole.CALENDAR: RoleBinding(
+                app="outlook_calendar",
+                target_plane="personal",
+                default_visibility="employee-private",
+            ),
+        },
+    )
+    raw = {"id": "ev-x", "summary": "x", "updated": "2026-08-25T09:00:00Z", "visibility": "private"}
+    with pytest.raises(ValueError, match="bound to app='outlook_calendar'"):
+        calendar_event_to_envelope(raw, manifest=manifest)
 
 
 def test_drive_envelope_rejects_wrong_app_binding() -> None:

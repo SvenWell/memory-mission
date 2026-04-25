@@ -15,6 +15,10 @@ from memory_mission.ingestion.connectors.base import (
     ConnectorResult,
     invoke,
 )
+from memory_mission.ingestion.connectors.calendar import (
+    CALENDAR_ACTIONS,
+    make_calendar_connector,
+)
 from memory_mission.ingestion.connectors.composio import (
     ComposioClient,
     ComposioConnector,
@@ -34,6 +38,7 @@ from memory_mission.ingestion.connectors.granola import (
 from memory_mission.ingestion.connectors.testing import InMemoryConnector
 
 __all__ = [
+    "CALENDAR_ACTIONS",
     "DRIVE_ACTIONS",
     "GMAIL_ACTIONS",
     "GRANOLA_ACTIONS",
@@ -44,6 +49,7 @@ __all__ = [
     "ConnectorResult",
     "InMemoryConnector",
     "invoke",
+    "make_calendar_connector",
     "make_drive_connector",
     "make_gmail_connector",
     "make_granola_connector",

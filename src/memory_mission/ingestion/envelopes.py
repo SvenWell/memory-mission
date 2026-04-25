@@ -99,6 +99,46 @@ def granola_transcript_to_envelope(
     )
 
 
+def calendar_event_to_envelope(
+    raw: dict[str, Any],
+    *,
+    manifest: SystemsManifest,
+) -> NormalizedSourceItem:
+    """Map a Composio Google Calendar event payload to a ``NormalizedSourceItem``.
+
+    Visibility surface: ``gcal_visibility`` (Google Calendar's built-in
+    field — ``default`` / ``public`` / ``private`` / ``confidential``)
+    surfaced as a top-level metadata key so ``if_field`` rules can match
+    it directly; plus ``attendees`` (list of email-shaped strings) and
+    optional ``labels``. Calendar bindings typically combine a public/
+    private rule with a sensible ``default_visibility`` for events that
+    inherit the calendar's default visibility.
+    """
+    binding = _binding_for(ConnectorRole.CALENDAR, expected_app="gcal", manifest=manifest)
+    attendees = _attendee_emails(raw.get("attendees"))
+    visibility: dict[str, Any] = {
+        "gcal_visibility": raw.get("visibility") or "default",
+        "attendees": attendees,
+        "labels": list(raw.get("labels", [])),
+    }
+    target_scope = map_visibility(visibility, role=ConnectorRole.CALENDAR, manifest=manifest)
+    return NormalizedSourceItem(
+        source_role=ConnectorRole.CALENDAR,
+        concrete_app="gcal",
+        external_object_type="event",
+        external_id=_require_str(raw, ("id", "event_id"), source="gcal"),
+        container_id=_optional_str(raw, ("calendar_id",)),
+        url=_optional_str(raw, ("html_link", "htmlLink", "url")),
+        modified_at=_require_datetime(raw, ("updated", "created"), source="gcal"),
+        visibility_metadata=visibility,
+        target_scope=target_scope,
+        target_plane=binding.target_plane,
+        title=str(raw.get("summary", "")),
+        body=str(raw.get("description", "")),
+        raw=dict(raw),
+    )
+
+
 def drive_file_to_envelope(
     raw: dict[str, Any],
     *,
@@ -200,6 +240,21 @@ def _parse_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _attendee_emails(attendees: Any) -> list[str]:
+    """Extract email-shaped strings from Google Calendar attendees list."""
+    if not isinstance(attendees, list):
+        return []
+    out: list[str] = []
+    for entry in attendees:
+        if isinstance(entry, dict):
+            email = entry.get("email")
+            if isinstance(email, str) and email:
+                out.append(email)
+        elif isinstance(entry, str) and entry:
+            out.append(entry)
+    return out
+
+
 def _drive_grants_anyone(permissions: list[Any]) -> bool:
     for perm in permissions:
         if isinstance(perm, dict) and perm.get("type") == "anyone":
@@ -208,6 +263,7 @@ def _drive_grants_anyone(permissions: list[Any]) -> bool:
 
 
 __all__ = [
+    "calendar_event_to_envelope",
     "drive_file_to_envelope",
     "gmail_message_to_envelope",
     "granola_transcript_to_envelope",

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from memory_mission.durable import CheckpointStore, durable_run
 from memory_mission.ingestion.connectors import (
+    CALENDAR_ACTIONS,
     DRIVE_ACTIONS,
     GMAIL_ACTIONS,
     GRANOLA_ACTIONS,
@@ -21,6 +22,7 @@ from memory_mission.ingestion.connectors import (
     ConnectorResult,
     InMemoryConnector,
     invoke,
+    make_calendar_connector,
     make_drive_connector,
     make_gmail_connector,
     make_granola_connector,
@@ -272,6 +274,74 @@ def test_drive_requires_client_for_invoke() -> None:
     conn = make_drive_connector()
     with pytest.raises(NotImplementedError, match="no client attached"):
         conn.invoke("list_files", {})
+
+
+# ---------- Calendar factory ----------
+
+
+def test_calendar_exposes_list_and_get_actions() -> None:
+    conn = make_calendar_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {"list_events", "get_event"}
+    assert conn.name == "gcal"
+
+
+def test_calendar_actions_match_exported_constant() -> None:
+    assert make_calendar_connector().list_actions() == list(CALENDAR_ACTIONS)
+
+
+def test_calendar_preview_includes_summary_start_and_attendee_count() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "summary": "Q3 partner sync",
+                "start": {"dateTime": "2026-09-01T15:00:00Z"},
+                "attendees": [
+                    {"email": "alice@example.com"},
+                    {"email": "bob@example.com"},
+                ],
+            }
+
+    conn = make_calendar_connector(client=FakeClient())
+    result = conn.invoke("get_event", {"event_id": "ev-1"})
+    assert "Q3 partner sync" in result.preview
+    assert "2026-09-01T15:00:00Z" in result.preview
+    assert "2 attendees" in result.preview
+
+
+def test_calendar_preview_handles_all_day_event() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "summary": "Off-site",
+                "start": {"date": "2026-09-15"},
+                "attendees": [{"email": "alice@example.com"}],
+            }
+
+    conn = make_calendar_connector(client=FakeClient())
+    result = conn.invoke("get_event", {"event_id": "ev-2"})
+    assert "Off-site" in result.preview
+    assert "2026-09-15" in result.preview
+    assert "1 attendee" in result.preview
+
+
+def test_calendar_preview_handles_no_attendees() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "summary": "Solo focus block",
+                "start": {"dateTime": "2026-09-02T09:00:00Z"},
+            }
+
+    conn = make_calendar_connector(client=FakeClient())
+    result = conn.invoke("get_event", {"event_id": "ev-3"})
+    assert "0 attendees" in result.preview
+
+
+def test_calendar_requires_client_for_invoke() -> None:
+    conn = make_calendar_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_events", {})
 
 
 # ---------- Harness invoke() ----------
