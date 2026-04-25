@@ -85,6 +85,48 @@ Constraints: personal plane only, envelope path only,
 `VisibilityMappingError` halts the loop, every fetch through the
 harness, no LLM.
 
+## backfill-outlook
+
+Pull historical Microsoft 365 / Outlook email through Composio (OAuth2),
+normalize via `outlook_message_to_envelope`, write to the **employee's
+personal staging plane** (`<wiki_root>/staging/personal/<employee_id>/
+outlook/`) via `StagingWriter.write_envelope`. M365 equivalent of
+`backfill-gmail`. Visibility maps from Outlook's built-in `sensitivity`
+field (`normal` / `personal` / `private` / `confidential`) plus
+user-assigned `categories` (which surface as `labels` for `if_label`
+rules). Incremental sync via `get_mail_delta` after the first full
+backfill.
+
+Triggers: "backfill outlook", "import outlook history",
+"sync outlook mailbox", "pull historical email outlook",
+"import m365 mail"
+
+Constraints: personal plane only, envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM.
+
+## backfill-onedrive
+
+Pull OneDrive + SharePoint document libraries through Composio
+(OAuth2). Single skill covers both — Microsoft Graph treats SharePoint
+document libraries as drives. Normalize via
+`onedrive_item_to_envelope`, write to the **firm staging plane**
+(`<wiki_root>/staging/firm/onedrive/`) via
+`StagingWriter.write_envelope`. Per-scope durable runs (one per
+SharePoint site / OneDrive root). M365 equivalent of
+`backfill-firm-artefacts` (Drive). Visibility maps from
+permission-link scope (`anonymous` → public, `organization` →
+firm-internal) plus per-site rules (`is_sharepoint` + `sharepoint_site_id`).
+
+Triggers: "backfill onedrive", "backfill sharepoint",
+"import sharepoint", "sync onedrive",
+"pull historical documents m365", "import m365 documents"
+
+Constraints: firm plane only (administrator-run), envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM. SharePoint pages and list items have different
+shapes — separate helpers needed (not in V1).
+
 ## backfill-affinity
 
 Pull venture-CRM records (organizations, persons, opportunities) from

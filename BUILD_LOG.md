@@ -2497,3 +2497,66 @@ primary email + document substrate when a pilot firm is on Microsoft
 365 instead of Google Workspace. Then Attio (second venture CRM),
 Notion (workspace + document dual-binding), and finally Slack with
 its own ADR for the new `chat_system` role.
+
+## P3-prep continued — Outlook + OneDrive M365 bundle (email + document) (2026-04-25)
+
+Second venture-relevant batch lands. M365 stack swap-in unlocks pilot
+firms on Microsoft 365 instead of Google Workspace. Both connectors
+land together because they share the auth model + customer profile
+(an M365 firm needs both, not one or the other).
+
+### What landed
+
+- **Outlook connector** —
+  `src/memory_mission/ingestion/connectors/outlook.py`. 5 read actions
+  (list_messages, get_message, list_mail_folders, search_messages,
+  get_mail_delta — the last one for incremental resume). OAuth2.
+  Connector name 'outlook' matches manifest 'app: outlook'.
+- **`outlook_message_to_envelope`** — bound to `email` role.
+  Visibility surface includes `outlook_sensitivity` (Outlook's
+  built-in `normal`/`personal`/`private`/`confidential` field) as a
+  top-level metadata key for `if_field` rules; categories surface as
+  `labels` so `if_label` rules work like Gmail.
+- **OneDrive connector** —
+  `src/memory_mission/ingestion/connectors/onedrive.py`. 10 read
+  actions covering OneDrive personal/business AND SharePoint
+  document-library items + sites + list items + page content.
+  OAuth2. Connector name 'one_drive' matches manifest 'app: one_drive'.
+  Composio's toolkit conflates OneDrive and SharePoint doc libraries
+  through Microsoft Graph's drive-item API.
+- **`onedrive_item_to_envelope`** — bound to `document` role.
+  Visibility surface synthesizes `drive_anyone` (anonymous-link
+  permission), `drive_organization_link` (organization-scoped
+  permission), `is_sharepoint` (parentReference.siteId present), and
+  `sharepoint_site_id` for per-site rules. Mirrors Drive helper's
+  shape with M365-flavored extensions.
+- **`backfill-outlook` skill** — M365 equivalent of `backfill-gmail`.
+  Notes incremental-sync mode via `get_mail_delta` after the first
+  full backfill.
+- **`backfill-onedrive` skill** — administrator-run firm-plane
+  backfill for OneDrive + SharePoint document libraries. Per-scope
+  durable runs (one per site / one for personal root) so resume
+  contracts stay clean. Notes that SharePoint pages and list items
+  have different shapes — separate helpers when a pilot needs them.
+- **`docs/recipes/systems-yaml.md`** — M365 firm example added with
+  rules combining `outlook_sensitivity`, drive-link-scope, and
+  per-site SharePoint rules. Per-app `visibility_metadata` shape
+  table extended with the Outlook + OneDrive rows.
+- **Skill index + manifest** — `skills/_index.md` and
+  `skills/_manifest.jsonl` updated.
+
+### Verification
+
+- [x] `pytest` — 796/796 passed (+20 since Affinity: 6 connector
+      tests + 14 envelope tests across the two new helpers)
+- [x] `ruff check` + `ruff format --check` clean (after fixing two
+      E501 line-length issues)
+- [x] `mypy --strict` clean on 77 source files (+2)
+- [x] Manifest parses as valid JSONL (11 entries; was 9)
+
+### Next
+
+Attio (second venture CRM, slimmer surface than Affinity but cleaner
+OAuth2 auth). Then Notion (workspace + document dual-binding for
+firms that use Notion as their wiki). Then Slack with its own ADR
+for the new `chat_system` role.

@@ -84,6 +84,53 @@ bindings:
     # Items without a recognized label are rejected at ingestion.
 ```
 
+## M365 firm example — Outlook + OneDrive/SharePoint stack
+
+For firms on the Microsoft 365 stack (instead of Google Workspace).
+Outlook fulfils `email`; OneDrive (which Composio's toolkit also uses
+for SharePoint document libraries) fulfils `document`.
+
+```yaml
+firm_id: northpoint
+bindings:
+  email:
+    app: outlook
+    target_plane: personal
+    visibility_rules:
+      # Outlook's built-in sensitivity field is the strongest signal.
+      - if_field: { outlook_sensitivity: confidential }
+        scope: lp-only
+      - if_field: { outlook_sensitivity: private }
+        scope: employee-private
+      # User-assigned Outlook categories surface as `labels`.
+      - if_label: external-shared
+        scope: external-shared
+    default_visibility: employee-private
+
+  document:
+    app: one_drive
+    target_plane: firm
+    visibility_rules:
+      # OneDrive items shared via an anonymous link are public.
+      - if_field: { drive_anyone: true }
+        scope: public
+      # Items shared via an organization link stay firm-internal.
+      - if_field: { drive_organization_link: true }
+        scope: firm-internal
+      # SharePoint items can be scoped per-site (the helper synthesizes
+      # `sharepoint_site_id` from parentReference.siteId).
+      - if_field: { sharepoint_site_id: "abc-partner-site-id" }
+        scope: partner-only
+    default_visibility: client-confidential
+```
+
+Auth: OAuth2 via Composio (M365 enterprise SSO is handled at the
+Composio layer; the firm provisions per-firm OAuth config in
+Composio's dashboard). The OneDrive toolkit covers BOTH personal
+OneDrive AND SharePoint document libraries. SharePoint pages and list
+items have different shapes — separate helpers will land when a
+pilot needs them.
+
 ## Venture-CRM example — Affinity as the firm workspace
 
 Affinity is the dominant venture-fund CRM. Records (organizations,
@@ -174,6 +221,8 @@ lets you write rules that target the right keys.
 | `calendar_event_to_envelope` | `gcal_visibility` (str: `default` / `public` / `private` / `confidential`), `attendees` (list[str]), `labels` (list[str]) |
 | `drive_file_to_envelope` | `permissions` (list[dict]), `owners` (list[str]), `drive_anyone` (bool — synthesized: True iff any permission grants `type: anyone`), `labels` (list[str]) |
 | `affinity_record_to_envelope` | `labels` (list[str]: one `list:<list_id>` per Affinity list the record sits in, plus `global` when Affinity flags the record as global), `affinity_object_type` (`organization` / `person` / `opportunity`), `affinity_owner_id` (int or null) |
+| `outlook_message_to_envelope` | `outlook_sensitivity` (str: `normal` / `personal` / `private` / `confidential` — Outlook's built-in field), `labels` (list[str]: Outlook user-assigned categories), `to` (list[str]), `cc` (list[str]) |
+| `onedrive_item_to_envelope` | `permissions` (list[dict]: Microsoft Graph grants), `owners` (list[str]: display names), `drive_anyone` (bool — synthesized: True iff any permission grants `link.scope == "anonymous"`), `drive_organization_link` (bool — synthesized: True iff any link is `scope == "organization"`), `is_sharepoint` (bool — True when item lives in a SharePoint document library), `sharepoint_site_id` (str or null), `labels` (list[str]) |
 
 ## Loader API
 
