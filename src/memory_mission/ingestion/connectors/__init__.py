@@ -39,6 +39,14 @@ from memory_mission.ingestion.connectors.granola import (
     GRANOLA_ACTIONS,
     make_granola_connector,
 )
+from memory_mission.ingestion.connectors.onedrive import (
+    ONEDRIVE_ACTIONS,
+    make_onedrive_connector,
+)
+from memory_mission.ingestion.connectors.outlook import (
+    OUTLOOK_ACTIONS,
+    make_outlook_connector,
+)
 from memory_mission.ingestion.connectors.testing import InMemoryConnector
 
 __all__ = [
@@ -47,6 +55,8 @@ __all__ = [
     "DRIVE_ACTIONS",
     "GMAIL_ACTIONS",
     "GRANOLA_ACTIONS",
+    "ONEDRIVE_ACTIONS",
+    "OUTLOOK_ACTIONS",
     "ComposioClient",
     "ComposioConnector",
     "Connector",
@@ -59,4 +69,6 @@ __all__ = [
     "make_drive_connector",
     "make_gmail_connector",
     "make_granola_connector",
+    "make_onedrive_connector",
+    "make_outlook_connector",
 ]

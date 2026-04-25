@@ -27,6 +27,8 @@ from memory_mission.ingestion.envelopes import (
     drive_file_to_envelope,
     gmail_message_to_envelope,
     granola_transcript_to_envelope,
+    onedrive_item_to_envelope,
+    outlook_message_to_envelope,
 )
 from memory_mission.ingestion.roles import ConnectorRole
 from memory_mission.ingestion.systems_manifest import (
@@ -574,3 +576,244 @@ def test_affinity_envelope_rejects_wrong_app_binding() -> None:
     raw = {"id": 1, "name": "x", "dates_created_date": "2026-04-01T09:00:00Z", "list_entries": []}
     with pytest.raises(ValueError, match="bound to app='attio'"):
         affinity_record_to_envelope(raw, object_type="organization", manifest=manifest)
+
+
+# ---------- Outlook ----------
+
+
+def _outlook_manifest() -> SystemsManifest:
+    return SystemsManifest(
+        firm_id="northpoint",
+        bindings={
+            ConnectorRole.EMAIL: RoleBinding(
+                app="outlook",
+                target_plane="personal",
+                visibility_rules=(
+                    VisibilityRule(
+                        if_field={"outlook_sensitivity": "confidential"},
+                        scope="lp-only",
+                    ),
+                    VisibilityRule(
+                        if_field={"outlook_sensitivity": "private"},
+                        scope="employee-private",
+                    ),
+                    VisibilityRule(if_label="external-shared", scope="external-shared"),
+                ),
+                default_visibility="employee-private",
+            ),
+        },
+    )
+
+
+def test_outlook_envelope_round_trip_with_sensitivity() -> None:
+    raw = {
+        "id": "AAMkAD123",
+        "conversation_id": "conv-9",
+        "subject": "Confidential: LP commitment",
+        "body": "The LP confirmed their commitment.",
+        "categories": ["external-shared"],
+        "to_recipients": [{"emailAddress": {"address": "alice@northpoint.fund", "name": "Alice"}}],
+        "cc_recipients": [],
+        "sensitivity": "confidential",
+        "received_date_time": "2026-04-01T09:00:00Z",
+        "web_link": "https://outlook.office365.com/mail/inbox/id/AAMkAD123",
+    }
+    item = outlook_message_to_envelope(raw, manifest=_outlook_manifest())
+
+    assert item.source_role == ConnectorRole.EMAIL
+    assert item.concrete_app == "outlook"
+    assert item.external_object_type == "message"
+    assert item.external_id == "AAMkAD123"
+    assert item.container_id == "conv-9"
+    assert item.url == "https://outlook.office365.com/mail/inbox/id/AAMkAD123"
+    assert item.target_scope == "lp-only"  # sensitivity:confidential rule fires first
+    assert item.target_plane == "personal"
+    assert item.title == "Confidential: LP commitment"
+    assert item.body == "The LP confirmed their commitment."
+    assert item.modified_at == datetime(2026, 4, 1, 9, 0, tzinfo=UTC)
+    assert item.visibility_metadata["outlook_sensitivity"] == "confidential"
+    assert item.visibility_metadata["to"] == ["alice@northpoint.fund"]
+
+
+def test_outlook_envelope_label_match_via_categories() -> None:
+    raw = {
+        "id": "x",
+        "subject": "deal flow",
+        "body": "x",
+        "categories": ["external-shared"],
+        "sensitivity": "normal",
+        "received_date_time": "2026-04-01T09:00:00Z",
+    }
+    item = outlook_message_to_envelope(raw, manifest=_outlook_manifest())
+    assert item.target_scope == "external-shared"  # label rule matches
+
+
+def test_outlook_envelope_default_when_normal_and_no_label() -> None:
+    raw = {
+        "id": "y",
+        "subject": "ordinary mail",
+        "body": "x",
+        "sensitivity": "normal",
+        "received_date_time": "2026-04-01T09:00:00Z",
+    }
+    item = outlook_message_to_envelope(raw, manifest=_outlook_manifest())
+    assert item.target_scope == "employee-private"  # manifest default
+
+
+def test_outlook_envelope_missing_id_raises() -> None:
+    raw = {"subject": "x", "received_date_time": "2026-04-01T09:00:00Z"}
+    with pytest.raises(ValueError, match="missing required string field"):
+        outlook_message_to_envelope(raw, manifest=_outlook_manifest())
+
+
+def test_outlook_envelope_rejects_wrong_app_binding() -> None:
+    manifest = SystemsManifest(
+        firm_id="x",
+        bindings={
+            ConnectorRole.EMAIL: RoleBinding(
+                app="gmail",
+                target_plane="personal",
+                default_visibility="employee-private",
+            ),
+        },
+    )
+    raw = {"id": "x", "subject": "x", "received_date_time": "2026-04-01T09:00:00Z"}
+    with pytest.raises(ValueError, match="bound to app='gmail'"):
+        outlook_message_to_envelope(raw, manifest=manifest)
+
+
+# ---------- OneDrive / SharePoint ----------
+
+
+def _onedrive_manifest() -> SystemsManifest:
+    return SystemsManifest(
+        firm_id="northpoint",
+        bindings={
+            ConnectorRole.DOCUMENT: RoleBinding(
+                app="one_drive",
+                target_plane="firm",
+                visibility_rules=(
+                    VisibilityRule(if_field={"drive_anyone": True}, scope="public"),
+                    VisibilityRule(
+                        if_field={"drive_organization_link": True},
+                        scope="firm-internal",
+                    ),
+                    VisibilityRule(if_field={"is_sharepoint": True}, scope="partner-only"),
+                ),
+                default_visibility="client-confidential",
+            ),
+        },
+    )
+
+
+def test_onedrive_envelope_round_trip_anyone_link() -> None:
+    raw = {
+        "id": "01ABC123",
+        "name": "Q4 LP Update.docx",
+        "file": {
+            "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        },
+        "content": "# Q4 update…",
+        "permissions": [
+            {"id": "p1", "roles": ["read"], "link": {"scope": "anonymous", "type": "view"}},
+        ],
+        "createdBy": {"user": {"displayName": "Alice", "email": "alice@northpoint.fund"}},
+        "lastModifiedDateTime": "2026-03-31T18:00:00Z",
+        "webUrl": "https://northpoint.sharepoint.com/file.docx",
+        "parentReference": {"driveId": "drive-1", "id": "fold-9"},
+    }
+    item = onedrive_item_to_envelope(raw, manifest=_onedrive_manifest())
+
+    assert item.source_role == ConnectorRole.DOCUMENT
+    assert item.concrete_app == "one_drive"
+    assert item.external_object_type.startswith("application/")
+    assert item.external_id == "01ABC123"
+    assert item.target_scope == "public"  # drive_anyone rule fires first
+    assert item.target_plane == "firm"
+    assert item.modified_at == datetime(2026, 3, 31, 18, 0, tzinfo=UTC)
+    assert item.visibility_metadata["drive_anyone"] is True
+    assert item.visibility_metadata["is_sharepoint"] is False  # no siteId
+    assert item.visibility_metadata["owners"] == ["Alice"]
+
+
+def test_onedrive_envelope_sharepoint_item_sets_site_id_and_scope() -> None:
+    raw = {
+        "id": "sp-item-1",
+        "name": "Partner-only memo.docx",
+        "file": {"mimeType": "application/pdf"},
+        "permissions": [],
+        "lastModifiedDateTime": "2026-03-31T18:00:00Z",
+        "parentReference": {"siteId": "site-abc", "driveId": "drive-2"},
+    }
+    item = onedrive_item_to_envelope(raw, manifest=_onedrive_manifest())
+    assert item.visibility_metadata["is_sharepoint"] is True
+    assert item.visibility_metadata["sharepoint_site_id"] == "site-abc"
+    assert item.target_scope == "partner-only"  # is_sharepoint rule
+
+
+def test_onedrive_envelope_organization_link() -> None:
+    raw = {
+        "id": "shared-1",
+        "name": "Internal memo",
+        "file": {"mimeType": "text/plain"},
+        "permissions": [
+            {"link": {"scope": "organization", "type": "view"}},
+        ],
+        "lastModifiedDateTime": "2026-03-31T18:00:00Z",
+    }
+    item = onedrive_item_to_envelope(raw, manifest=_onedrive_manifest())
+    assert item.visibility_metadata["drive_organization_link"] is True
+    assert item.target_scope == "firm-internal"
+
+
+def test_onedrive_envelope_falls_back_to_default() -> None:
+    raw = {
+        "id": "private-1",
+        "name": "private notes",
+        "file": {"mimeType": "text/plain"},
+        "permissions": [],
+        "lastModifiedDateTime": "2026-03-31T18:00:00Z",
+    }
+    item = onedrive_item_to_envelope(raw, manifest=_onedrive_manifest())
+    assert item.target_scope == "client-confidential"
+    assert item.visibility_metadata["drive_anyone"] is False
+    assert item.visibility_metadata["drive_organization_link"] is False
+
+
+def test_onedrive_envelope_folder_object_type() -> None:
+    raw = {
+        "id": "fold-1",
+        "name": "Pitches",
+        "folder": {"childCount": 12},
+        "permissions": [],
+        "lastModifiedDateTime": "2026-03-31T18:00:00Z",
+    }
+    item = onedrive_item_to_envelope(raw, manifest=_onedrive_manifest())
+    assert item.external_object_type == "folder"
+
+
+def test_onedrive_envelope_missing_id_raises() -> None:
+    raw = {"name": "x", "lastModifiedDateTime": "2026-03-31T18:00:00Z", "permissions": []}
+    with pytest.raises(ValueError, match="missing required string field"):
+        onedrive_item_to_envelope(raw, manifest=_onedrive_manifest())
+
+
+def test_onedrive_envelope_rejects_wrong_app_binding() -> None:
+    manifest = SystemsManifest(
+        firm_id="x",
+        bindings={
+            ConnectorRole.DOCUMENT: RoleBinding(
+                app="drive",
+                target_plane="firm",
+                default_visibility="public",
+            ),
+        },
+    )
+    raw = {
+        "id": "x",
+        "name": "x",
+        "lastModifiedDateTime": "2026-03-31T18:00:00Z",
+        "permissions": [],
+    }
+    with pytest.raises(ValueError, match="bound to app='drive'"):
+        onedrive_item_to_envelope(raw, manifest=manifest)

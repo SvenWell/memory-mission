@@ -17,6 +17,8 @@ from memory_mission.ingestion.connectors import (
     DRIVE_ACTIONS,
     GMAIL_ACTIONS,
     GRANOLA_ACTIONS,
+    ONEDRIVE_ACTIONS,
+    OUTLOOK_ACTIONS,
     ComposioConnector,
     Connector,
     ConnectorAction,
@@ -28,6 +30,8 @@ from memory_mission.ingestion.connectors import (
     make_drive_connector,
     make_gmail_connector,
     make_granola_connector,
+    make_onedrive_connector,
+    make_outlook_connector,
 )
 from memory_mission.middleware import PIIRedactionMiddleware
 from memory_mission.observability import (
@@ -401,6 +405,99 @@ def test_affinity_requires_client_for_invoke() -> None:
     conn = make_affinity_connector()
     with pytest.raises(NotImplementedError, match="no client attached"):
         conn.invoke("list_organizations", {})
+
+
+# ---------- Outlook factory ----------
+
+
+def test_outlook_exposes_read_actions() -> None:
+    conn = make_outlook_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "list_messages",
+        "get_message",
+        "list_mail_folders",
+        "search_messages",
+        "get_mail_delta",
+    }
+    assert conn.name == "outlook"
+
+
+def test_outlook_actions_match_exported_constant() -> None:
+    assert make_outlook_connector().list_actions() == list(OUTLOOK_ACTIONS)
+
+
+def test_outlook_preview_includes_sender_and_subject() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "from": {"emailAddress": {"address": "alice@northpoint.fund"}},
+                "subject": "Q3 Review",
+                "body_preview": "Here's the Q3 agenda.",
+            }
+
+    conn = make_outlook_connector(client=FakeClient())
+    result = conn.invoke("get_message", {"message_id": "AAMkAD..."})
+    assert "alice@northpoint.fund" in result.preview
+    assert "Q3 Review" in result.preview
+    assert "Q3 agenda" in result.preview
+
+
+def test_outlook_requires_client_for_invoke() -> None:
+    conn = make_outlook_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_messages", {})
+
+
+# ---------- OneDrive / SharePoint factory ----------
+
+
+def test_onedrive_exposes_read_actions() -> None:
+    conn = make_onedrive_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "list_drive_items",
+        "get_item",
+        "list_recent_items",
+        "search_items",
+        "get_item_metadata",
+        "get_item_permissions",
+        "get_sharepoint_site_details",
+        "list_site_subsites",
+        "get_sharepoint_list_items",
+        "get_sharepoint_site_page_content",
+    }
+    assert conn.name == "one_drive"
+
+
+def test_onedrive_actions_match_exported_constant() -> None:
+    assert make_onedrive_connector().list_actions() == list(ONEDRIVE_ACTIONS)
+
+
+def test_onedrive_preview_includes_name_and_mime() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "name": "Q4 LP Update.docx",
+                "file": {
+                    "mimeType": (
+                        "application/vnd.openxmlformats-officedocument"
+                        ".wordprocessingml.document"
+                    )
+                },
+                "content": "Q4 thesis: lean into vertical AI infrastructure.",
+            }
+
+    conn = make_onedrive_connector(client=FakeClient())
+    result = conn.invoke("get_item", {"item_id": "01ABC..."})
+    assert "Q4 LP Update.docx" in result.preview
+    assert "vertical AI infrastructure" in result.preview
+
+
+def test_onedrive_requires_client_for_invoke() -> None:
+    conn = make_onedrive_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_drive_items", {})
 
 
 # ---------- Harness invoke() ----------

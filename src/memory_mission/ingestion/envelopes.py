@@ -29,6 +29,128 @@ from memory_mission.ingestion.systems_manifest import (
 )
 
 
+def outlook_message_to_envelope(
+    raw: dict[str, Any],
+    *,
+    manifest: SystemsManifest,
+) -> NormalizedSourceItem:
+    """Map a Composio Outlook (Microsoft 365) message payload to a ``NormalizedSourceItem``.
+
+    Visibility surface:
+
+    - ``outlook_sensitivity`` — Outlook's built-in field
+      (``normal`` / ``personal`` / ``private`` / ``confidential``)
+      surfaced as a top-level metadata key for direct ``if_field``
+      matching. Mirrors the ``gcal_visibility`` shape.
+    - ``categories`` — Outlook's user-assigned category strings
+      (Outlook's equivalent of Gmail labels), surfaced as ``labels``
+      so ``if_label`` rules match like Gmail.
+    - ``to`` / ``cc`` — recipient lists.
+    """
+    binding = _binding_for(ConnectorRole.EMAIL, expected_app="outlook", manifest=manifest)
+    categories = list(raw.get("categories", []))
+    visibility: dict[str, Any] = {
+        "labels": categories,
+        "outlook_sensitivity": str(raw.get("sensitivity", "normal")),
+        "to": _outlook_recipients(raw.get("to_recipients") or raw.get("to")),
+        "cc": _outlook_recipients(raw.get("cc_recipients") or raw.get("cc")),
+    }
+    target_scope = map_visibility(visibility, role=ConnectorRole.EMAIL, manifest=manifest)
+    return NormalizedSourceItem(
+        source_role=ConnectorRole.EMAIL,
+        concrete_app="outlook",
+        external_object_type="message",
+        external_id=_require_str(raw, ("id", "message_id"), source="outlook"),
+        container_id=_optional_str(raw, ("conversation_id", "parent_folder_id")),
+        url=_optional_str(raw, ("web_link", "webLink")),
+        modified_at=_require_datetime(
+            raw,
+            ("received_date_time", "receivedDateTime", "sent_date_time", "last_modified_date_time"),
+            source="outlook",
+        ),
+        visibility_metadata=visibility,
+        target_scope=target_scope,
+        target_plane=binding.target_plane,
+        title=str(raw.get("subject", "")),
+        body=str(raw.get("body", raw.get("body_preview", ""))),
+        raw=dict(raw),
+    )
+
+
+def onedrive_item_to_envelope(
+    raw: dict[str, Any],
+    *,
+    manifest: SystemsManifest,
+) -> NormalizedSourceItem:
+    """Map a Composio OneDrive / SharePoint drive item to a ``NormalizedSourceItem``.
+
+    Single helper handles personal OneDrive AND SharePoint document
+    libraries — Microsoft Graph treats both as drives. SharePoint
+    pages and list items have different shapes (separate helpers when
+    they're needed).
+
+    Visibility surface:
+
+    - ``drive_anyone`` — synthesized: True iff any permission grants
+      an anonymous link. Mirrors the Drive helper's shape.
+    - ``drive_organization_link`` — synthesized: True iff any
+      permission grants an organization-scoped link.
+    - ``is_sharepoint`` — True when ``parentReference.siteId`` is set
+      (item lives in a SharePoint document library, not personal
+      OneDrive).
+    - ``sharepoint_site_id`` — site id when ``is_sharepoint``.
+    - ``permissions`` — raw Microsoft Graph permission grants.
+    - ``owners`` — owner display names.
+    - ``labels`` — Outlook-style categories if present.
+    """
+    binding = _binding_for(ConnectorRole.DOCUMENT, expected_app="one_drive", manifest=manifest)
+    permissions = list(raw.get("permissions", []))
+    parent_ref = raw.get("parent_reference") or raw.get("parentReference") or {}
+    if not isinstance(parent_ref, dict):
+        parent_ref = {}
+    site_id = parent_ref.get("site_id") or parent_ref.get("siteId")
+    visibility: dict[str, Any] = {
+        "permissions": permissions,
+        "owners": _onedrive_owners(raw),
+        "drive_anyone": _onedrive_link_scope_present(permissions, "anonymous"),
+        "drive_organization_link": _onedrive_link_scope_present(permissions, "organization"),
+        "is_sharepoint": bool(site_id),
+        "sharepoint_site_id": site_id if isinstance(site_id, str) else None,
+        "labels": list(raw.get("categories", [])),
+    }
+    target_scope = map_visibility(visibility, role=ConnectorRole.DOCUMENT, manifest=manifest)
+    file_block = raw.get("file") or {}
+    mime = ""
+    if isinstance(file_block, dict):
+        mime = str(file_block.get("mime_type") or file_block.get("mimeType", ""))
+    object_type = mime or ("folder" if raw.get("folder") else "drive_item")
+    return NormalizedSourceItem(
+        source_role=ConnectorRole.DOCUMENT,
+        concrete_app="one_drive",
+        external_object_type=object_type,
+        external_id=_require_str(raw, ("id", "item_id"), source="one_drive"),
+        container_id=_optional_str_from_dict(parent_ref, ("id", "drive_id", "driveId")),
+        url=_optional_str(raw, ("web_url", "webUrl", "url")),
+        modified_at=_require_datetime(
+            raw,
+            (
+                "last_modified_date_time",
+                "lastModifiedDateTime",
+                "modified_at",
+                "created_date_time",
+                "createdDateTime",
+            ),
+            source="one_drive",
+        ),
+        visibility_metadata=visibility,
+        target_scope=target_scope,
+        target_plane=binding.target_plane,
+        title=str(raw.get("name", "")),
+        body=str(raw.get("content", raw.get("body", ""))),
+        raw=dict(raw),
+    )
+
+
 def gmail_message_to_envelope(
     raw: dict[str, Any],
     *,
@@ -407,6 +529,60 @@ def _affinity_body(raw: dict[str, Any], *, object_type: str) -> str:
     return "\n".join(parts)
 
 
+def _outlook_recipients(field: Any) -> list[str]:
+    """Extract email-shaped strings from Outlook's nested recipient lists."""
+    if not isinstance(field, list):
+        return []
+    out: list[str] = []
+    for entry in field:
+        if isinstance(entry, dict):
+            ea = entry.get("email_address") or entry.get("emailAddress")
+            if isinstance(ea, dict):
+                addr = ea.get("address")
+                if isinstance(addr, str) and addr:
+                    out.append(addr)
+                    continue
+            addr = entry.get("address")
+            if isinstance(addr, str) and addr:
+                out.append(addr)
+        elif isinstance(entry, str) and entry:
+            out.append(entry)
+    return out
+
+
+def _onedrive_link_scope_present(permissions: list[Any], scope: str) -> bool:
+    """True if any permission grants a sharing link with the given scope."""
+    for perm in permissions:
+        if not isinstance(perm, dict):
+            continue
+        link = perm.get("link") or {}
+        if isinstance(link, dict) and link.get("scope") == scope:
+            return True
+    return False
+
+
+def _onedrive_owners(raw: dict[str, Any]) -> list[str]:
+    """Extract owner display names from a OneDrive item's createdBy / owner fields."""
+    out: list[str] = []
+    for key in ("created_by", "createdBy", "owner"):
+        block = raw.get(key)
+        if isinstance(block, dict):
+            user = block.get("user") or block
+            if isinstance(user, dict):
+                name = user.get("display_name") or user.get("displayName") or user.get("email")
+                if isinstance(name, str) and name:
+                    out.append(name)
+    return out
+
+
+def _optional_str_from_dict(d: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = d.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def _attendee_emails(attendees: Any) -> list[str]:
     """Extract email-shaped strings from Google Calendar attendees list."""
     if not isinstance(attendees, list):
@@ -435,4 +611,6 @@ __all__ = [
     "drive_file_to_envelope",
     "gmail_message_to_envelope",
     "granola_transcript_to_envelope",
+    "onedrive_item_to_envelope",
+    "outlook_message_to_envelope",
 ]
