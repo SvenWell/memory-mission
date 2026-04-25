@@ -34,17 +34,37 @@ DDQ responses, board meetings, partner emails), prefer the following
 predicates. Consistency lets the firm KG roll up across deals + people +
 portfolio companies.
 
-### Lifecycle + decision predicates
+### Lifecycle + decision predicates (canonical + parallel sub-states)
 
-| Predicate | Subject | Object | Notes |
+A venture deal has **one canonical high-level lifecycle** plus several
+**parallel sub-state machines**. The constitution declares the
+authoritative vocabulary for each. Single source events commonly emit
+multiple facts at once: a sub-state update + an EventFact + a
+*recommended-but-not-applied* high-level lifecycle change. The reviewer
+decides whether to advance the high-level stage.
+
+| Predicate | Subject | Object (authoritative vocab) | Notes |
 |---|---|---|---|
-| `lifecycle_status` | deal entity | one of `sourced` / `screening` / `diligence` / `ddq` / `memo` / `ic` / `decision` / `portfolio` / `passed` | Authoritative vocab in `firm/concepts/venture-constitution.md`. Values outside this list will coherence-warn at promote time. |
-| `ic_decision` | deal entity | one of `invest` / `pass` / `defer` / `follow_up` | Records IC vote outcome. Always paired with the IC meeting transcript as source. |
-| `ddq_status` | deal entity | one of `not_sent` / `sent` / `partial` / `complete` | Tracks diligence questionnaire workflow. |
+| `lifecycle_status` | deal entity | `sourced` / `screening` / `diligence` / `ddq` / `memo` / `ic` / `decision` / `portfolio` / `passed` | Canonical high-level stage. Authoritative vocab in `firm/concepts/venture-constitution.md` `lifecycle_stages`. |
+| `ddq_status` | deal entity | `not_sent` / `sent` / `partial` / `complete` / `reviewed` | Sub-state: diligence questionnaire workflow. |
+| `memo_status` | deal entity | `not_started` / `draft` / `ready_for_ic` | Sub-state: investment memo authoring. |
+| `ic_status` | deal entity | `not_scheduled` / `scheduled` / `discussed` / `decided` | Sub-state: IC meeting workflow. |
+| `closing_status` | deal entity | `not_started` / `negotiating` / `term_sheet_signed` / `closed` | Sub-state: post-decision capital deployment. |
+| `portfolio_status` | deal/company entity | `active` / `exited` / `written_off` | Sub-state: post-investment portfolio state. |
+| `ic_decision` | deal entity | `invest` / `pass` / `defer` / `follow_up` | Records IC vote outcome. Always paired with IC meeting transcript as source. |
 | `next_step` | deal or person entity | free-form string description | Use with optional `due_by` field on the fact for time-bounded commitments. |
 | `valuation_at_entry` | deal entity | numeric (USD) | Records the post-money valuation at investment. Confidence ≤ 0.9 unless from term sheet. |
 | `closing_date` | deal entity | ISO date | Date capital deployed. |
 | `data_room_link` | deal entity | URL | Pointer to the firm-internal data room. |
+
+**Multi-fact emission pattern.** A single source event commonly
+warrants emitting several facts at once. Example: "DDQ received" →
+emit (1) `ddq_status` update to `complete`, (2) an `EventFact`
+recording the receipt date, (3) optionally a *recommended* (not
+applied) `lifecycle_status` advance flagged for the reviewer to
+confirm. The extraction prompt should not silently auto-advance the
+high-level lifecycle on a sub-state event — the reviewer makes that
+call.
 
 ### Relationship predicates (extend existing vocab)
 
@@ -138,6 +158,71 @@ most identity relationships. Venture sources commonly add `degrees_from`
   add atomically.
 - Confidence below 0.6 routes to `open_question` rather than a triple.
 - Every fact carries `support_quote`. No quote, no fact.
+
+## Worked example 1.5 — DDQ received (multi-fact event)
+
+**Source item:** Email titled "Re: Northpoint DDQ — responses
+attached", 2026-04-22, from Sarah Chen.
+
+**Excerpt:** "Attached please find our complete responses to your DDQ.
+Happy to set up a follow-up call this week to discuss the GTM section
+in more detail."
+
+**Expected extraction (selected facts — emphasis on multi-fact pattern):**
+
+```json
+[
+  {
+    "kind": "update",
+    "subject_name": "Northpoint",
+    "predicate": "ddq_status",
+    "object_name": "complete",
+    "supersedes_object": "sent",
+    "confidence": 0.9,
+    "support_quote": "Attached please find our complete responses to your DDQ.",
+    "valid_from": "2026-04-22"
+  },
+  {
+    "kind": "event",
+    "subject_name": "Northpoint",
+    "predicate": "ddq_received_at",
+    "object_name": "2026-04-22",
+    "confidence": 0.95,
+    "support_quote": "Attached please find our complete responses to your DDQ."
+  },
+  {
+    "kind": "open_question",
+    "subject_name": "Northpoint",
+    "topic": "lifecycle_advance_recommendation",
+    "confidence": 0.6,
+    "support_quote": "Attached please find our complete responses to your DDQ.",
+    "note": "DDQ now complete — RECOMMEND but do not auto-apply lifecycle_status: ddq → memo. Reviewer confirms after reading the responses."
+  },
+  {
+    "kind": "event",
+    "subject_name": "Northpoint",
+    "predicate": "next_step",
+    "object_name": "schedule GTM follow-up call",
+    "confidence": 0.85,
+    "support_quote": "Happy to set up a follow-up call this week to discuss the GTM section",
+    "due_by": "2026-04-26"
+  }
+]
+```
+
+**Notes:**
+- ONE source event ("DDQ received") emits FOUR facts: a sub-state
+  update (`ddq_status: sent → complete`), an event (the
+  receipt date), an `open_question` flagging a recommended (not
+  applied) high-level lifecycle change, and a separate next-step
+  commitment.
+- `lifecycle_status` is NOT auto-advanced. The reviewer decides
+  whether `ddq → memo` is warranted after reading the DDQ
+  responses themselves.
+- `valid_from` is the source-attested event date (when DDQ was
+  received: 2026-04-22), NOT the extraction date. This matters for
+  timeline-correct queries: "what was Northpoint's ddq_status as of
+  2026-04-21?" should return `sent`, not `complete`.
 
 ## Worked example 2 — IC decision (meeting transcript)
 

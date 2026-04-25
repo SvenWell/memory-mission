@@ -2886,3 +2886,102 @@ deal page from `page_templates/deal.md`, walk it from `sourced` →
 `diligence` → `ic` → `decision` via `update-deal-status` +
 `record-ic-decision`. Each transition should produce a Proposal that
 review-proposals shows for approval.
+
+## P7-A Week 1.5 — Hermes-feedback acceptance polish (2026-04-25)
+
+Five sharp critiques from the Hermes-agent post-Week-1 review that
+materially improve the venture overlay before merging to main.
+Bundled into one commit. Plan section: "Week 1.5 polish commit
+(Hermes-feedback acceptance)" in
+`/Users/svenwellmann/.claude/plans/okay-lets-envision-a-joyful-prism.md`.
+
+### What landed
+
+1. **Contract tests for the venture overlay** —
+   `tests/test_overlay_contract.py` (new). 32 parametrized tests
+   covering: `firm_template.yaml` parses via `load_systems_manifest`
+   with all 6 role bindings; `constitution_seed.md` round-trips
+   with all 12 extras preserved (lifecycle_stages + 5 sub-state
+   vocabularies + ic_quorum + decision_rights +
+   diligence_required_artefacts + sourcing_targets +
+   ic_meeting_cadence + fund_thesis_review_cadence); each page
+   template round-trips + uses CORE_DOMAINS + valid tier;
+   permissions_preset.md contains all 5 role presets + all 5 scope
+   names; prompt_examples.md contains the 7-predicate venture
+   vocabulary + worked-example markers. Catches drift if anyone
+   edits the overlay files without re-running smoke checks.
+
+2. **Constitution: parallel sub-state vocabularies (multi-axis
+   lifecycle)** — `overlays/venture/constitution_seed.md` extras
+   bumped from 7 to 12. Five new vocabulary lists declared:
+   `ddq_statuses`, `memo_statuses`, `ic_statuses`,
+   `closing_statuses`, `portfolio_statuses`. Body explanation
+   restructured around "canonical high-level + parallel sub-states"
+   pattern. Captures the Hermes critique that single
+   `lifecycle_status` collapses parallel state machines venture
+   really has (ddq workflow + memo workflow + IC workflow + closing
+   workflow + portfolio workflow all evolve independently).
+
+3. **Prompt examples: multi-fact-event pattern** —
+   `overlays/venture/prompt_examples.md` extended with worked
+   example 1.5 ("DDQ received") showing one source event emitting
+   four facts: a sub-state UpdateFact (ddq_status: sent →
+   complete), an EventFact (ddq_received_at: 2026-04-22), an
+   OpenQuestion *recommending but not applying* a high-level
+   lifecycle_status advance, and a separate next_step commitment.
+   Predicate vocabulary table extended to 11 venture-specific
+   predicates (5 sub-state + the original 6).
+
+4. **`valid_from` = source-attested event date convention** — both
+   `skills/update-deal-status/SKILL.md` and
+   `skills/record-ic-decision/SKILL.md` now explicitly require
+   that every UpdateFact's `valid_from` is the date the source
+   attests the transition happened (DDQ received Monday, extracted
+   Wednesday → triple's `valid_from = Monday`, proposal's
+   `created_at = Wednesday`). Substrate already supports this
+   correctly; the convention captures it as skill-level discipline
+   so timeline queries stay correct.
+
+5. **Workflow-skills-never-mutate-truth invariant (named)** —
+   `docs/ABSTRACTIONS.md` gains a new "Workflow skill invariant"
+   section under skills registry. The rule was implicit before
+   ("never auto-promote"); now it's a named architectural rule:
+   workflow skills create Proposals + draft events, NEVER call
+   `promote()` directly, NEVER write to `KnowledgeGraph` directly,
+   NEVER modify pages directly. The invariant is restated as the
+   first constraint in both venture workflow skills' constraints
+   blocks (so the rule is enforced at design time + visible at use
+   time). Cited compliance: `meeting-prep`, `update-deal-status`,
+   `record-ic-decision`, `extract-from-staging`,
+   `detect-firm-candidates`, `onboard-venture-firm`.
+
+6. **MCP firm-plane connection as workflow-skill prereq** — both
+   `update-deal-status` + `record-ic-decision` SKILL.md preconditions
+   now explicitly require the host agent to be configured to call
+   the firm KG / page / proposal MCP tools (Step 18 surface) against
+   the firm directory. MemPalace-direct alone cannot walk the
+   lifecycle; the firm-plane temporal+stateful state is what makes
+   governance visible. Configuration only; no new code.
+
+### Verification
+
+- [x] `pytest` — 869/869 passed (was 837 + 32 new contract tests)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 80 source files
+- [x] `tests/test_skills_registry.py` — manifest entries match
+      SKILL.md frontmatter (manifest updated to mirror the new
+      preconditions + constraints in both venture workflow skills)
+- [x] Constitution round-trips with all 12 extras preserved
+- [x] All 4 page templates round-trip cleanly (covered by parametrized
+      contract tests)
+- [x] Workflow-skills-never-mutate-truth invariant named in
+      ABSTRACTIONS.md + repeated in every venture workflow skill's
+      constraints
+
+### What's next
+
+Week 2 of the prism plan: **C (Context Farmer surface)** +
+**B-slice 2 (`weekly-portfolio-update` skill)** in parallel. **H
+(personal-plane temporal KG / restore the structured personal brain)**
+runs concurrently in Weeks 2–3. ADR-0013 documents the personal-KG
+restoration design.

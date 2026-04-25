@@ -19,6 +19,30 @@ lifecycle_stages:
   - decision
   - portfolio
   - passed
+ddq_statuses:
+  - not_sent
+  - sent
+  - partial
+  - complete
+  - reviewed
+memo_statuses:
+  - not_started
+  - draft
+  - ready_for_ic
+ic_statuses:
+  - not_scheduled
+  - scheduled
+  - discussed
+  - decided
+closing_statuses:
+  - not_started
+  - negotiating
+  - term_sheet_signed
+  - closed
+portfolio_statuses:
+  - active
+  - exited
+  - written_off
 ic_quorum: 3
 decision_rights:
   partner_solo: invest_lt_500k
@@ -74,7 +98,21 @@ operating concepts:
    this regime; subsequent state (board cadence, reserve allocation,
    exit modeling) is firm-doctrine, not constitution.
 
-## Lifecycle stages (authoritative vocabulary)
+## Multi-axis lifecycle (canonical + sub-states)
+
+A venture deal has **one canonical high-level lifecycle** plus several
+**parallel sub-state machines**. The canonical lifecycle is what you see
+on a Bases dashboard / portfolio view. The sub-states evolve in
+parallel and one event commonly updates several at once. Example: "DDQ
+received" updates `ddq_status: complete`, adds an event, and *recommends
+but does not auto-apply* a `lifecycle_status` advance to `memo` — the
+reviewer decides when the high-level stage actually advances.
+
+The `update-deal-status` skill emits multi-fact proposals to capture
+this correctly: a single source event can produce a sub-state update
++ an EventFact + an optional recommended high-level transition.
+
+### `lifecycle_status` (canonical, authoritative vocabulary)
 
 The values declared in frontmatter `lifecycle_stages`:
 
@@ -93,6 +131,25 @@ The values declared in frontmatter `lifecycle_stages`:
 Every stage transition writes an `UpdateFact` with predicate
 `lifecycle_status`, supersedes the prior status triple, and cites the
 artefact that drove the transition (which DDQ doc, which IC meeting).
+
+### Sub-state vocabularies (authoritative)
+
+Each sub-state machine has its own predicate + value set, declared in
+frontmatter:
+
+| Sub-state predicate | Values (from frontmatter) | What it tracks |
+|---|---|---|
+| `ddq_status` | `not_sent` / `sent` / `partial` / `complete` / `reviewed` | Diligence questionnaire workflow |
+| `memo_status` | `not_started` / `draft` / `ready_for_ic` | Investment memo authoring state |
+| `ic_status` | `not_scheduled` / `scheduled` / `discussed` / `decided` | IC meeting workflow |
+| `closing_status` | `not_started` / `negotiating` / `term_sheet_signed` / `closed` | Post-decision capital deployment |
+| `portfolio_status` | `active` / `exited` / `written_off` | Post-investment portfolio state |
+
+Sub-state changes are themselves `UpdateFact`s with the appropriate
+predicate; they cite the source artefact same as lifecycle_status. The
+extraction prompt teaches the LLM to emit sub-state updates whenever
+the source attests them, independent of (and usually before) the
+high-level `lifecycle_status` advance.
 
 ## Decision rights (authoritative vocabulary)
 

@@ -8,10 +8,15 @@ preconditions:
   - "venture overlay copied into the firm directory (firm/concepts/venture-constitution.md present and tier=constitution)"
   - "the deal entity exists in the firm KG — resolve via identity_resolver before calling this skill"
   - "the source artefact driving the transition is staged or already promoted (the transition needs a citation)"
+  - "the host agent (Hermes / Codex / Cowork / Claude Code) is configured to call the firm KG / page / proposal MCP tools (Step 18 surface) against the firm directory — MemPalace-direct alone cannot walk the lifecycle; the firm-plane temporal+stateful state is what makes governance visible"
 constraints:
+  - "INVARIANT: workflow skills never mutate firm truth directly. This skill creates Proposals + draft events. It MUST NOT call promote(), MUST NOT write to KnowledgeGraph directly, MUST NOT modify pages directly. The review-proposals workflow is the single mutation surface for firm truth."
   - "never auto-promote — every transition is a Proposal that goes through review-proposals"
   - "every UpdateFact carries a non-empty support_quote citing the source artefact"
+  - "every UpdateFact's `valid_from` is the source-attested event date (when the transition actually happened per the source), NOT now() / extraction time. The proposal's `created_at` is system time; valid_from on the triple is event time. Timeline queries must remain correct (e.g., 'what was status on Monday?' returns the answer that was true on Monday, not the answer learned on Wednesday)."
   - "lifecycle predicate enum is bounded by firm/concepts/venture-constitution.md `lifecycle_stages` — values outside the list raise a coherence warning at promote time"
+  - "sub-state predicates (`ddq_status`, `memo_status`, `ic_status`, `closing_status`, `portfolio_status`) are bounded by their respective constitution vocabulary lists (`ddq_statuses`, `memo_statuses`, etc.)"
+  - "single source events commonly emit multi-fact proposals: a sub-state UpdateFact + an EventFact + optionally an open_question RECOMMENDING (not applying) a high-level lifecycle_status change. The reviewer decides whether to advance the high-level stage."
   - "do NOT skip lifecycle stages without rationale — sourced → memo (skipping screening + diligence + ddq) requires explicit reviewer override"
   - "diligence → memo transitions check `diligence_required_artefacts` from the constitution; missing artefacts surface as forcing questions to the reviewer"
   - "decision-stage transitions are administrator-gated — only IC members can propose `lifecycle_status: decision` (use record-ic-decision skill instead)"
@@ -80,18 +85,31 @@ constitution before proposing.
    `decision` requires IC quorum validation that is not part of this
    skill's surface.
 
-6. **Host LLM drafts the proposal.** Inputs: current context (from
-   step 2), proposed new stage (from step 3), source artefact (from
-   the trigger phrase or the operator-supplied evidence). Output:
-   - `UpdateFact` (subject: deal_entity, predicate: `lifecycle_status`,
-     object: new_stage, supersedes_object: current_stage, support_quote
-     citing the source artefact)
-   - Optional `EventFact` (subject: deal_entity, predicate:
-     `lifecycle_transitioned_at`, object: today's date, support_quote
-     same as above)
-   - Optional `next_step` facts if the new stage typically requires
-     follow-up actions (e.g. ddq → memo: "draft investment memo"
-     with a `due_by` per constitution cadence)
+6. **Host LLM drafts the proposal — multi-fact pattern.** Inputs:
+   current context (from step 2), proposed transition (from step 3),
+   source artefact (from the trigger phrase or operator-supplied
+   evidence). Output is commonly a *bundle* of facts capturing the
+   full multi-axis impact of one event:
+
+   - **Sub-state `UpdateFact`(s)** for whichever sub-states the source
+     attests (e.g., source says "DDQ received" → emit
+     `UpdateFact(ddq_status: sent → complete)`; source says "memo
+     drafted" → emit `UpdateFact(memo_status: not_started → draft)`).
+     `valid_from` = the date the source attests the transition (NOT
+     now). `supersedes_object` = the previous sub-state value.
+   - **High-level `UpdateFact(lifecycle_status)` ONLY when the source
+     unambiguously attests it**, OR when the operator is explicitly
+     requesting the high-level transition. Do not auto-derive it from
+     a sub-state event — emit an `OpenQuestion` recommending it
+     instead and let the reviewer decide.
+   - **`EventFact`** capturing the source-attested event date with
+     predicate `lifecycle_transitioned_at` or sub-state-specific
+     (`ddq_received_at`, `memo_drafted_at`, etc.).
+   - **`next_step` facts** for follow-up commitments the source
+     names (with `due_by`).
+
+   Every fact in the bundle carries `valid_from` = source-attested
+   event date and a non-empty `support_quote` citing the source.
 
 7. **Create the proposal** via `create_proposal(facts=<facts>,
    reviewer_required=True, source_file=<artefact_path>,
