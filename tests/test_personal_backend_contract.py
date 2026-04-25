@@ -162,8 +162,25 @@ class _FakeInMemoryBackend:
 
 
 @pytest.fixture
-def backend() -> PersonalMemoryBackend:
+def fake_backend() -> PersonalMemoryBackend:
     return _FakeInMemoryBackend()
+
+
+@pytest.fixture
+def mempalace_backend(tmp_path) -> PersonalMemoryBackend:  # type: ignore[no-untyped-def]
+    """MemPalaceAdapter wired to a tmp firm root + LocalIdentityResolver."""
+    from memory_mission.identity.local import LocalIdentityResolver
+    from memory_mission.personal_brain.mempalace_adapter import MemPalaceAdapter
+
+    identity = LocalIdentityResolver(tmp_path / "identity.sqlite3")
+    return MemPalaceAdapter(firm_root=tmp_path, identity_resolver=identity)
+
+
+# Every contract test parametrizes over both backends. If MemPalaceAdapter
+# fails any of these, ADR-0004's acceptance gate falls.
+@pytest.fixture(params=["fake", "mempalace"])
+def backend(request: pytest.FixtureRequest) -> PersonalMemoryBackend:  # type: ignore[no-untyped-def]
+    return request.getfixturevalue(f"{request.param}_backend")
 
 
 # ---------- Protocol-shape tests ----------

@@ -1,12 +1,12 @@
 ---
 type: ADR
 id: "0004"
-title: "Personal-layer substrate — MemPalace, custom, binary decision at end of P1"
-status: proposed
+title: "Personal-layer substrate — MemPalace adopted via PersonalMemoryBackend adapter"
+status: active
 date: 2026-04-25
 ---
 
-> **Status: proposed.** Decision gate is the bounded P1 spike on `SvenWell/mempalace-spike`. ADR moves to `active` once the outcome is recorded. **Defer-again is forbidden** unless a single named blocker with a short follow-up path is documented at decision time.
+> **Status: active. Decision: ACCEPT MemPalace (Option A).** The `MemPalaceAdapter` lands at `src/memory_mission/personal_brain/mempalace_adapter.py` on `SvenWell/mempalace-spike`. All five acceptance gate items met against the four pilot-task scenarios in `tests/fixtures/pilot_tasks/`. 25/25 contract tests pass against both the reference fake and the adapter. Personal substrate work proceeds with MemPalace as the substrate behind the `PersonalMemoryBackend` Protocol.
 
 ## Context (revised 2026-04-25)
 
@@ -76,14 +76,36 @@ Thin compatibility shims for working-state are acceptable. A perfect 1:1 replace
 
 4. **Both outcomes are reasonable.** Accept gives us 49k-star credibility + 96.6% R@5; Reject gives us full ownership and a thinner stack. The wrong move is to defer and ship around the question.
 
-## Consequences — pending (filled in at decision time)
+## Decision rationale (operator direction, 2026-04-25)
 
-- [ ] Final decision: ___ (A / B / blocker-deferred)
-- [ ] All five acceptance gate items: ___ (pass/fail count)
-- [ ] LOC delta — `personal_brain/` removed: ___; adapter / shim code added: ___; net: ___
-- [ ] Test-suite result: ___ (full count / contract count / acceptance scenarios passing)
-- [ ] New deps added: ___ (`mempalace>=3.3,<4.0` if A; nothing new if B)
-- [ ] Follow-up ADRs triggered: ___
+After the contract surface (P0-C) shipped, the user direction was: **"start with MemPalace as base and build off of that — let's not reinvent the wheel."** That direction reframes the binary gate as an implementation question (does MemPalace fit cleanly behind the Protocol?) rather than an evaluation question (is MemPalace better than building our own?). The gate items below verified the fit.
+
+## Consequences — recorded
+
+- ✓ **Final decision:** Option A — adopt MemPalace as the personal-substrate behind `PersonalMemoryBackend`.
+- ✓ **All five acceptance gate items pass:**
+  1. Protocol coverage — every method on `PersonalMemoryBackend` implemented; no `# TODO: MemPalace can't do X` markers.
+  2. Acceptance scenarios — all four (`company_recency_summary`, `followup_commitments`, `last_meeting_deltas`, `pre_interaction_context`) pass.
+  3. Employee-private isolation — multi-employee fixture asserts no cross-leak; per-employee palace directories at `firm/personal/<emp>/mempalace/` are structural enforcement.
+  4. Bridge integrity — `candidate_facts()` produces `CandidateFact.payload` shapes that match `ExtractedFact` discriminator (`kind` ∈ `{event, identity, ...}`).
+  5. Net complexity — adapter is ~290 LOC and replaces ~857 LOC of unwired `personal_brain/` (deletion to follow as a separate cleanup commit). Net code delta is favorable; new external surface is `mempalace>=3.3,<4.0` plus its transitive deps (chromadb 1.5.8, onnxruntime 1.25.0).
+- ✓ **Test-suite result:** 732/732 pass (25 contract tests, parametrized over fake + adapter). mypy strict clean on 75 source files. ruff + format clean.
+- ✓ **New deps:** `mempalace>=3.3,<4.0` (with chromadb + onnxruntime transitives). Pinned in `pyproject.toml` as a runtime dep.
+- ✓ **Follow-up ADRs triggered:**
+  - ADR-0011 (planned) — `personal_brain/` cleanup: delete the unwired `working.py` / `episodic.py` / `lessons.py` / `preferences.py` layers and their tests since the Protocol + MemPalaceAdapter subsume them.
+  - ADR (later) — MemPalace upgrade policy + adapter boundary contract (when we hit a v4 or breaking-change pin).
+
+## Adapter boundary
+
+The adapter at `src/memory_mission/personal_brain/mempalace_adapter.py` is the only file that imports from `mempalace`. Every consumer (skills, MCP tools, extraction → proposal bridge, synthesis) codes against `PersonalMemoryBackend`. If MemPalace ships breaking changes, the impact is contained to the adapter file.
+
+The adapter avoids MemPalace's CLI `init` flow by creating the two ChromaDB collections directly (`mempalace_drawers` + `mempalace_closets`). This skips entity-detection + language-config init steps but lets us push items via the API (one `NormalizedSourceItem` at a time from connectors) instead of running `mempalace mine` against a directory tree. The trade-off is documented in the adapter file's module docstring.
+
+## Follow-up actions
+
+- Delete `src/memory_mission/personal_brain/working.py`, `episodic.py`, `lessons.py`, `preferences.py` + their `__init__.py` exports + `tests/test_personal_brain.py`. They have zero production callers (P0-B2 inventory) and the Protocol + adapter subsume them.
+- Merge `SvenWell/mempalace-spike` into `SvenWell/office-hours` once cleanup is committed.
+- Wire personal-source ingestion (P3) — email/calendar/transcript connectors emit `NormalizedSourceItem` → `MemPalaceAdapter.ingest()`.
 
 ## Related decisions
 
