@@ -131,6 +131,36 @@ OneDrive AND SharePoint document libraries. SharePoint pages and list
 items have different shapes — separate helpers will land when a
 pilot needs them.
 
+## Schema-flexible CRM example — Attio
+
+Attio is a customizable CRM with both system objects (people,
+companies, deals) and user-defined custom objects. Records belong to
+**Lists** (saved views / collections); list membership is the typical
+visibility signal, with object-type scoping as a secondary axis.
+
+```yaml
+firm_id: northpoint
+bindings:
+  workspace:
+    app: attio
+    target_plane: firm
+    visibility_rules:
+      # Lists in Attio are saved-view ids (string slugs or UUIDs).
+      # Run `list_lists` once to discover yours.
+      - if_label: list:pipeline
+        scope: partner-only
+      - if_label: list:portfolio
+        scope: firm-internal
+      # Object-level scoping — treat all `deals` records as partner-only
+      # regardless of list membership.
+      - if_field: { attio_object_slug: deals }
+        scope: partner-only
+    default_visibility: firm-internal
+```
+
+Auth: OAuth2 via Composio. Backfill is administrator-run only —
+Attio holds the firm's CRM truth.
+
 ## Venture-CRM example — Affinity as the firm workspace
 
 Affinity is the dominant venture-fund CRM. Records (organizations,
@@ -221,6 +251,7 @@ lets you write rules that target the right keys.
 | `calendar_event_to_envelope` | `gcal_visibility` (str: `default` / `public` / `private` / `confidential`), `attendees` (list[str]), `labels` (list[str]) |
 | `drive_file_to_envelope` | `permissions` (list[dict]), `owners` (list[str]), `drive_anyone` (bool — synthesized: True iff any permission grants `type: anyone`), `labels` (list[str]) |
 | `affinity_record_to_envelope` | `labels` (list[str]: one `list:<list_id>` per Affinity list the record sits in, plus `global` when Affinity flags the record as global), `affinity_object_type` (`organization` / `person` / `opportunity`), `affinity_owner_id` (int or null) |
+| `attio_record_to_envelope` | `labels` (list[str]: one `list:<list_id>` per Attio list the record sits in), `attio_object_slug` (str: object identifier — `people` / `companies` / `deals` / custom), `attio_workspace_id` (str or null) |
 | `outlook_message_to_envelope` | `outlook_sensitivity` (str: `normal` / `personal` / `private` / `confidential` — Outlook's built-in field), `labels` (list[str]: Outlook user-assigned categories), `to` (list[str]), `cc` (list[str]) |
 | `onedrive_item_to_envelope` | `permissions` (list[dict]: Microsoft Graph grants), `owners` (list[str]: display names), `drive_anyone` (bool — synthesized: True iff any permission grants `link.scope == "anonymous"`), `drive_organization_link` (bool — synthesized: True iff any link is `scope == "organization"`), `is_sharepoint` (bool — True when item lives in a SharePoint document library), `sharepoint_site_id` (str or null), `labels` (list[str]) |
 

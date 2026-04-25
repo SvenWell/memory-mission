@@ -127,6 +127,29 @@ Constraints: firm plane only (administrator-run), envelope path only,
 harness, no LLM. SharePoint pages and list items have different
 shapes — separate helpers needed (not in V1).
 
+## backfill-attio
+
+Pull schema-flexible CRM records (people, companies, deals, and any
+custom user-defined objects) from Attio through Composio (OAuth2),
+normalize via `attio_record_to_envelope`, write to the **firm staging
+plane** (`<wiki_root>/staging/firm/attio/`) via
+`StagingWriter.write_envelope`. Per-object durable runs (one per
+object slug). Recommended order: system objects first (people →
+companies → deals), then custom objects.
+
+Visibility maps from list-membership (each Attio list as
+`list:<list_id>` label) plus per-object scoping (`if_field:
+attio_object_slug=deals → scope: partner-only`). Workspace-wide
+records get the manifest's `default_visibility` fallback.
+
+Triggers: "backfill attio", "import attio", "sync attio crm",
+"pull attio records", "pull attio companies", "pull attio people",
+"pull attio deals"
+
+Constraints: firm plane only (administrator-run), envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM, no write-side mutations (sync-back is P5).
+
 ## backfill-affinity
 
 Pull venture-CRM records (organizations, persons, opportunities) from

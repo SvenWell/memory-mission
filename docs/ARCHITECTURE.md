@@ -331,7 +331,7 @@ Every layer logs to the same observability scope; every write to memory carries 
 | Models | Pydantic v2 | Typed, frozen, JSON round-trippable |
 | Validation | mypy --strict | On every source file |
 | Lint / format | ruff + ruff format | Fast, canonical |
-| Tests | pytest | 796 tests, every public surface |
+| Tests | pytest | 809 tests, every public surface |
 | Runtime | Hermes Agent (primary), Ironclaw / OpenClaw (others) | Skills are markdown; any host that reads frontmatter can load them |
 
 ---

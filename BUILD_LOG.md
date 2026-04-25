@@ -2560,3 +2560,50 @@ Attio (second venture CRM, slimmer surface than Affinity but cleaner
 OAuth2 auth). Then Notion (workspace + document dual-binding for
 firms that use Notion as their wiki). Then Slack with its own ADR
 for the new `chat_system` role.
+
+## P3-prep continued — Attio connector (schema-flexible venture-CRM) (2026-04-25)
+
+Second venture-CRM lands. Attio is the cleaner-OAuth2 alternative to
+Affinity for firms that want a customizable schema. Both fit the
+`workspace` role; firms pick one (or both) per the manifest.
+
+### What landed
+
+- **Attio connector** —
+  `src/memory_mission/ingestion/connectors/attio.py`. Composio-backed.
+  6 read actions (list_objects, get_object_details, list_records,
+  find_record, list_notes, list_lists). OAuth2 via Composio.
+  Connector name 'attio' matches manifest 'app: attio'.
+- **`attio_record_to_envelope`** —
+  `src/memory_mission/ingestion/envelopes.py`. Single dispatching
+  helper that takes `object_slug` (the Attio object identifier the
+  record belongs to — `people`, `companies`, `deals`, or any custom
+  object) + manifest. Visibility surface surfaces each Attio
+  list-membership as a `list:<list_id>` label and surfaces
+  `attio_object_slug` as a top-level field for object-level scope
+  rules. external_id is slug-prefixed (`companies_<uuid>`, etc.).
+  Body is a structured key:value dump of attribute values (Attio's
+  versioned `values: {<attr>: [{value: ...}]}` shape unwrapped).
+- **`backfill-attio` skill** —
+  `skills/backfill-attio/SKILL.md`. Per-object durable runs.
+  Recommended order: system objects first (people → companies →
+  deals) so identity resolution canonicalizes entities before custom
+  objects link to them. Administrator-run only.
+- **`docs/recipes/systems-yaml.md`** — Attio example added with
+  list-membership + object-slug rules. Per-app
+  `visibility_metadata` shape table extended.
+- **Skill index + manifest** — entries for backfill-attio added.
+
+### Verification
+
+- [x] `pytest` — 809/809 passed (+13 since M365: 5 connector tests +
+      8 envelope tests)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 78 source files (+1)
+- [x] Manifest parses as valid JSONL (12 entries; was 11)
+
+### Next
+
+Notion (workspace + document dual-binding for firms that use Notion
+as their wiki). Then Slack with its own ADR for the new
+`chat_system` role.
