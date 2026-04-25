@@ -4,21 +4,31 @@ Read this file first. Full `SKILL.md` contents load only when a skill's
 triggers match the current task. Machine-readable equivalent:
 `skills/_manifest.jsonl`. Conventions: `skills/_writing-skills.md`.
 
+**8 skills shipped** as of 2026-04-25. The three personal-source
+backfills (gmail, granola, calendar) all route through P2's envelope
+path: load `firm/systems.yaml`, call the per-app envelope helper, and
+write via `StagingWriter.write_envelope`. Visibility maps to firm
+scope per the manifest — fail-closed by default (ADR-0007).
+
 ## backfill-gmail
 
-Pull historical email through the Gmail connector (Composio-backed) into
-the **employee's personal staging plane**
-(`<wiki_root>/staging/personal/<employee_id>/gmail/`) for the extraction
-agent (Step 9) to consume. Each message becomes a checkpointed step
-under a durable run, so a crash mid-loop resumes from the last processed
-message. No LLM calls, no extraction, no firm-plane writes.
+Pull historical email through the Gmail connector (Composio-backed),
+normalize each message to a `NormalizedSourceItem` via
+`gmail_message_to_envelope`, and write the envelope into the
+**employee's personal staging plane**
+(`<wiki_root>/staging/personal/<employee_id>/gmail/`) via
+`StagingWriter.write_envelope`. Each message becomes a checkpointed
+step under a durable run. Visibility maps to firm scope per
+`firm/systems.yaml` — fail-closed by default (ADR-0007). No LLM calls,
+no extraction, no firm-plane writes.
 
 Triggers: "backfill gmail", "import email history", "sync gmail mailbox",
 "pull historical email"
 
-Constraints: personal plane only (never firm staging), no writes to
-curated wiki pages, no LLM inside the loop, every fetch flows through
-the connector harness.
+Constraints: personal plane only (never firm staging), envelope path
+only (`write_envelope`, never raw `write` for envelope-shaped items),
+`VisibilityMappingError` halts the loop (no silent fallback), every
+fetch flows through the connector harness, no LLM inside the loop.
 
 ## extract-from-staging
 
@@ -40,16 +50,185 @@ match source target_plane.
 ## backfill-granola
 
 Pull historical meeting transcripts through the Granola connector
-(Composio-backed) into the **employee's personal staging plane**
-(`<wiki_root>/staging/personal/<employee_id>/granola/`) for the
-extraction agent (Step 9) to consume. Same shape as backfill-gmail,
-different source. Each transcript is a checkpointed step.
+(Composio-backed), normalize via `granola_transcript_to_envelope`, and
+write the envelope into the **employee's personal staging plane**
+(`<wiki_root>/staging/personal/<employee_id>/granola/`) via
+`StagingWriter.write_envelope`. Same shape as backfill-gmail, different
+source. Each transcript is a checkpointed step. Visibility maps to firm
+scope per `firm/systems.yaml` — most firms set `default_visibility` on
+the `transcript` binding since transcripts rarely carry rich metadata.
 
 Triggers: "backfill granola", "import meeting transcripts",
 "sync granola transcripts", "pull historical meetings"
 
-Constraints: personal plane only, every fetch through the harness,
-no LLM, no firm-plane writes.
+Constraints: personal plane only, envelope path only (`write_envelope`),
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM.
+
+## backfill-calendar
+
+Pull historical Google Calendar events through the Calendar connector
+(Composio-backed), normalize via `calendar_event_to_envelope`, and
+write the envelope into the **employee's personal staging plane**
+(`<wiki_root>/staging/personal/<employee_id>/gcal/`) via
+`StagingWriter.write_envelope`. Each event is a checkpointed step.
+Visibility maps from Google Calendar's built-in `visibility` field
+(`default` / `public` / `private` / `confidential`) to firm scope per
+`firm/systems.yaml`. Recurring event instances are processed
+individually; non-primary calendars use a separate durable run per
+`calendar_id`.
+
+Triggers: "backfill calendar", "import calendar history", "sync gcal",
+"pull historical events", "import meetings"
+
+Constraints: personal plane only, envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM.
+
+## backfill-outlook
+
+Pull historical Microsoft 365 / Outlook email through Composio (OAuth2),
+normalize via `outlook_message_to_envelope`, write to the **employee's
+personal staging plane** (`<wiki_root>/staging/personal/<employee_id>/
+outlook/`) via `StagingWriter.write_envelope`. M365 equivalent of
+`backfill-gmail`. Visibility maps from Outlook's built-in `sensitivity`
+field (`normal` / `personal` / `private` / `confidential`) plus
+user-assigned `categories` (which surface as `labels` for `if_label`
+rules). Incremental sync via `get_mail_delta` after the first full
+backfill.
+
+Triggers: "backfill outlook", "import outlook history",
+"sync outlook mailbox", "pull historical email outlook",
+"import m365 mail"
+
+Constraints: personal plane only, envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM.
+
+## backfill-onedrive
+
+Pull OneDrive + SharePoint document libraries through Composio
+(OAuth2). Single skill covers both — Microsoft Graph treats SharePoint
+document libraries as drives. Normalize via
+`onedrive_item_to_envelope`, write to the **firm staging plane**
+(`<wiki_root>/staging/firm/onedrive/`) via
+`StagingWriter.write_envelope`. Per-scope durable runs (one per
+SharePoint site / OneDrive root). M365 equivalent of
+`backfill-firm-artefacts` (Drive). Visibility maps from
+permission-link scope (`anonymous` → public, `organization` →
+firm-internal) plus per-site rules (`is_sharepoint` + `sharepoint_site_id`).
+
+Triggers: "backfill onedrive", "backfill sharepoint",
+"import sharepoint", "sync onedrive",
+"pull historical documents m365", "import m365 documents"
+
+Constraints: firm plane only (administrator-run), envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM. SharePoint pages and list items have different
+shapes — separate helpers needed (not in V1).
+
+## backfill-slack
+
+Pull Slack message history through Composio (OAuth2 / Bearer),
+normalize via `slack_message_to_envelope`, write to the **right
+plane per channel-type**: DMs and group DMs land in
+`<wiki_root>/staging/personal/<employee_id>/slack/`; internal channels
+and external-shared channels land in `<wiki_root>/staging/firm/slack/`.
+The envelope helper enforces the plane override structurally based on
+`is_im` / `is_mpim` flags — no manifest rule can route a DM to firm
+staging. See ADR-0011.
+
+Per-message envelope (atomic unit, mirrors Gmail). The skill
+maintains TWO StagingWriter instances (one personal, one firm) and
+picks the right one per `item.target_plane`. Per-channel durable runs
+(one thread per `channel_id`) so resume contracts stay clean.
+
+Visibility surface: `slack_channel_id`, `slack_channel_name`,
+`slack_is_im` / `is_mpim` / `is_private` / `is_shared` /
+`is_ext_shared`, `slack_member_count`, `slack_thread_ts`. Critical:
+DM rules MUST come before is_private rules in the manifest (DMs are
+also is_private in Slack).
+
+Triggers: "backfill slack", "import slack", "sync slack workspace",
+"pull slack history", "ingest slack messages"
+
+Constraints: DMs/MPDMs personal plane only (structurally enforced),
+channels firm plane, envelope path only, `VisibilityMappingError`
+halts the loop, every fetch through the harness, no LLM, no
+write-side mutations (sync-back is P5), no Slack-file ingestion
+(separate helper needed).
+
+## backfill-notion
+
+Pull Notion workspace pages and database rows through Composio
+(OAuth2 or Integration API key), normalize via
+`notion_page_to_envelope`, write to the **firm staging plane**
+(`<wiki_root>/staging/firm/notion/`) via
+`StagingWriter.write_envelope`. Notion's API treats database rows as
+pages with a `database_id` parent, so one helper handles both;
+`external_object_type` is `notion_page` or `notion_database_row`
+depending on the parent type.
+
+Visibility maps from `notion_parent_type` / `notion_parent_id`
+(typical: scope by parent database id), `notion_public_url`
+(share-to-web pages), and `notion_archived`. The skill is
+responsible for fetching `get_block_children` recursively and
+flattening into markdown when body content matters; the envelope
+helper picks up `raw["block_content"]` if pre-populated.
+
+Triggers: "backfill notion", "import notion", "sync notion workspace",
+"pull notion pages", "pull notion databases", "ingest notion wiki"
+
+Constraints: firm plane only (administrator-run), envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM, no write-side mutations (sync-back is P5).
+
+## backfill-attio
+
+Pull schema-flexible CRM records (people, companies, deals, and any
+custom user-defined objects) from Attio through Composio (OAuth2),
+normalize via `attio_record_to_envelope`, write to the **firm staging
+plane** (`<wiki_root>/staging/firm/attio/`) via
+`StagingWriter.write_envelope`. Per-object durable runs (one per
+object slug). Recommended order: system objects first (people →
+companies → deals), then custom objects.
+
+Visibility maps from list-membership (each Attio list as
+`list:<list_id>` label) plus per-object scoping (`if_field:
+attio_object_slug=deals → scope: partner-only`). Workspace-wide
+records get the manifest's `default_visibility` fallback.
+
+Triggers: "backfill attio", "import attio", "sync attio crm",
+"pull attio records", "pull attio companies", "pull attio people",
+"pull attio deals"
+
+Constraints: firm plane only (administrator-run), envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM, no write-side mutations (sync-back is P5).
+
+## backfill-affinity
+
+Pull venture-CRM records (organizations, persons, opportunities) from
+Affinity through Composio (API-key auth), normalize via
+`affinity_record_to_envelope`, and write the envelope into the **firm
+staging plane** (`<wiki_root>/staging/firm/affinity/`) via
+`StagingWriter.write_envelope`. Three-pass strategy: organizations →
+persons → opportunities, so identity resolution canonicalizes orgs
+before persons/opps link to them. Per-type durable runs.
+
+Visibility maps from list-membership: each Affinity list (Pipeline /
+Portfolio / LP Network / etc.) becomes a `list:<id>` label that the
+manifest maps to a firm scope. Globally-known companies get a `global`
+label that typically maps to `external-shared`.
+
+Triggers: "backfill affinity", "import affinity", "sync crm",
+"pull affinity organizations", "pull affinity persons",
+"pull affinity opportunities"
+
+Constraints: firm plane only (administrator-run), envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM. Affinity's pagination yields basic info — always
+`get_*` per id for full field data.
 
 ## backfill-firm-artefacts
 

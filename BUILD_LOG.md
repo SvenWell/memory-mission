@@ -2367,3 +2367,379 @@ to invoke the envelope helpers + `write_envelope`, and rewire the
 personal substrate (`MemPalaceAdapter`) to consume the resulting
 `NormalizedSourceItem` shape end-to-end. Calendar connector +
 envelope helper land here.
+
+## P3-prep — Calendar connector + envelope helper + skill rewires (2026-04-25)
+
+Stage-setting work for P3 (personal-source ingestion). Adds the
+missing Calendar connector + envelope helper, rewires the Gmail and
+Granola skills onto the P2 envelope path, and lands an operator
+recipe for `firm/systems.yaml`. After this, an external host agent
+(Sven's personal agent, or any host with Composio credentials) can
+backfill Gmail / Granola / Calendar end-to-end against the
+`MemPalaceAdapter` personal substrate.
+
+### What landed
+
+- **Calendar connector** —
+  `src/memory_mission/ingestion/connectors/calendar.py`. Composio-backed
+  with `list_events` + `get_event` actions and a `summary | start —
+  N attendees` preview formatter. Connector name is `gcal` so it
+  composes cleanly with the manifest binding `app: gcal`.
+- **`calendar_event_to_envelope`** —
+  `src/memory_mission/ingestion/envelopes.py`. Visibility surface
+  carries `gcal_visibility` (Google Calendar's built-in
+  `default`/`public`/`private`/`confidential`) as a top-level metadata
+  key so `if_field` rules match it directly. Handles both attendee-
+  dict form (`{"email": "...", "responseStatus": "..."}`) and raw-
+  string form. Falls back from `updated` to `created` if `updated` is
+  absent.
+- **Skill rewires** — `skills/backfill-gmail/SKILL.md` and
+  `skills/backfill-granola/SKILL.md` rewritten to load
+  `firm/systems.yaml`, call the envelope helpers, and route through
+  `StagingWriter.write_envelope`. New constraint: `VisibilityMappingError`
+  halts the loop (no silent fallback). Versions bumped to 2026-04-25.
+  `skills/backfill-calendar/SKILL.md` created from scratch (mirrors the
+  Gmail shape, with calendar-specific notes on recurring events,
+  non-primary calendars, and the `gcal_visibility` field).
+  `skills/_index.md` and `skills/_manifest.jsonl` updated to register
+  the new skill and reflect the new tool / precondition / constraint
+  surface.
+- **`docs/recipes/systems-yaml.md`** — operator recipe. Includes a
+  one-person personal-test firm template (Gmail + Granola + Calendar,
+  fail-closed-with-employee-private-default), a strict-by-default
+  firm template, a firm-plane Drive template, the binding +
+  `VisibilityRule` schema reference, and the per-app
+  `visibility_metadata` shape table.
+
+### What's deliberately out of scope
+
+- **Notion / Attio / workspace connectors** — P4.
+- **Live Composio credentials wiring in this codebase** — connectors
+  stay credential-free. Sven's host agent injects the client.
+- **End-to-end test against real-shape Composio responses** — that
+  validation comes from the actual host-agent backfill run.
+
+### Verification
+
+- [x] `pytest` — 763/763 passed (+15 since P2: 5 calendar-connector +
+      9 calendar-envelope, plus 1 ordering bump)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 74 source files (+1)
+- [x] `skills/_manifest.jsonl` parses as valid JSONL (8 entries; was 7)
+
+### Next
+
+P3 proper begins when an external host agent (Sven's, or another
+operator's) actually runs `backfill-gmail` / `backfill-granola` /
+`backfill-calendar` against live data. Findings from that run drive
+the typed-Python convenience wrappers (e.g.
+`src/memory_mission/ingestion/backfill_runner.py`) that codify the
+skill workflow into a callable Python entry point.
+
+## P3-prep continued — Affinity connector (venture-CRM, P4 first venture-app) (2026-04-25)
+
+First venture-specific app connector lands. Affinity is the dominant
+relationship-intelligence CRM at venture firms; covering it is the
+single biggest signal-to-effort move for an actual venture pilot.
+
+### What landed
+
+- **Affinity connector** —
+  `src/memory_mission/ingestion/connectors/affinity.py`. Composio-backed.
+  9 read actions (list/get for organizations, persons, opportunities;
+  plus list_lists, get_list_metadata, list_list_entries that drive
+  visibility mapping). API-key auth at the Composio layer (Affinity
+  doesn't expose OAuth2 publicly).
+- **`affinity_record_to_envelope`** —
+  `src/memory_mission/ingestion/envelopes.py`. Single dispatching helper
+  that takes `object_type` ("organization" / "person" / "opportunity")
+  + manifest and returns a `NormalizedSourceItem`. Visibility surface
+  surfaces each Affinity list-membership as a `list:<list_id>` label
+  (matches `if_label` rules in the manifest); flags globally-known
+  records with a `global` label that typically maps to
+  `external-shared`. `external_id` is type-prefixed (`org_<id>` /
+  `person_<id>` / `opp_<id>`) to avoid id collision across types.
+  Body is a structured text summary (Affinity records aren't
+  documents; reviewers and downstream extraction see key fields
+  without parsing the raw payload).
+- **`backfill-affinity` skill** —
+  `skills/backfill-affinity/SKILL.md`. Three-pass strategy
+  (organizations → persons → opportunities) so identity resolution
+  canonicalizes orgs before persons/opportunities link to them.
+  Per-type durable runs. Administrator-run only.
+- **`docs/recipes/systems-yaml.md`** — venture-CRM example added with
+  list-membership-driven scope mapping. Per-app
+  `visibility_metadata` shape table extended with the Affinity row.
+- **Skill index + manifest** — `skills/_index.md` and
+  `skills/_manifest.jsonl` updated.
+
+### Why Affinity first (vs Outlook / OneDrive / Attio)
+
+The Composio research scan
+(commit `b431df2..` on 2026-04-25) showed Affinity has 20 tools at
+Composio with **API key** auth and a clean read surface. It is the
+single biggest venture wedge — every venture firm in the pilot
+demographic uses it. Cost: ~half day. Outlook + OneDrive are next,
+then Attio + Notion + Slack.
+
+### Verification
+
+- [x] `pytest` — 776/776 passed (+13 since previous: 4 connector
+      + 9 envelope tests)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 75 source files (+1)
+- [x] Manifest parses as valid JSONL (9 entries)
+
+### Next
+
+Outlook + OneDrive (M365 bundle) — single move that swaps the firm's
+primary email + document substrate when a pilot firm is on Microsoft
+365 instead of Google Workspace. Then Attio (second venture CRM),
+Notion (workspace + document dual-binding), and finally Slack with
+its own ADR for the new `chat_system` role.
+
+## P3-prep continued — Outlook + OneDrive M365 bundle (email + document) (2026-04-25)
+
+Second venture-relevant batch lands. M365 stack swap-in unlocks pilot
+firms on Microsoft 365 instead of Google Workspace. Both connectors
+land together because they share the auth model + customer profile
+(an M365 firm needs both, not one or the other).
+
+### What landed
+
+- **Outlook connector** —
+  `src/memory_mission/ingestion/connectors/outlook.py`. 5 read actions
+  (list_messages, get_message, list_mail_folders, search_messages,
+  get_mail_delta — the last one for incremental resume). OAuth2.
+  Connector name 'outlook' matches manifest 'app: outlook'.
+- **`outlook_message_to_envelope`** — bound to `email` role.
+  Visibility surface includes `outlook_sensitivity` (Outlook's
+  built-in `normal`/`personal`/`private`/`confidential` field) as a
+  top-level metadata key for `if_field` rules; categories surface as
+  `labels` so `if_label` rules work like Gmail.
+- **OneDrive connector** —
+  `src/memory_mission/ingestion/connectors/onedrive.py`. 10 read
+  actions covering OneDrive personal/business AND SharePoint
+  document-library items + sites + list items + page content.
+  OAuth2. Connector name 'one_drive' matches manifest 'app: one_drive'.
+  Composio's toolkit conflates OneDrive and SharePoint doc libraries
+  through Microsoft Graph's drive-item API.
+- **`onedrive_item_to_envelope`** — bound to `document` role.
+  Visibility surface synthesizes `drive_anyone` (anonymous-link
+  permission), `drive_organization_link` (organization-scoped
+  permission), `is_sharepoint` (parentReference.siteId present), and
+  `sharepoint_site_id` for per-site rules. Mirrors Drive helper's
+  shape with M365-flavored extensions.
+- **`backfill-outlook` skill** — M365 equivalent of `backfill-gmail`.
+  Notes incremental-sync mode via `get_mail_delta` after the first
+  full backfill.
+- **`backfill-onedrive` skill** — administrator-run firm-plane
+  backfill for OneDrive + SharePoint document libraries. Per-scope
+  durable runs (one per site / one for personal root) so resume
+  contracts stay clean. Notes that SharePoint pages and list items
+  have different shapes — separate helpers when a pilot needs them.
+- **`docs/recipes/systems-yaml.md`** — M365 firm example added with
+  rules combining `outlook_sensitivity`, drive-link-scope, and
+  per-site SharePoint rules. Per-app `visibility_metadata` shape
+  table extended with the Outlook + OneDrive rows.
+- **Skill index + manifest** — `skills/_index.md` and
+  `skills/_manifest.jsonl` updated.
+
+### Verification
+
+- [x] `pytest` — 796/796 passed (+20 since Affinity: 6 connector
+      tests + 14 envelope tests across the two new helpers)
+- [x] `ruff check` + `ruff format --check` clean (after fixing two
+      E501 line-length issues)
+- [x] `mypy --strict` clean on 77 source files (+2)
+- [x] Manifest parses as valid JSONL (11 entries; was 9)
+
+### Next
+
+Attio (second venture CRM, slimmer surface than Affinity but cleaner
+OAuth2 auth). Then Notion (workspace + document dual-binding for
+firms that use Notion as their wiki). Then Slack with its own ADR
+for the new `chat_system` role.
+
+## P3-prep continued — Attio connector (schema-flexible venture-CRM) (2026-04-25)
+
+Second venture-CRM lands. Attio is the cleaner-OAuth2 alternative to
+Affinity for firms that want a customizable schema. Both fit the
+`workspace` role; firms pick one (or both) per the manifest.
+
+### What landed
+
+- **Attio connector** —
+  `src/memory_mission/ingestion/connectors/attio.py`. Composio-backed.
+  6 read actions (list_objects, get_object_details, list_records,
+  find_record, list_notes, list_lists). OAuth2 via Composio.
+  Connector name 'attio' matches manifest 'app: attio'.
+- **`attio_record_to_envelope`** —
+  `src/memory_mission/ingestion/envelopes.py`. Single dispatching
+  helper that takes `object_slug` (the Attio object identifier the
+  record belongs to — `people`, `companies`, `deals`, or any custom
+  object) + manifest. Visibility surface surfaces each Attio
+  list-membership as a `list:<list_id>` label and surfaces
+  `attio_object_slug` as a top-level field for object-level scope
+  rules. external_id is slug-prefixed (`companies_<uuid>`, etc.).
+  Body is a structured key:value dump of attribute values (Attio's
+  versioned `values: {<attr>: [{value: ...}]}` shape unwrapped).
+- **`backfill-attio` skill** —
+  `skills/backfill-attio/SKILL.md`. Per-object durable runs.
+  Recommended order: system objects first (people → companies →
+  deals) so identity resolution canonicalizes entities before custom
+  objects link to them. Administrator-run only.
+- **`docs/recipes/systems-yaml.md`** — Attio example added with
+  list-membership + object-slug rules. Per-app
+  `visibility_metadata` shape table extended.
+- **Skill index + manifest** — entries for backfill-attio added.
+
+### Verification
+
+- [x] `pytest` — 809/809 passed (+13 since M365: 5 connector tests +
+      8 envelope tests)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 78 source files (+1)
+- [x] Manifest parses as valid JSONL (12 entries; was 11)
+
+### Next
+
+Notion (workspace + document dual-binding for firms that use Notion
+as their wiki). Then Slack with its own ADR for the new
+`chat_system` role.
+
+## P3-prep continued — Notion connector (workspace wiki + database rows) (2026-04-25)
+
+Notion lands as the third workspace-role binding. Many VCs use Notion
+as the firm wiki + project DB; this unlocks Notion-on-Workspace pilot
+firms.
+
+### What landed
+
+- **Notion connector** —
+  `src/memory_mission/ingestion/connectors/notion.py`. Composio-backed.
+  7 read actions: search (workspace-wide page + database title
+  search), list_users, get_page, get_block_children (the block tree),
+  query_database, get_database, get_comments. OAuth2 or API key
+  (Integration token) via Composio. Connector name 'notion' matches
+  manifest 'app: notion'.
+- **`notion_page_to_envelope`** —
+  `src/memory_mission/ingestion/envelopes.py`. Single helper handles
+  BOTH freestanding pages AND database rows (Notion's API treats DB
+  rows as pages with a `database_id` parent). external_object_type is
+  `notion_page` or `notion_database_row` based on parent type.
+  Visibility surface includes notion_parent_type / notion_parent_id
+  (the typical scope key in venture firms — scope by specific
+  database) plus notion_public_url + notion_archived. Title pulled
+  from properties.title array (or top-level title for databases).
+  Body comes from a pre-flattened raw["block_content"] string — the
+  helper stays pure; the skill is responsible for recursing
+  get_block_children and flattening the block tree to markdown
+  before calling the helper.
+- **`backfill-notion` skill** —
+  `skills/backfill-notion/SKILL.md`. Notes the workspace-wide vs
+  database-driven discovery strategies; describes the block-flattening
+  pattern; clarifies that standalone Notion databases (the schema
+  objects, not their rows) need a separate helper if the firm wants
+  them as items.
+- **`docs/recipes/systems-yaml.md`** — Notion example added with
+  parent-id scoping rules. Per-app `visibility_metadata` shape table
+  extended.
+- **Skill index + manifest** — entries for backfill-notion added.
+
+### Verification
+
+- [x] `pytest` — 822/822 passed (+13 since Attio: 5 connector tests +
+      8 envelope tests)
+- [x] `ruff check` + `ruff format --check` clean (after fixing one
+      E501 long-line issue)
+- [x] `mypy --strict` clean on 79 source files (+1)
+- [x] Manifest parses as valid JSONL (13 entries; was 12)
+
+### Next
+
+Slack — the final venture-pack add. Needs a brief design pass first:
+ADR-0008 introducing a new `chat_system` role to ConnectorRole (since
+Slack channels-as-conversations don't fit `workspace` cleanly), and
+the binding-shape decision for DMs (employee-private personal-plane)
+vs internal channels (firm-plane shared) vs external shared channels.
+
+## P3-prep complete — Slack connector + chat_system role + ADR-0011 (2026-04-25)
+
+Final venture-pack add. Slack lands as the universal team-comms
+substrate. Adding it required a sixth `ConnectorRole` since Slack's
+message-stream shape doesn't fit any of the existing five (email /
+calendar / transcript / document / workspace).
+
+### What landed
+
+- **ADR-0011** — `chat_system` role for Slack-shape integrations.
+  Documents per-message envelope as the atomic unit, helper-side
+  plane override (DMs always personal regardless of binding), and
+  the manifest-rule-ordering invariant (DM rules MUST come before
+  is_private rules because Slack DMs are also is_private).
+- **`ConnectorRole.CHAT`** — added to
+  `src/memory_mission/ingestion/roles.py`. Sixth value in the
+  StrEnum.
+- **Slack connector** —
+  `src/memory_mission/ingestion/connectors/slack.py`. 7 read actions
+  (list_channels, get_channel, list_messages, get_replies,
+  search_messages, list_users, get_user). OAuth2 / Bearer via
+  Composio. Connector name 'slack' matches manifest 'app: slack'.
+  Composio's full Slack toolkit has 106 actions; we wrap the
+  read-side subset for backfill.
+- **`slack_message_to_envelope`** —
+  `src/memory_mission/ingestion/envelopes.py`. Per-message envelope
+  with caller-supplied channel context. Surfaces all the
+  channel-type flags (is_im, is_mpim, is_private, is_shared,
+  is_ext_shared) as top-level metadata for if_field rule matching.
+  Plane override structurally enforced: `target_plane = personal if
+  (is_im or is_mpim) else binding.target_plane`. Slack ts parsed via
+  `datetime.fromtimestamp(float(ts), tz=UTC)` (epoch.microseconds
+  format). Thread relationship surfaced as `slack_thread_ts` (drops
+  when equal to ts, since Slack returns thread_ts == ts for thread
+  roots).
+- **`backfill-slack` skill** —
+  `skills/backfill-slack/SKILL.md`. Documents the dual-writer
+  pattern (one personal, one firm) and the per-channel durable runs.
+  Notes the rule-ordering invariant prominently. Excludes
+  Slack-file-attachment ingestion as future work.
+- **`docs/recipes/systems-yaml.md`** — Slack example added with the
+  critical ordering callout. Per-app `visibility_metadata` shape
+  table extended with the Slack row + plane-override note.
+- **ADR README index** — flips ADR-0011 to active.
+- **Skill index + manifest** — entries for backfill-slack added.
+
+### Verification
+
+- [x] `pytest` — 837/837 passed (+15 since Notion: 4 connector
+      tests + 11 envelope tests including the dual-plane override
+      tests)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 80 source files (+1)
+- [x] Manifest parses as valid JSONL (14 entries; was 13)
+
+### Venture-pack complete
+
+13 backfill-capable connectors now ship:
+
+- **Personal-source (employee plane):** Gmail, Outlook, Granola,
+  Calendar
+- **Firm-source (firm plane, admin-run):** Drive, OneDrive/SharePoint,
+  Affinity, Attio, Notion
+- **Mixed-plane (per-message split):** Slack
+- **Personal+admin firm overlap:** Drive (admin-run firm artefacts)
+
+All routed through `NormalizedSourceItem` + `StagingWriter.
+write_envelope` + `firm/systems.yaml` fail-closed visibility
+mapping. Pilot firm on either Google Workspace OR Microsoft 365
+stack is now covered end-to-end for the personal substrate +
+firm-source substrates + venture-CRM + universal-comms backfill.
+
+### Next
+
+P3 dogfood — Sven's personal agent runs `backfill-gmail` /
+`backfill-granola` / `backfill-calendar` (plus optionally
+`backfill-slack` against his own Slack workspace) against live data.
+Findings drive any envelope-shape or visibility-rule adjustments
+before P4 firm-source ingestion lands as part of an actual pilot.

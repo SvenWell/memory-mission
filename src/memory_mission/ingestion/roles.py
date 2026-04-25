@@ -36,6 +36,7 @@ class ConnectorRole(StrEnum):
     TRANSCRIPT = "transcript"
     DOCUMENT = "document"
     WORKSPACE = "workspace"
+    CHAT = "chat"
 
 
 class NormalizedSourceItem(BaseModel):

@@ -12,18 +12,32 @@ from pydantic import ValidationError
 
 from memory_mission.durable import CheckpointStore, durable_run
 from memory_mission.ingestion.connectors import (
+    AFFINITY_ACTIONS,
+    ATTIO_ACTIONS,
+    CALENDAR_ACTIONS,
     DRIVE_ACTIONS,
     GMAIL_ACTIONS,
     GRANOLA_ACTIONS,
+    NOTION_ACTIONS,
+    ONEDRIVE_ACTIONS,
+    OUTLOOK_ACTIONS,
+    SLACK_ACTIONS,
     ComposioConnector,
     Connector,
     ConnectorAction,
     ConnectorResult,
     InMemoryConnector,
     invoke,
+    make_affinity_connector,
+    make_attio_connector,
+    make_calendar_connector,
     make_drive_connector,
     make_gmail_connector,
     make_granola_connector,
+    make_notion_connector,
+    make_onedrive_connector,
+    make_outlook_connector,
+    make_slack_connector,
 )
 from memory_mission.middleware import PIIRedactionMiddleware
 from memory_mission.observability import (
@@ -272,6 +286,382 @@ def test_drive_requires_client_for_invoke() -> None:
     conn = make_drive_connector()
     with pytest.raises(NotImplementedError, match="no client attached"):
         conn.invoke("list_files", {})
+
+
+# ---------- Calendar factory ----------
+
+
+def test_calendar_exposes_list_and_get_actions() -> None:
+    conn = make_calendar_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {"list_events", "get_event"}
+    assert conn.name == "gcal"
+
+
+def test_calendar_actions_match_exported_constant() -> None:
+    assert make_calendar_connector().list_actions() == list(CALENDAR_ACTIONS)
+
+
+def test_calendar_preview_includes_summary_start_and_attendee_count() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "summary": "Q3 partner sync",
+                "start": {"dateTime": "2026-09-01T15:00:00Z"},
+                "attendees": [
+                    {"email": "alice@example.com"},
+                    {"email": "bob@example.com"},
+                ],
+            }
+
+    conn = make_calendar_connector(client=FakeClient())
+    result = conn.invoke("get_event", {"event_id": "ev-1"})
+    assert "Q3 partner sync" in result.preview
+    assert "2026-09-01T15:00:00Z" in result.preview
+    assert "2 attendees" in result.preview
+
+
+def test_calendar_preview_handles_all_day_event() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "summary": "Off-site",
+                "start": {"date": "2026-09-15"},
+                "attendees": [{"email": "alice@example.com"}],
+            }
+
+    conn = make_calendar_connector(client=FakeClient())
+    result = conn.invoke("get_event", {"event_id": "ev-2"})
+    assert "Off-site" in result.preview
+    assert "2026-09-15" in result.preview
+    assert "1 attendee" in result.preview
+
+
+def test_calendar_preview_handles_no_attendees() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "summary": "Solo focus block",
+                "start": {"dateTime": "2026-09-02T09:00:00Z"},
+            }
+
+    conn = make_calendar_connector(client=FakeClient())
+    result = conn.invoke("get_event", {"event_id": "ev-3"})
+    assert "0 attendees" in result.preview
+
+
+def test_calendar_requires_client_for_invoke() -> None:
+    conn = make_calendar_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_events", {})
+
+
+# ---------- Affinity factory ----------
+
+
+def test_affinity_exposes_read_actions() -> None:
+    conn = make_affinity_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "list_organizations",
+        "get_organization",
+        "list_persons",
+        "get_person",
+        "list_opportunities",
+        "get_opportunity",
+        "list_lists",
+        "get_list_metadata",
+        "list_list_entries",
+    }
+    assert conn.name == "affinity"
+
+
+def test_affinity_actions_match_exported_constant() -> None:
+    assert make_affinity_connector().list_actions() == list(AFFINITY_ACTIONS)
+
+
+def test_affinity_preview_uses_organization_name_and_domain() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {"id": 42, "name": "Northpoint Capital", "domain": "northpoint.fund"}
+
+    conn = make_affinity_connector(client=FakeClient())
+    result = conn.invoke("get_organization", {"organization_id": 42})
+    assert "Northpoint Capital" in result.preview
+    assert "northpoint.fund" in result.preview
+
+
+def test_affinity_preview_uses_person_name_and_email() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": 7,
+                "first_name": "Sarah",
+                "last_name": "Chen",
+                "primary_email": "sarah@example.com",
+            }
+
+    conn = make_affinity_connector(client=FakeClient())
+    result = conn.invoke("get_person", {"person_id": 7})
+    assert "Sarah Chen" in result.preview
+    assert "sarah@example.com" in result.preview
+
+
+def test_affinity_requires_client_for_invoke() -> None:
+    conn = make_affinity_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_organizations", {})
+
+
+# ---------- Outlook factory ----------
+
+
+def test_outlook_exposes_read_actions() -> None:
+    conn = make_outlook_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "list_messages",
+        "get_message",
+        "list_mail_folders",
+        "search_messages",
+        "get_mail_delta",
+    }
+    assert conn.name == "outlook"
+
+
+def test_outlook_actions_match_exported_constant() -> None:
+    assert make_outlook_connector().list_actions() == list(OUTLOOK_ACTIONS)
+
+
+def test_outlook_preview_includes_sender_and_subject() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "from": {"emailAddress": {"address": "alice@northpoint.fund"}},
+                "subject": "Q3 Review",
+                "body_preview": "Here's the Q3 agenda.",
+            }
+
+    conn = make_outlook_connector(client=FakeClient())
+    result = conn.invoke("get_message", {"message_id": "AAMkAD..."})
+    assert "alice@northpoint.fund" in result.preview
+    assert "Q3 Review" in result.preview
+    assert "Q3 agenda" in result.preview
+
+
+def test_outlook_requires_client_for_invoke() -> None:
+    conn = make_outlook_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_messages", {})
+
+
+# ---------- OneDrive / SharePoint factory ----------
+
+
+def test_onedrive_exposes_read_actions() -> None:
+    conn = make_onedrive_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "list_drive_items",
+        "get_item",
+        "list_recent_items",
+        "search_items",
+        "get_item_metadata",
+        "get_item_permissions",
+        "get_sharepoint_site_details",
+        "list_site_subsites",
+        "get_sharepoint_list_items",
+        "get_sharepoint_site_page_content",
+    }
+    assert conn.name == "one_drive"
+
+
+def test_onedrive_actions_match_exported_constant() -> None:
+    assert make_onedrive_connector().list_actions() == list(ONEDRIVE_ACTIONS)
+
+
+def test_onedrive_preview_includes_name_and_mime() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "name": "Q4 LP Update.docx",
+                "file": {
+                    "mimeType": (
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    )
+                },
+                "content": "Q4 thesis: lean into vertical AI infrastructure.",
+            }
+
+    conn = make_onedrive_connector(client=FakeClient())
+    result = conn.invoke("get_item", {"item_id": "01ABC..."})
+    assert "Q4 LP Update.docx" in result.preview
+    assert "vertical AI infrastructure" in result.preview
+
+
+def test_onedrive_requires_client_for_invoke() -> None:
+    conn = make_onedrive_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_drive_items", {})
+
+
+# ---------- Attio factory ----------
+
+
+def test_attio_exposes_read_actions() -> None:
+    conn = make_attio_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "list_objects",
+        "get_object_details",
+        "list_records",
+        "find_record",
+        "list_notes",
+        "list_lists",
+    }
+    assert conn.name == "attio"
+
+
+def test_attio_actions_match_exported_constant() -> None:
+    assert make_attio_connector().list_actions() == list(ATTIO_ACTIONS)
+
+
+def test_attio_preview_extracts_name_attribute() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": {"workspace_id": "ws-1", "object_id": "companies", "record_id": "rec-9"},
+                "values": {"name": [{"value": "Acme Corp", "active_from": "2026-01-01"}]},
+            }
+
+    conn = make_attio_connector(client=FakeClient())
+    result = conn.invoke("find_record", {"object": "companies", "record_id": "rec-9"})
+    assert "Acme Corp" in result.preview
+
+
+def test_attio_preview_falls_back_to_record_id_when_no_name() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": {"workspace_id": "ws-1", "record_id": "rec-555"},
+                "values": {},
+            }
+
+    conn = make_attio_connector(client=FakeClient())
+    result = conn.invoke("find_record", {"object": "people", "record_id": "rec-555"})
+    assert "rec-555" in result.preview
+
+
+def test_attio_requires_client_for_invoke() -> None:
+    conn = make_attio_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_records", {"object": "companies"})
+
+
+# ---------- Notion factory ----------
+
+
+def test_notion_exposes_read_actions() -> None:
+    conn = make_notion_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "search",
+        "list_users",
+        "get_page",
+        "get_block_children",
+        "query_database",
+        "get_database",
+        "get_comments",
+    }
+    assert conn.name == "notion"
+
+
+def test_notion_actions_match_exported_constant() -> None:
+    assert make_notion_connector().list_actions() == list(NOTION_ACTIONS)
+
+
+def test_notion_preview_includes_object_type_parent_and_title() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "object": "page",
+                "parent": {"type": "database_id", "database_id": "db-1"},
+                "properties": {
+                    "Name": {
+                        "title": [{"plain_text": "Q3 Investment Memo"}],
+                    }
+                },
+            }
+
+    conn = make_notion_connector(client=FakeClient())
+    result = conn.invoke("get_page", {"page_id": "page-1"})
+    assert "page" in result.preview
+    assert "database_id" in result.preview
+    assert "Q3 Investment Memo" in result.preview
+
+
+def test_notion_preview_falls_back_to_top_level_title_for_databases() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "object": "database",
+                "title": [{"plain_text": "Deal Pipeline"}],
+                "parent": {"type": "workspace"},
+            }
+
+    conn = make_notion_connector(client=FakeClient())
+    result = conn.invoke("get_database", {"database_id": "db-1"})
+    assert "Deal Pipeline" in result.preview
+
+
+def test_notion_requires_client_for_invoke() -> None:
+    conn = make_notion_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("get_page", {"page_id": "x"})
+
+
+# ---------- Slack factory ----------
+
+
+def test_slack_exposes_read_actions() -> None:
+    conn = make_slack_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert names == {
+        "list_channels",
+        "get_channel",
+        "list_messages",
+        "get_replies",
+        "search_messages",
+        "list_users",
+        "get_user",
+    }
+    assert conn.name == "slack"
+
+
+def test_slack_actions_match_exported_constant() -> None:
+    assert make_slack_connector().list_actions() == list(SLACK_ACTIONS)
+
+
+def test_slack_preview_includes_user_channel_and_text() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "user": "U07ALICE",
+                "channel": "C07DEALS",
+                "text": "Following up on the Acme term sheet.",
+            }
+
+    conn = make_slack_connector(client=FakeClient())
+    result = conn.invoke("list_messages", {"channel": "C07DEALS"})
+    assert "U07ALICE" in result.preview
+    assert "C07DEALS" in result.preview
+    assert "Acme term sheet" in result.preview
+
+
+def test_slack_requires_client_for_invoke() -> None:
+    conn = make_slack_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_channels", {})
 
 
 # ---------- Harness invoke() ----------
