@@ -574,6 +574,107 @@ Reads the active firm's append-only JSONL via `current_logger` and returns unres
 
 ---
 
+## Ingestion + connector envelope (`ingestion/`)
+
+Capability-based binding between logical roles and concrete apps,
+plus the single envelope shape every connector emits before staging.
+ADR-0007 + ADR-0011.
+
+### `ConnectorRole` (`ingestion/roles.py`)
+
+```python
+class ConnectorRole(StrEnum):
+    EMAIL = "email"
+    CALENDAR = "calendar"
+    TRANSCRIPT = "transcript"
+    DOCUMENT = "document"
+    WORKSPACE = "workspace"
+    CHAT = "chat"
+```
+
+Six logical capabilities. A firm's `firm/systems.yaml` binds each role
+to a concrete app. The same app can fulfil multiple roles (Notion as
+both `document` and `workspace`).
+
+### `NormalizedSourceItem` (`ingestion/roles.py`)
+
+The single envelope every connector emits before staging. Frozen
+Pydantic, `extra="forbid"`. Fields: `source_role: ConnectorRole`,
+`concrete_app: str`, `external_object_type: str`, `external_id: str`,
+`container_id: str | None`, `url: str | None`, `modified_at: datetime`,
+`visibility_metadata: dict[str, Any]`, `target_scope: str`,
+`target_plane: Plane`, `title: str`, `body: str`, `raw: dict[str, Any]`.
+
+`target_scope` and `target_plane` come from the firm's `SystemsManifest`,
+not from the connector. `visibility_metadata` is per-app (each envelope
+helper extracts the visibility surface from raw before mapping).
+
+### `SystemsManifest` + `RoleBinding` + `VisibilityRule` (`ingestion/systems_manifest.py`)
+
+```python
+class VisibilityRule(BaseModel):
+    if_label: str | None      # matches if metadata["labels"] contains this
+    if_field: dict[str, Any]  # matches if every key=value pair equals metadata[key]
+    scope: str                # the firm scope to assign on match
+
+class RoleBinding(BaseModel):
+    app: str
+    target_plane: Plane
+    visibility_rules: tuple[VisibilityRule, ...]
+    default_visibility: str | None  # None = fail-closed; str = operator-set fallback
+
+class SystemsManifest(BaseModel):
+    firm_id: str
+    bindings: dict[ConnectorRole, RoleBinding]
+```
+
+`load_systems_manifest(path)` parses `firm/systems.yaml`.
+`map_visibility(metadata, *, role, manifest) -> str` evaluates rules in
+order (first match wins), falls back to `default_visibility`, raises
+`VisibilityMappingError` if neither matches.
+
+### Per-app envelope helpers (`ingestion/envelopes.py`)
+
+Pure functions: `(raw_payload, *, manifest, [extra]) -> NormalizedSourceItem`.
+
+| Helper | Role | Concrete app | Notes |
+|---|---|---|---|
+| `gmail_message_to_envelope` | email | gmail | labels + recipients surface |
+| `outlook_message_to_envelope` | email | outlook | sensitivity field surfaces as `outlook_sensitivity` for `if_field` |
+| `granola_transcript_to_envelope` | transcript | granola | attendees surface |
+| `calendar_event_to_envelope` | calendar | gcal | `gcal_visibility` field surfaces |
+| `drive_file_to_envelope` | document | drive | synthesizes `drive_anyone` from permissions |
+| `onedrive_item_to_envelope` | document | one_drive | covers SharePoint document libraries; synthesizes `drive_anyone`, `drive_organization_link`, `is_sharepoint`, `sharepoint_site_id` |
+| `affinity_record_to_envelope` | workspace | affinity | takes `object_type` ∈ `{organization, person, opportunity}`; surfaces list-membership as `list:<id>` labels + `global` flag |
+| `attio_record_to_envelope` | workspace | attio | takes `object_slug` (system or custom); surfaces list-membership as labels + `attio_object_slug` field |
+| `notion_page_to_envelope` | workspace | notion | handles pages + database rows; reads pre-flattened `raw["block_content"]` for body |
+| `slack_message_to_envelope` | chat | slack | per-message envelope; **structurally overrides `target_plane` to `personal` when `is_im` or `is_mpim`** (ADR-0011) |
+
+Each helper checks the manifest binding's `app` matches its expected
+app and raises `ValueError` on mismatch (caller used the wrong helper).
+
+### `StagingWriter` envelope path (`ingestion/staging.py`)
+
+`write_envelope(item: NormalizedSourceItem) -> StagedItem` — validates
+`item.target_plane == self._target_plane` and `item.concrete_app ==
+self._source` (raises `ValueError` on mismatch), derives `item_id` from
+`external_id`, atomically writes raw JSON sidecar + frontmatter-headed
+markdown. Frontmatter includes `target_scope`, `source_role`,
+`external_object_type`, `container_id`, `url`, `modified_at` from the
+envelope.
+
+The pre-existing `write(item_id, raw, markdown_body, ...)` method stays
+for ad-hoc / non-envelope writes (Composio invocation logs, free-form).
+
+### `VisibilityMappingError`
+
+`ValueError` subclass raised by `map_visibility` when no rule matches
+and no `default_visibility` is set. Envelope helpers propagate this —
+backfill skills are required to **stop and surface** rather than retry
+with a different scope.
+
+---
+
 ## Skills registry (`skills/`)
 
 Every skill is a directory with `SKILL.md` (frontmatter + body), registered in `skills/_index.md` (human-readable) and `skills/_manifest.jsonl` (machine-parsable, one line per skill).
@@ -596,14 +697,25 @@ category: <ingestion | governance | workflow | ...>
 
 ### Shipped skills
 
-| Skill | Category | What it does |
-|---|---|---|
-| `backfill-gmail` | ingestion | Pull Gmail messages → personal staging |
-| `backfill-granola` | ingestion | Pull Granola transcripts → personal staging |
-| `backfill-firm-artefacts` | ingestion | Admin-only: pull Drive docs → firm staging |
-| `extract-from-staging` | ingestion | Host LLM extracts facts → fact staging |
-| `review-proposals` | governance | Surface pending proposals, human approves with rationale |
-| `detect-firm-candidates` | governance | Admin-only: scan personal planes, stage federated firm proposals |
+14 shipped. All backfill skills route through the envelope path
+(`make_<app>_connector` → `<app>_*_to_envelope` → `StagingWriter.write_envelope`).
+
+| Skill | Category | Plane | What it does |
+|---|---|---|---|
+| `backfill-gmail` | ingestion | personal | Pull Gmail messages → personal staging |
+| `backfill-outlook` | ingestion | personal | Pull Outlook (M365) messages → personal staging |
+| `backfill-granola` | ingestion | personal | Pull Granola transcripts → personal staging |
+| `backfill-calendar` | ingestion | personal | Pull Google Calendar events → personal staging |
+| `backfill-firm-artefacts` | ingestion | firm | Admin: pull Drive docs → firm staging |
+| `backfill-onedrive` | ingestion | firm | Admin: pull OneDrive + SharePoint document-library items → firm staging |
+| `backfill-affinity` | ingestion | firm | Admin: pull Affinity orgs / persons / opportunities → firm staging |
+| `backfill-attio` | ingestion | firm | Admin: pull Attio records (people / companies / deals / custom) → firm staging |
+| `backfill-notion` | ingestion | firm | Admin: pull Notion pages + database rows → firm staging |
+| `backfill-slack` | ingestion | mixed | Pull Slack messages; DMs/MPDMs → personal staging, channels → firm staging (helper enforces split) |
+| `extract-from-staging` | ingestion | — | Host LLM extracts facts → fact staging |
+| `review-proposals` | governance | firm | Surface pending proposals, human approves with rationale |
+| `detect-firm-candidates` | governance | firm | Admin: scan personal planes, stage federated firm proposals |
+| `meeting-prep` | workflow | — | Compile distilled `AgentContext` for a workflow agent |
 
 ---
 
@@ -624,7 +736,7 @@ category: <ingestion | governance | workflow | ...>
 
 ## Non-abstractions (things we deliberately don't model)
 
-- **Roles.** No enum. Permissions are per-firm scopes, not hardcoded roles.
+- **User/permissions roles.** No enum. Per-firm scopes are the authorization primitive, not hardcoded roles. (`ConnectorRole` exists in `ingestion/` but it's a *capability* taxonomy — which app fulfils which integration shape — not a user/permissions concept.)
 - **Workflow state machines.** No generic workflow engine. Each skill is its own workflow in markdown.
 - **LLM message formats.** Host agent owns them.
 - **Vector embeddings as first-class models.** `EmbeddingProvider.embed(text) -> list[float]` and nothing else.
