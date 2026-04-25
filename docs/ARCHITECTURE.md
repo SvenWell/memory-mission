@@ -276,7 +276,7 @@ The plan lives at `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curiou
 - **Evidence-pack MCP tool.** `get_evidence_pack(question, plane, tier_floor, limit)` returns `{triples, citations, confidence_aggregate, summary}` without generating prose. Composes over existing `kg.query_*` + hybrid search. Host LLM does prose from the pack. Spanner-inspired pattern, SQLite backend. ADR-0006 when landed.
 - **Firm-plane auto-wiring.** `src/memory_mission/promotion/autowire.py` extracts typed entity references from `support_quote` via regex + predicate vocab at `_apply_facts` time. Adds typed edges (`works_at`, `invested_in`, `advises`, `founded`) with zero LLM calls. ADR-0009 when landed.
 - **Venture reference overlay.** `overlays/venture/*` — manifest template, extraction-prompt tuning, permission presets, constitution seed. PE + wealth become overlays on the same core.
-- **Personal-layer substrate decision.** Bounded MemPalace adapter spike on `SvenWell/mempalace-spike`. Accept / reject / defer decision binary at end of spike week. ADR-0004 records outcome.
+- **Personal-layer substrate.** MemPalace is adopted behind `PersonalMemoryBackend`; every employee gets an isolated palace under `personal/<employee_id>/mempalace/`. ADR-0004 records the decision.
 - **Multimodal spike (optional).** Graphify as optional `pip install graphifyy` dep. `ingest-firm-corpus` skill on onboarding to seed firm KG from PDFs / decks / videos. Must still route through proposal review — cannot bypass governance.
 - **Benchmark publication.** `benchmarks/longmemeval.py` (inherits from MemPalace if adopted) + `benchmarks/firm_coherence.py` (ours, unique). Reproducible scripts + dated results under `benchmarks/RESULTS.md`.
 
@@ -331,7 +331,7 @@ Every layer logs to the same observability scope; every write to memory carries 
 | Models | Pydantic v2 | Typed, frozen, JSON round-trippable |
 | Validation | mypy --strict | On every source file |
 | Lint / format | ruff + ruff format | Fast, canonical |
-| Tests | pytest | 707 tests, every public surface |
+| Tests | pytest | 710 tests, every public surface |
 | Runtime | Hermes Agent (primary), Ironclaw / OpenClaw (others) | Skills are markdown; any host that reads frontmatter can load them |
 
 ---

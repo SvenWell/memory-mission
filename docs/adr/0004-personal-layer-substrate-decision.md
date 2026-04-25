@@ -6,7 +6,7 @@ status: active
 date: 2026-04-25
 ---
 
-> **Status: active. Decision: ACCEPT MemPalace (Option A).** The `MemPalaceAdapter` lands at `src/memory_mission/personal_brain/mempalace_adapter.py` on `SvenWell/mempalace-spike`. All five acceptance gate items met against the four pilot-task scenarios in `tests/fixtures/pilot_tasks/`. 25/25 contract tests pass against both the reference fake and the adapter. Personal substrate work proceeds with MemPalace as the substrate behind the `PersonalMemoryBackend` Protocol.
+> **Status: active. Decision: ACCEPT MemPalace (Option A).** The `MemPalaceAdapter` lives at `src/memory_mission/personal_brain/mempalace_adapter.py`. All five acceptance gate items met against the four pilot-task scenarios in `tests/fixtures/pilot_tasks/`. 33 contract tests pass against the reference fake, the adapter, and adapter-specific path-safety cases. Personal substrate work proceeds with MemPalace as the substrate behind the `PersonalMemoryBackend` Protocol.
 
 ## Context (revised 2026-04-25)
 
@@ -89,10 +89,10 @@ After the contract surface (P0-C) shipped, the user direction was: **"start with
   3. Employee-private isolation — multi-employee fixture asserts no cross-leak; per-employee palace directories at `firm/personal/<emp>/mempalace/` are structural enforcement.
   4. Bridge integrity — `candidate_facts()` produces `CandidateFact.payload` shapes that match `ExtractedFact` discriminator (`kind` ∈ `{event, identity, ...}`).
   5. Net complexity — adapter is ~290 LOC and replaces ~857 LOC of unwired `personal_brain/` (deletion to follow as a separate cleanup commit). Net code delta is favorable; new external surface is `mempalace>=3.3,<4.0` plus its transitive deps (chromadb 1.5.8, onnxruntime 1.25.0).
-- ✓ **Test-suite result:** 732/732 pass (25 contract tests, parametrized over fake + adapter). mypy strict clean on 75 source files. ruff + format clean.
+- ✓ **Test-suite result:** 710/710 pass (33 personal-backend contract tests, including fake + adapter parametrization and adapter-specific path-safety cases). mypy strict clean on 71 source files. ruff + format clean.
 - ✓ **New deps:** `mempalace>=3.3,<4.0` (with chromadb + onnxruntime transitives). Pinned in `pyproject.toml` as a runtime dep.
 - ✓ **Follow-up ADRs triggered:**
-  - ADR-0011 (planned) — `personal_brain/` cleanup: delete the unwired `working.py` / `episodic.py` / `lessons.py` / `preferences.py` layers and their tests since the Protocol + MemPalaceAdapter subsume them.
+  - `personal_brain/` cleanup — the unwired `working.py` / `episodic.py` / `lessons.py` / `preferences.py` layers and their tests were deleted since the Protocol + MemPalaceAdapter subsume them.
   - ADR (later) — MemPalace upgrade policy + adapter boundary contract (when we hit a v4 or breaking-change pin).
 
 ## Adapter boundary
@@ -104,7 +104,7 @@ The adapter avoids MemPalace's CLI `init` flow by creating the two ChromaDB coll
 ## Follow-up actions
 
 - Delete `src/memory_mission/personal_brain/working.py`, `episodic.py`, `lessons.py`, `preferences.py` + their `__init__.py` exports + `tests/test_personal_brain.py`. They have zero production callers (P0-B2 inventory) and the Protocol + adapter subsume them.
-- Merge `SvenWell/mempalace-spike` into `SvenWell/office-hours` once cleanup is committed.
+- Continue on `SvenWell/office-hours` with MemPalace as the adopted personal substrate.
 - Wire personal-source ingestion (P3) — email/calendar/transcript connectors emit `NormalizedSourceItem` → `MemPalaceAdapter.ingest()`.
 
 ## Related decisions

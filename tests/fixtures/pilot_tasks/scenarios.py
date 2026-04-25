@@ -129,7 +129,7 @@ def company_recency_summary() -> Scenario:
     referencing the same company. Expected: ≥3 hits, company entity
     surfaced, each hit cited to its source object.
     """
-    employee = "alice@vc.example"
+    employee = "alice-vc-example"
     base = datetime(2026, 4, 1, 9, tzinfo=UTC)
     return Scenario(
         name="company_recency_summary",
@@ -210,7 +210,7 @@ def followup_commitments() -> Scenario:
     deliverables. Expected: ≥2 candidate-fact-shaped commitments
     surface with citations, employee_id matches.
     """
-    employee = "alice@vc.example"
+    employee = "alice-vc-example"
     base = datetime(2026, 4, 8, 9, tzinfo=UTC)
     return Scenario(
         name="followup_commitments",
@@ -268,7 +268,7 @@ def last_meeting_deltas() -> Scenario:
     Expected: ≥2 hits, both transcripts surface, host LLM can compose
     deltas from cited content.
     """
-    employee = "bob@vc.example"
+    employee = "bob-vc-example"
     base = datetime(2026, 3, 1, 14, tzinfo=UTC)
     return Scenario(
         name="last_meeting_deltas",
@@ -319,7 +319,7 @@ def pre_interaction_context() -> Scenario:
     'circle back next week' from txn-003 above (in a real impl);
     ``employee_preferences`` may be empty for synthetic fixture.
     """
-    employee = "alice@vc.example"
+    employee = "alice-vc-example"
     base = datetime(2026, 4, 22, 9, tzinfo=UTC)
     return Scenario(
         name="pre_interaction_context",

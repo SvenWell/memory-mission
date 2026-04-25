@@ -56,7 +56,7 @@ proposed → active → superseded
 | [0001](0001-bayesian-corroboration.md) | Bayesian corroboration via Noisy-OR with 0.99 cap | active |
 | [0002](0002-two-plane-split.md) | Two-plane split (personal / firm) with one-way promotion bridge | active |
 | [0003](0003-mcp-as-agent-surface.md) | MCP as the multi-agent access surface | active |
-| [0004](0004-personal-layer-substrate-decision.md) | Personal-layer substrate — MemPalace, custom, or defer | proposed |
+| [0004](0004-personal-layer-substrate-decision.md) | Personal-layer substrate — MemPalace adopted via adapter | active |
 | [0005](0005-sqlite-per-firm.md) | SQLite per firm for all persistent state | active |
 
 Pending ADRs — will be written as the corresponding phase lands (see `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md`):

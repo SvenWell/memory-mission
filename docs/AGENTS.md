@@ -10,7 +10,7 @@ Why canonical lives in `docs/` rather than repo root: the repo-root `AGENTS.md` 
 
 **What this is.** Memory Mission is a governed context engine for agents — Python infrastructure that turns a firm's scattered knowledge (email, meetings, memos, CRM) into a structured, auditable memory layer that AI agents can read and write safely. Multi-user, multi-plane, provenance-mandatory. Start with `docs/VISION.md` for the full pitch.
 
-**Shipped state.** V1 + Step 18 MCP surface + full 21-fix security-response pass. Merged to `main` at `35c73fb`. 18 build steps + 6 polish moves + security response. 707 tests passing, mypy strict clean on 72 source files. Next chapter is P0-P9 in `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md` — venture-first pilot with capability-based connectors + sync-back.
+**Shipped state.** V1 + Step 18 MCP surface + full 21-fix security-response pass + MemPalace personal substrate. Step 18 security response merged to `main` at `35c73fb`. 18 build steps + 6 polish moves + security response. 710 tests passing, mypy strict clean on 71 source files. Next chapter is P0-P9 in `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md` — venture-first pilot with capability-based connectors + sync-back.
 
 **What you're here to do** (in priority order):
 1. If the user invokes a skill, invoke the Skill tool FIRST — don't answer directly. See "Skill routing" below.
@@ -59,7 +59,7 @@ memory-mission/
 │   ├── meeting-prep/         ← distilled context for workflow agents
 │   └── _index.md             ← human-readable skill registry
 │
-├── tests/                    ← 707 tests, pytest, mypy strict
+├── tests/                    ← 710 tests, pytest, mypy strict
 ├── BUILD_LOG.md              ← per-step history, append-only
 ├── CLAUDE.md                 ← one-line @docs/AGENTS.md shim
 ├── README.md                 ← public entry point

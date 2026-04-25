@@ -1,17 +1,18 @@
 """``PersonalMemoryBackend`` Protocol — the contract every personal-substrate impl must satisfy.
 
-Two implementations target this Protocol:
+The active implementation is ``MemPalaceAdapter``. The Protocol keeps
+the rest of the system substrate-agnostic:
 
 - A minimal in-house impl built on the existing ``BrainEngine`` +
   ``KnowledgeGraph`` with plane scoping (``Plane="personal"`` +
-  ``employee_id``). Lands if P1 rejects MemPalace.
-- ``MemPalaceAdapter`` on the ``SvenWell/mempalace-spike`` branch,
-  wrapping ``mempalace`` per employee. Lands if P1 accepts MemPalace.
+  ``employee_id``) remains a fallback option if MemPalace is ever
+  superseded.
+- ``MemPalaceAdapter`` wraps ``mempalace`` per employee.
 
 Either way, the rest of the system (skills, MCP tools, extraction →
 proposal bridge) codes against the Protocol — never against a specific
-substrate. The P1 binary decision swaps which impl is wired without
-touching consumers.
+substrate. A future substrate swap should happen behind this Protocol
+without touching consumers.
 
 Acceptance scenarios live in ``tests/fixtures/pilot_tasks/`` and the
 parameterized contract tests in ``tests/test_personal_backend_contract.py``.

@@ -28,7 +28,7 @@ cd memory-mission
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
-make check          # ruff + format + mypy --strict + 643 tests
+make check          # ruff + format + mypy --strict + 710 tests
 python -m memory_mission info
 ```
 
@@ -74,7 +74,7 @@ briefing = context.render()       # markdown for the host-agent LLM
 
 ## What shipped
 
-V1 complete + Step 18 MCP surface shipped. 18 build steps + six-move polish pass + a three-reviewer security-response pass (21 fixes across B1-B28). **707 tests passing**, `mypy --strict` clean on 72 source files. Merged to `main` at `35c73fb`.
+V1 complete + Step 18 MCP surface shipped + MemPalace personal substrate adopted. 18 build steps + six-move polish pass + a three-reviewer security-response pass (21 fixes across B1-B28). **710 tests passing**, `mypy --strict` clean on 71 source files. Step 18 security response merged to `main` at `35c73fb`.
 
 | Layer | What you can do today |
 |---|---|
@@ -149,7 +149,7 @@ src/memory_mission/
 └── mcp/                    # FastMCP server — 14 tools over stdio (Step 18)
 
 skills/                     # 7 shipped, markdown + YAML frontmatter
-tests/                      # 707 passing
+tests/                      # 710 passing
 docs/                       # VISION + ARCHITECTURE + ABSTRACTIONS + EVALS + AGENTS + adr/ + recipes/
 BUILD_LOG.md                # per-step record
 ```
@@ -180,7 +180,7 @@ pytest -k <pattern>  # run a subset
 
 See `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md` for the full plan. Summary:
 
-- **P0 — Freeze operating model + MemPalace decision spike.** Doc freeze here + bounded spike on `SvenWell/mempalace-spike` to decide if the personal-layer substrate becomes MemPalace (49k★, 96.6% R@5 on LongMemEval) or stays custom.
+- **P0 — Freeze operating model + MemPalace adoption.** MemPalace is now the adopted personal-layer substrate behind `PersonalMemoryBackend` (ADR-0004).
 - **P1 — Capability-based connector manifest + normalized source-item envelope.** Logical roles (`email_system`, `calendar_system`, `transcript_system`, `document_system`, `workspace_system`) per-firm bound to concrete apps (Notion, Monday, Salesforce, Attio, Affinity, etc.) via `firm/systems.yaml`.
 - **P2 — Expand connector pack: calendar + Notion + Attio.** Venture-first.
 - **P3 — Typed outbound mutations for sync-back.** Approved facts only. CRM and workspace systems become first-class operational surfaces without becoming the source of truth.

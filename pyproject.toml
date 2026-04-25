@@ -24,8 +24,7 @@ dependencies = [
     "PyYAML>=6.0",
     # MCP server surface — exposes memory-mission as tools to host agents
     "mcp>=1.0",
-    # MemPalace — personal-layer substrate spike (SvenWell/mempalace-spike)
-    # Pinned on spike branch only; main branch does NOT have this.
+    # MemPalace — adopted personal-layer substrate behind PersonalMemoryBackend.
     "mempalace>=3.3,<4.0",
     # LLM providers (used by extraction + workflow agents)
     "anthropic>=0.39",

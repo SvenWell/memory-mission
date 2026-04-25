@@ -30,6 +30,7 @@ from mempalace import searcher as _mp_searcher
 
 from memory_mission.identity.base import IdentityResolver, parse_identifier
 from memory_mission.ingestion.roles import NormalizedSourceItem
+from memory_mission.memory.schema import validate_employee_id
 from memory_mission.personal_brain.backend import (
     CandidateFact,
     Citation,
@@ -67,10 +68,11 @@ class MemPalaceAdapter:
         self._instances: dict[str, _PerEmployeeInstance] = {}
 
     def _instance(self, employee_id: str) -> _PerEmployeeInstance:
-        if employee_id not in self._instances:
-            palace_path = self._firm_root / "personal" / employee_id / "mempalace"
-            self._instances[employee_id] = _PerEmployeeInstance(palace_path)
-        return self._instances[employee_id]
+        safe_employee_id = validate_employee_id(employee_id)
+        if safe_employee_id not in self._instances:
+            palace_path = self._firm_root / "personal" / safe_employee_id / "mempalace"
+            self._instances[safe_employee_id] = _PerEmployeeInstance(palace_path)
+        return self._instances[safe_employee_id]
 
     # ---------- Protocol surface ----------
 
@@ -84,6 +86,7 @@ class MemPalaceAdapter:
         wing = item.source_role.value
         room = item.container_id or "default"
         document = f"{item.title}\n\n{item.body}"
+        indexed_document = _encode_indexed_document(item.external_id, document)
         metadata = self._metadata_for(item)
 
         # Write to closets (MemPalace's primary line-level store).
@@ -108,7 +111,7 @@ class MemPalaceAdapter:
         # zero hits even after closet upsert.
         inst.drawers.upsert(
             ids=[item.external_id],
-            documents=[document],
+            documents=[indexed_document],
             metadatas=[metadata],
         )
         return IngestResult(items_ingested=1)
@@ -133,16 +136,20 @@ class MemPalaceAdapter:
         rows: list[dict[str, Any]] = result.get("results", [])
         hits: list[PersonalHit] = []
         for row in rows:
-            metadata = self._metadata_from_row(row, employee_id, inst)
+            metadata, clean_text = self._metadata_and_text_from_row(row, inst)
             if metadata is None:
                 continue
+            hit_id = metadata["external_id"]
+            citation = self._citation_from_metadata(metadata)
+            if citation.external_id != hit_id:
+                continue
             hit = PersonalHit(
-                hit_id=metadata["external_id"],
-                title=metadata.get("title", row.get("text", "")[:80]),
-                snippet=row.get("text", "")[:500],
+                hit_id=hit_id,
+                title=metadata.get("title", clean_text[:80]),
+                snippet=clean_text[:500],
                 score=float(row.get("similarity", row.get("bm25_score", 0.0))),
                 cited_at=_parse_iso(metadata.get("modified_at")) or datetime.now(UTC),
-                citations=[self._citation_from_metadata(metadata)],
+                citations=[citation],
             )
             hits.append(hit)
         return hits
@@ -224,13 +231,14 @@ class MemPalaceAdapter:
                 continue
             citation = self._citation_from_metadata(metadata)
             title = metadata.get("title", "")
+            clean_doc = _strip_index_marker(doc or "")
             yield CandidateFact(
                 employee_id=employee_id,
                 fact_kind="event",
                 payload={
                     "kind": "event",
                     "confidence": 0.5,
-                    "support_quote": (doc or "")[:150] or title or ext_id,
+                    "support_quote": clean_doc[:150] or title or ext_id,
                     "entity_name": title or ext_id,
                     "description": title or ext_id,
                 },
@@ -261,35 +269,64 @@ class MemPalaceAdapter:
             "title": item.title,
         }
 
-    def _metadata_from_row(
+    def _metadata_and_text_from_row(
         self,
         row: dict[str, Any],
-        employee_id: str,
         inst: _PerEmployeeInstance,
-    ) -> dict[str, Any] | None:
-        """Pull the source metadata for a search-result row.
-
-        ``search_memories`` returns wing/room/source_file/created_at on
-        the row but not our stored metadata blob — fetch it back from
-        the drawer collection by content match.
-        """
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Return exact source metadata + marker-stripped text for a search row."""
         text = row.get("text") or ""
         if not text:
-            return None
+            return None, ""
+        marker_id, clean_text = _decode_indexed_document(text)
+        row_metadata = _metadata_from_search_row(row)
+        if row_metadata is not None:
+            row_external_id = row_metadata.get("external_id")
+            if row_external_id and (marker_id is None or row_external_id == marker_id):
+                return row_metadata, clean_text
+        if marker_id:
+            metadata = self._metadata_for_external_id(marker_id, inst)
+            return metadata, clean_text
+        metadata = self._metadata_by_exact_document(text, inst)
+        return metadata, _strip_index_marker(text)
+
+    def _metadata_for_external_id(
+        self,
+        external_id: str,
+        inst: _PerEmployeeInstance,
+    ) -> dict[str, Any] | None:
         try:
-            res = inst.drawers.query(
-                query_texts=[text[:500]],
-                n_results=1,
-            )
+            res = inst.drawers.get(ids=[external_id])
         except Exception:
             return None
-        metadatas = (res.get("metadatas") or [[]])[0]
-        ids = (res.get("ids") or [[]])[0]
+        ids = res.get("ids") or []
+        metadatas = res.get("metadatas") or []
         if not metadatas or not ids:
             return None
-        meta = dict(metadatas[0]) if metadatas[0] else {}
-        meta.setdefault("external_id", ids[0])
-        return meta
+        metadata = dict(metadatas[0]) if metadatas[0] else {}
+        metadata.setdefault("external_id", ids[0])
+        return metadata
+
+    def _metadata_by_exact_document(
+        self,
+        document: str,
+        inst: _PerEmployeeInstance,
+    ) -> dict[str, Any] | None:
+        """Fallback for pre-marker rows: match the exact stored document text."""
+        try:
+            res = inst.drawers.get()
+        except Exception:
+            return None
+        ids = res.get("ids") or []
+        documents = res.get("documents") or []
+        metadatas = res.get("metadatas") or []
+        for external_id, stored_doc, metadata in zip(ids, documents, metadatas, strict=False):
+            if stored_doc != document:
+                continue
+            out = dict(metadata) if metadata else {}
+            out.setdefault("external_id", external_id)
+            return out
+        return None
 
     def _citation_from_metadata(self, metadata: dict[str, Any]) -> Citation:
         modified_at = _parse_iso(metadata.get("modified_at")) or datetime.now(UTC)
@@ -313,6 +350,37 @@ def _parse_iso(raw: Any) -> datetime | None:
         return datetime.fromisoformat(raw)
     except ValueError:
         return None
+
+
+def _metadata_from_search_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract first-class row metadata if MemPalace exposes it."""
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict):
+        return dict(metadata)
+    metadatas = row.get("metadatas")
+    if isinstance(metadatas, list) and metadatas and isinstance(metadatas[0], dict):
+        return dict(metadatas[0])
+    return None
+
+
+_INDEX_MARKER_PREFIX = "MM_SOURCE_ID:"
+
+
+def _encode_indexed_document(external_id: str, document: str) -> str:
+    return f"{_INDEX_MARKER_PREFIX}{external_id}\n{document}"
+
+
+def _decode_indexed_document(document: str) -> tuple[str | None, str]:
+    if not document.startswith(_INDEX_MARKER_PREFIX):
+        return None, document
+    first_line, _, rest = document.partition("\n")
+    marker_id = first_line.removeprefix(_INDEX_MARKER_PREFIX)
+    return marker_id or None, rest
+
+
+def _strip_index_marker(document: str) -> str:
+    _, clean = _decode_indexed_document(document)
+    return clean
 
 
 __all__ = ["MemPalaceAdapter"]

@@ -5,9 +5,8 @@ against:
 
 - ``_FakeInMemoryBackend`` (defined in this file) — exercises the
   Protocol contract, gives us baseline assertions today
-- ``MemPalaceAdapter`` (P1, on ``SvenWell/mempalace-spike``) — added
-  via parametrize once the adapter exists
-- An eventual hardened in-house impl (P1 reject path) — same
+- ``MemPalaceAdapter`` — the adopted personal substrate
+- An eventual replacement impl — same contract, same tests
 
 The contract assertions are substrate-agnostic: every impl must enforce
 employee isolation, return citations on hits, route candidate facts
@@ -21,7 +20,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from pydantic import TypeAdapter
 
+from memory_mission.extraction.schema import ExtractedFact
 from memory_mission.ingestion.roles import NormalizedSourceItem
 from memory_mission.personal_brain.backend import (
     CandidateFact,
@@ -207,6 +208,19 @@ def test_query_returns_typed_hits(backend: PersonalMemoryBackend) -> None:
     assert all(isinstance(h, PersonalHit) for h in hits)
 
 
+def test_query_hit_citation_external_id_matches_hit_id(backend: PersonalMemoryBackend) -> None:
+    scenario = ALL_SCENARIOS[0]()
+    for item in scenario.corpus:
+        backend.ingest(item, employee_id=scenario.employee_id)
+
+    hits = backend.query(scenario.query, employee_id=scenario.employee_id)
+
+    assert hits
+    for hit in hits:
+        assert hit.citations
+        assert all(c.external_id == hit.hit_id for c in hit.citations)
+
+
 # ---------- Acceptance scenarios ----------
 
 
@@ -267,8 +281,8 @@ def test_employee_isolation_under_concurrent_writes(
 
 def test_citations_employee_scoped(backend: PersonalMemoryBackend) -> None:
     """citations() under one employee MUST return empty for another employee's hit_id."""
-    alice = "alice@vc.example"
-    bob = "bob@vc.example"
+    alice = "alice-vc-example"
+    bob = "bob-vc-example"
     scenario = ALL_SCENARIOS[0]()
     item = scenario.corpus[0]
     backend.ingest(item, employee_id=alice)
@@ -299,24 +313,17 @@ def test_candidate_facts_payload_matches_extracted_fact_shape(
 
     facts = list(backend.candidate_facts(employee_id=scenario.employee_id))
     assert len(facts) >= 1
+    fact_adapter = TypeAdapter(ExtractedFact)
     for fact in facts:
-        assert "kind" in fact.payload, (
-            f"CandidateFact.payload missing kind discriminator: {fact.payload}"
-        )
-        assert fact.payload["kind"] in {
-            "identity",
-            "relationship",
-            "preference",
-            "event",
-            "update",
-            "open_question",
-        }, f"Unknown fact_kind: {fact.payload['kind']}"
+        parsed = fact_adapter.validate_python(fact.payload)
+        assert fact.fact_kind == fact.payload["kind"]
+        assert fact.fact_kind == parsed.kind
 
 
 def test_candidate_facts_employee_scoped(backend: PersonalMemoryBackend) -> None:
     """candidate_facts() under one employee never surfaces another's items."""
-    alice = "alice@vc.example"
-    bob = "bob@vc.example"
+    alice = "alice-vc-example"
+    bob = "bob-vc-example"
     item = ALL_SCENARIOS[0]().corpus[0]
     backend.ingest(item, employee_id=alice)
 
@@ -354,8 +361,28 @@ def test_resolve_entity_returns_stable_ref(backend: PersonalMemoryBackend) -> No
     """resolve_entity must return an EntityRef with a stable entity_id shape (p_/o_)."""
     ref = backend.resolve_entity(
         ["email:sarah@northpoint.fund", "linkedin:sarah-chen"],
-        employee_id="alice@vc.example",
+        employee_id="alice-vc-example",
     )
     assert isinstance(ref, EntityRef)
     assert ref.entity_id.startswith(("p_", "o_"))
     assert "email:sarah@northpoint.fund" in ref.identifiers
+
+
+# ---------- Adapter-specific path safety ----------
+
+
+@pytest.mark.parametrize(
+    "bad_employee_id",
+    ["../escape", "/tmp/escape", ".hidden", "foo/bar", "", "bad\x00id"],
+)
+def test_mempalace_rejects_unsafe_employee_ids_before_creating_paths(
+    mempalace_backend: PersonalMemoryBackend,
+    tmp_path,  # type: ignore[no-untyped-def]
+    bad_employee_id: str,
+) -> None:
+    item = ALL_SCENARIOS[0]().corpus[0]
+
+    with pytest.raises(ValueError):
+        mempalace_backend.ingest(item, employee_id=bad_employee_id)
+
+    assert not (tmp_path / "personal").exists()
