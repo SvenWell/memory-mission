@@ -74,7 +74,7 @@ briefing = context.render()       # markdown for the host-agent LLM
 
 ## What shipped
 
-V1 complete + Step 18 MCP surface shipped + MemPalace personal substrate adopted + P2 capability-based connector manifest + venture-pack (Calendar + Affinity + Outlook + OneDrive/SharePoint + Attio + Notion + Slack). 18 build steps + six-move polish pass + a three-reviewer security-response pass (21 fixes across B1-B28). **837 tests passing**, `mypy --strict` clean on 80 source files. P0–P2 merged to `main` at `123346f`.
+V1 complete + Step 18 MCP surface shipped + MemPalace personal substrate adopted + P2 capability-based connector manifest + venture-pack (Calendar + Affinity + Outlook + OneDrive/SharePoint + Attio + Notion + Slack) + **P7-A venture overlay** (constitution + page templates + lifecycle predicate vocabulary + 3 workflow skills). 18 build steps + six-move polish pass + a three-reviewer security-response pass (21 fixes across B1-B28). **837 tests passing**, `mypy --strict` clean on 80 source files. P0–P2 merged to `main` at `3749034`.
 
 | Layer | What you can do today |
 |---|---|
