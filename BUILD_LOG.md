@@ -2663,3 +2663,83 @@ ADR-0008 introducing a new `chat_system` role to ConnectorRole (since
 Slack channels-as-conversations don't fit `workspace` cleanly), and
 the binding-shape decision for DMs (employee-private personal-plane)
 vs internal channels (firm-plane shared) vs external shared channels.
+
+## P3-prep complete — Slack connector + chat_system role + ADR-0011 (2026-04-25)
+
+Final venture-pack add. Slack lands as the universal team-comms
+substrate. Adding it required a sixth `ConnectorRole` since Slack's
+message-stream shape doesn't fit any of the existing five (email /
+calendar / transcript / document / workspace).
+
+### What landed
+
+- **ADR-0011** — `chat_system` role for Slack-shape integrations.
+  Documents per-message envelope as the atomic unit, helper-side
+  plane override (DMs always personal regardless of binding), and
+  the manifest-rule-ordering invariant (DM rules MUST come before
+  is_private rules because Slack DMs are also is_private).
+- **`ConnectorRole.CHAT`** — added to
+  `src/memory_mission/ingestion/roles.py`. Sixth value in the
+  StrEnum.
+- **Slack connector** —
+  `src/memory_mission/ingestion/connectors/slack.py`. 7 read actions
+  (list_channels, get_channel, list_messages, get_replies,
+  search_messages, list_users, get_user). OAuth2 / Bearer via
+  Composio. Connector name 'slack' matches manifest 'app: slack'.
+  Composio's full Slack toolkit has 106 actions; we wrap the
+  read-side subset for backfill.
+- **`slack_message_to_envelope`** —
+  `src/memory_mission/ingestion/envelopes.py`. Per-message envelope
+  with caller-supplied channel context. Surfaces all the
+  channel-type flags (is_im, is_mpim, is_private, is_shared,
+  is_ext_shared) as top-level metadata for if_field rule matching.
+  Plane override structurally enforced: `target_plane = personal if
+  (is_im or is_mpim) else binding.target_plane`. Slack ts parsed via
+  `datetime.fromtimestamp(float(ts), tz=UTC)` (epoch.microseconds
+  format). Thread relationship surfaced as `slack_thread_ts` (drops
+  when equal to ts, since Slack returns thread_ts == ts for thread
+  roots).
+- **`backfill-slack` skill** —
+  `skills/backfill-slack/SKILL.md`. Documents the dual-writer
+  pattern (one personal, one firm) and the per-channel durable runs.
+  Notes the rule-ordering invariant prominently. Excludes
+  Slack-file-attachment ingestion as future work.
+- **`docs/recipes/systems-yaml.md`** — Slack example added with the
+  critical ordering callout. Per-app `visibility_metadata` shape
+  table extended with the Slack row + plane-override note.
+- **ADR README index** — flips ADR-0011 to active.
+- **Skill index + manifest** — entries for backfill-slack added.
+
+### Verification
+
+- [x] `pytest` — 837/837 passed (+15 since Notion: 4 connector
+      tests + 11 envelope tests including the dual-plane override
+      tests)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 80 source files (+1)
+- [x] Manifest parses as valid JSONL (14 entries; was 13)
+
+### Venture-pack complete
+
+13 backfill-capable connectors now ship:
+
+- **Personal-source (employee plane):** Gmail, Outlook, Granola,
+  Calendar
+- **Firm-source (firm plane, admin-run):** Drive, OneDrive/SharePoint,
+  Affinity, Attio, Notion
+- **Mixed-plane (per-message split):** Slack
+- **Personal+admin firm overlap:** Drive (admin-run firm artefacts)
+
+All routed through `NormalizedSourceItem` + `StagingWriter.
+write_envelope` + `firm/systems.yaml` fail-closed visibility
+mapping. Pilot firm on either Google Workspace OR Microsoft 365
+stack is now covered end-to-end for the personal substrate +
+firm-source substrates + venture-CRM + universal-comms backfill.
+
+### Next
+
+P3 dogfood — Sven's personal agent runs `backfill-gmail` /
+`backfill-granola` / `backfill-calendar` (plus optionally
+`backfill-slack` against his own Slack workspace) against live data.
+Findings drive any envelope-shape or visibility-rule adjustments
+before P4 firm-source ingestion lands as part of an actual pilot.

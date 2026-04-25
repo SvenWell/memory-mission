@@ -127,6 +127,37 @@ Constraints: firm plane only (administrator-run), envelope path only,
 harness, no LLM. SharePoint pages and list items have different
 shapes — separate helpers needed (not in V1).
 
+## backfill-slack
+
+Pull Slack message history through Composio (OAuth2 / Bearer),
+normalize via `slack_message_to_envelope`, write to the **right
+plane per channel-type**: DMs and group DMs land in
+`<wiki_root>/staging/personal/<employee_id>/slack/`; internal channels
+and external-shared channels land in `<wiki_root>/staging/firm/slack/`.
+The envelope helper enforces the plane override structurally based on
+`is_im` / `is_mpim` flags — no manifest rule can route a DM to firm
+staging. See ADR-0011.
+
+Per-message envelope (atomic unit, mirrors Gmail). The skill
+maintains TWO StagingWriter instances (one personal, one firm) and
+picks the right one per `item.target_plane`. Per-channel durable runs
+(one thread per `channel_id`) so resume contracts stay clean.
+
+Visibility surface: `slack_channel_id`, `slack_channel_name`,
+`slack_is_im` / `is_mpim` / `is_private` / `is_shared` /
+`is_ext_shared`, `slack_member_count`, `slack_thread_ts`. Critical:
+DM rules MUST come before is_private rules in the manifest (DMs are
+also is_private in Slack).
+
+Triggers: "backfill slack", "import slack", "sync slack workspace",
+"pull slack history", "ingest slack messages"
+
+Constraints: DMs/MPDMs personal plane only (structurally enforced),
+channels firm plane, envelope path only, `VisibilityMappingError`
+halts the loop, every fetch through the harness, no LLM, no
+write-side mutations (sync-back is P5), no Slack-file ingestion
+(separate helper needed).
+
 ## backfill-notion
 
 Pull Notion workspace pages and database rows through Composio

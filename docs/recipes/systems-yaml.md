@@ -131,6 +131,44 @@ OneDrive AND SharePoint document libraries. SharePoint pages and list
 items have different shapes — separate helpers will land when a
 pilot needs them.
 
+## Slack example — `chat` role with plane override
+
+Slack messages mix planes within a single binding: DMs and group DMs
+are personal-plane (employee-private), regular channels are firm-plane.
+The envelope helper structurally overrides `target_plane` to
+`personal` when `slack_is_im` or `slack_is_mpim` is true; the manifest
+binding's `target_plane: firm` is the default for non-DM messages.
+See ADR-0011.
+
+```yaml
+firm_id: northpoint
+bindings:
+  chat:
+    app: slack
+    target_plane: firm  # default for non-DM; helper overrides for is_im/is_mpim
+    # CRITICAL ORDERING: DMs in Slack are also is_private. The is_im /
+    # is_mpim rules MUST fire before the is_private rule, otherwise
+    # DMs get scoped as partner-only instead of employee-private.
+    visibility_rules:
+      - if_field: { slack_is_im: true }
+        scope: employee-private
+      - if_field: { slack_is_mpim: true }
+        scope: employee-private
+      - if_field: { slack_is_ext_shared: true }
+        scope: external-shared
+      - if_field: { slack_is_private: true }
+        scope: partner-only
+    default_visibility: firm-internal
+```
+
+Auth: OAuth2 / Bearer token via Composio. The Slack token must have
+the appropriate scopes for each channel type
+(`channels:history` / `groups:history` / `im:history` /
+`mpim:history`). The `backfill-slack` skill maintains two
+`StagingWriter` instances (one personal, one firm) and picks the
+right one per `item.target_plane` — the writer's plane-match
+assertion guarantees no DM ever lands in firm staging.
+
 ## Notion example — workspace wiki + structured databases
 
 Notion fits the `workspace` role for firms that use it as their wiki +
@@ -286,6 +324,7 @@ lets you write rules that target the right keys.
 | `affinity_record_to_envelope` | `labels` (list[str]: one `list:<list_id>` per Affinity list the record sits in, plus `global` when Affinity flags the record as global), `affinity_object_type` (`organization` / `person` / `opportunity`), `affinity_owner_id` (int or null) |
 | `attio_record_to_envelope` | `labels` (list[str]: one `list:<list_id>` per Attio list the record sits in), `attio_object_slug` (str: object identifier — `people` / `companies` / `deals` / custom), `attio_workspace_id` (str or null) |
 | `notion_page_to_envelope` | `labels` (list[str]: empty by default), `notion_parent_type` (str: `workspace` / `page_id` / `database_id`), `notion_parent_id` (str or null), `notion_public_url` (str or null — non-null when share-to-web enabled), `notion_archived` (bool) |
+| `slack_message_to_envelope` | `labels` (list[str]: empty by default), `slack_channel_id` (str), `slack_channel_name` (str), `slack_is_im` / `slack_is_mpim` / `slack_is_private` / `slack_is_shared` / `slack_is_ext_shared` (all bool), `slack_member_count` (int or null), `slack_thread_ts` (str or null — present when message is a reply). NOTE: helper structurally overrides `target_plane` to `personal` when `is_im` or `is_mpim`; this is the only role with per-item plane variation (ADR-0011). |
 | `outlook_message_to_envelope` | `outlook_sensitivity` (str: `normal` / `personal` / `private` / `confidential` — Outlook's built-in field), `labels` (list[str]: Outlook user-assigned categories), `to` (list[str]), `cc` (list[str]) |
 | `onedrive_item_to_envelope` | `permissions` (list[dict]: Microsoft Graph grants), `owners` (list[str]: display names), `drive_anyone` (bool — synthesized: True iff any permission grants `link.scope == "anonymous"`), `drive_organization_link` (bool — synthesized: True iff any link is `scope == "organization"`), `is_sharepoint` (bool — True when item lives in a SharePoint document library), `sharepoint_site_id` (str or null), `labels` (list[str]) |
 
