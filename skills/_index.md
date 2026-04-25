@@ -127,6 +127,31 @@ Constraints: firm plane only (administrator-run), envelope path only,
 harness, no LLM. SharePoint pages and list items have different
 shapes — separate helpers needed (not in V1).
 
+## backfill-notion
+
+Pull Notion workspace pages and database rows through Composio
+(OAuth2 or Integration API key), normalize via
+`notion_page_to_envelope`, write to the **firm staging plane**
+(`<wiki_root>/staging/firm/notion/`) via
+`StagingWriter.write_envelope`. Notion's API treats database rows as
+pages with a `database_id` parent, so one helper handles both;
+`external_object_type` is `notion_page` or `notion_database_row`
+depending on the parent type.
+
+Visibility maps from `notion_parent_type` / `notion_parent_id`
+(typical: scope by parent database id), `notion_public_url`
+(share-to-web pages), and `notion_archived`. The skill is
+responsible for fetching `get_block_children` recursively and
+flattening into markdown when body content matters; the envelope
+helper picks up `raw["block_content"]` if pre-populated.
+
+Triggers: "backfill notion", "import notion", "sync notion workspace",
+"pull notion pages", "pull notion databases", "ingest notion wiki"
+
+Constraints: firm plane only (administrator-run), envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM, no write-side mutations (sync-back is P5).
+
 ## backfill-attio
 
 Pull schema-flexible CRM records (people, companies, deals, and any

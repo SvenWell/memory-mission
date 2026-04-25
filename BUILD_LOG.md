@@ -2607,3 +2607,59 @@ Affinity for firms that want a customizable schema. Both fit the
 Notion (workspace + document dual-binding for firms that use Notion
 as their wiki). Then Slack with its own ADR for the new
 `chat_system` role.
+
+## P3-prep continued — Notion connector (workspace wiki + database rows) (2026-04-25)
+
+Notion lands as the third workspace-role binding. Many VCs use Notion
+as the firm wiki + project DB; this unlocks Notion-on-Workspace pilot
+firms.
+
+### What landed
+
+- **Notion connector** —
+  `src/memory_mission/ingestion/connectors/notion.py`. Composio-backed.
+  7 read actions: search (workspace-wide page + database title
+  search), list_users, get_page, get_block_children (the block tree),
+  query_database, get_database, get_comments. OAuth2 or API key
+  (Integration token) via Composio. Connector name 'notion' matches
+  manifest 'app: notion'.
+- **`notion_page_to_envelope`** —
+  `src/memory_mission/ingestion/envelopes.py`. Single helper handles
+  BOTH freestanding pages AND database rows (Notion's API treats DB
+  rows as pages with a `database_id` parent). external_object_type is
+  `notion_page` or `notion_database_row` based on parent type.
+  Visibility surface includes notion_parent_type / notion_parent_id
+  (the typical scope key in venture firms — scope by specific
+  database) plus notion_public_url + notion_archived. Title pulled
+  from properties.title array (or top-level title for databases).
+  Body comes from a pre-flattened raw["block_content"] string — the
+  helper stays pure; the skill is responsible for recursing
+  get_block_children and flattening the block tree to markdown
+  before calling the helper.
+- **`backfill-notion` skill** —
+  `skills/backfill-notion/SKILL.md`. Notes the workspace-wide vs
+  database-driven discovery strategies; describes the block-flattening
+  pattern; clarifies that standalone Notion databases (the schema
+  objects, not their rows) need a separate helper if the firm wants
+  them as items.
+- **`docs/recipes/systems-yaml.md`** — Notion example added with
+  parent-id scoping rules. Per-app `visibility_metadata` shape table
+  extended.
+- **Skill index + manifest** — entries for backfill-notion added.
+
+### Verification
+
+- [x] `pytest` — 822/822 passed (+13 since Attio: 5 connector tests +
+      8 envelope tests)
+- [x] `ruff check` + `ruff format --check` clean (after fixing one
+      E501 long-line issue)
+- [x] `mypy --strict` clean on 79 source files (+1)
+- [x] Manifest parses as valid JSONL (13 entries; was 12)
+
+### Next
+
+Slack — the final venture-pack add. Needs a brief design pass first:
+ADR-0008 introducing a new `chat_system` role to ConnectorRole (since
+Slack channels-as-conversations don't fit `workspace` cleanly), and
+the binding-shape decision for DMs (employee-private personal-plane)
+vs internal channels (firm-plane shared) vs external shared channels.

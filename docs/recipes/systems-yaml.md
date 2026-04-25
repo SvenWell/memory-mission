@@ -131,6 +131,39 @@ OneDrive AND SharePoint document libraries. SharePoint pages and list
 items have different shapes — separate helpers will land when a
 pilot needs them.
 
+## Notion example — workspace wiki + structured databases
+
+Notion fits the `workspace` role for firms that use it as their wiki +
+project database. The same connector can also fulfil `document` if a
+firm wants to model individual Notion pages as document artefacts —
+the binding is your choice. The most common pattern is `workspace`
+only.
+
+```yaml
+firm_id: northpoint
+bindings:
+  workspace:
+    app: notion
+    target_plane: firm
+    visibility_rules:
+      # Scope by parent database — every row in the Investments DB is
+      # partner-only, every row in the Public Memos DB is external-shared.
+      - if_field: { notion_parent_id: "db-investments" }
+        scope: partner-only
+      - if_field: { notion_parent_id: "db-public-memos" }
+        scope: external-shared
+      # Pages parented under specific high-level wiki sections.
+      - if_field: { notion_parent_id: "page-partner-only-wiki" }
+        scope: partner-only
+    default_visibility: firm-internal
+```
+
+Auth: OAuth2 (typical) or an Integration API key via Composio. The
+backfill skill fetches `get_page` plus `get_block_children`
+recursively, flattens the block tree into markdown, and stuffs it into
+`raw["block_content"]` before calling the envelope helper — the
+helper itself stays pure and offline. Backfill is administrator-run.
+
 ## Schema-flexible CRM example — Attio
 
 Attio is a customizable CRM with both system objects (people,
@@ -252,6 +285,7 @@ lets you write rules that target the right keys.
 | `drive_file_to_envelope` | `permissions` (list[dict]), `owners` (list[str]), `drive_anyone` (bool — synthesized: True iff any permission grants `type: anyone`), `labels` (list[str]) |
 | `affinity_record_to_envelope` | `labels` (list[str]: one `list:<list_id>` per Affinity list the record sits in, plus `global` when Affinity flags the record as global), `affinity_object_type` (`organization` / `person` / `opportunity`), `affinity_owner_id` (int or null) |
 | `attio_record_to_envelope` | `labels` (list[str]: one `list:<list_id>` per Attio list the record sits in), `attio_object_slug` (str: object identifier — `people` / `companies` / `deals` / custom), `attio_workspace_id` (str or null) |
+| `notion_page_to_envelope` | `labels` (list[str]: empty by default), `notion_parent_type` (str: `workspace` / `page_id` / `database_id`), `notion_parent_id` (str or null), `notion_public_url` (str or null — non-null when share-to-web enabled), `notion_archived` (bool) |
 | `outlook_message_to_envelope` | `outlook_sensitivity` (str: `normal` / `personal` / `private` / `confidential` — Outlook's built-in field), `labels` (list[str]: Outlook user-assigned categories), `to` (list[str]), `cc` (list[str]) |
 | `onedrive_item_to_envelope` | `permissions` (list[dict]: Microsoft Graph grants), `owners` (list[str]: display names), `drive_anyone` (bool — synthesized: True iff any permission grants `link.scope == "anonymous"`), `drive_organization_link` (bool — synthesized: True iff any link is `scope == "organization"`), `is_sharepoint` (bool — True when item lives in a SharePoint document library), `sharepoint_site_id` (str or null), `labels` (list[str]) |
 
