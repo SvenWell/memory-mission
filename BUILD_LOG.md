@@ -2743,3 +2743,245 @@ P3 dogfood — Sven's personal agent runs `backfill-gmail` /
 `backfill-slack` against his own Slack workspace) against live data.
 Findings drive any envelope-shape or visibility-rule adjustments
 before P4 firm-source ingestion lands as part of an actual pilot.
+
+## P7-A — Venture overlay (Joyful Prism, Commit 1+2) (2026-04-25)
+
+First vertical operating layer on the generic governance core. Plan
+in `/Users/svenwellmann/.claude/plans/okay-lets-envision-a-joyful-prism.md`.
+Two atomic commits, both pure overlay + skill-markdown — zero core
+code touched.
+
+### Commit 1 — overlays/venture/ scaffold (`2789186`)
+
+Greenfield `overlays/` directory. Contract documented in
+`overlays/README.md`: per-vertical config layer that rides on top of
+the substrate without modifying it. Future `overlays/pe/` and
+`overlays/wealth/` follow the same shape.
+
+`overlays/venture/`:
+
+- **`firm_template.yaml`** — default `firm/systems.yaml` for a VC
+  fund. Pre-wired bindings for Gmail/Outlook (email), gcal (calendar),
+  Granola (transcript), Drive (document), Affinity (workspace, the
+  default venture CRM), Slack (chat). Per-list scope mapping examples
+  (Pipeline → partner-only, Portfolio → firm-internal, LP Network →
+  partner-only). Round-trips through `load_systems_manifest`.
+- **`constitution_seed.md`** — single `tier: constitution` page
+  encoding `lifecycle_stages` (sourced → screening → diligence → ddq →
+  memo → ic → decision → portfolio | passed), `ic_quorum: 3`,
+  `decision_rights` (partner_solo: <500k, partner_pair: <5M,
+  ic_full: >=5M), `diligence_required_artefacts`, `sourcing_targets`,
+  `ic_meeting_cadence`, `fund_thesis_review_cadence`. All as
+  frontmatter `extra` fields per the `extra="allow"` Pydantic
+  decision. Round-trips through `parse_page` / `render_page` with
+  extras preserved.
+- **`prompt_examples.md`** — extraction-prompt addenda teaching the
+  LLM the venture predicate vocabulary (`lifecycle_status`,
+  `ddq_status`, `ic_decision`, `next_step`, `co_investor`,
+  `lead_negotiator`, `data_room_link`, `valuation_at_entry`,
+  `closing_date`, `intro_source`, `board_observer`, `lp_committed_at`)
+  + 3 worked venture examples (first founder call, IC decision,
+  co-investor mention email). Pure prompt-tuning — no code change.
+- **`permissions_preset.md`** — Policy YAML with five-scope
+  vocabulary (public / external-shared / firm-internal / partner-only /
+  lp-only) + role presets for partner / principal / associate / IC
+  member / LP relations. Aligned to the constitution's
+  `decision_rights`.
+- **`page_templates/{deal,portfolio_company,ic_decision,ddq_response}.md`**
+  — page skeletons with regex-compliant placeholder slugs
+  (`template-deal` etc.). All four round-trip through `parse_page` /
+  `render_page` with extras preserved.
+
+### Commit 2 — workflow skills
+
+Three new skills under `skills/`:
+
+- **`update-deal-status`** (workflow). Resolves a deal entity,
+  compiles current deal context, asks host LLM to propose the
+  next-stage transition + rationale, creates a Proposal containing
+  `UpdateFact` (lifecycle_status: old → new) + optional `EventFact`
+  for human review through review-proposals. Validates the proposed
+  stage against the constitution's `lifecycle_stages` vocabulary.
+  For `diligence → memo` checks `diligence_required_artefacts`
+  coverage; missing artefacts surface as forcing questions.
+  Decision-stage transitions blocked — use `record-ic-decision`.
+  Never auto-promotes.
+- **`record-ic-decision`** (workflow). Resolves a deal in
+  `lifecycle_status: ic`, extracts vote details from the IC meeting
+  transcript, validates IC quorum against constitution's `ic_quorum`
+  field (below-quorum votes produce `tier=policy` advisory page,
+  not `tier=decision`), validates `decision_rights` ceilings, drafts
+  a `tier=decision` page bundled with the lifecycle-update fact +
+  `ic_decision` predicate fact + (if `invest`) investment-term facts.
+  Creates a Proposal — never auto-promotes. Dissenting votes recorded
+  with attribution.
+- **`onboard-venture-firm`** (administrator/ingestion). Scaffolds a
+  new venture firm by copying `overlays/venture/` artefacts into the
+  firm directory. The constitution is *proposed* through
+  review-proposals (the firm's partners review and ratify; never
+  auto-promoted). Optionally runs an initial `backfill-firm-artefacts`
+  against the firm's investment-thesis Drive folder. Writes a
+  setup-confirmation page summarizing what was copied + what
+  placeholders need replacement.
+
+`skills/_index.md` updated: header bumped to "17 skills shipped";
+three new skill entries with descriptions + triggers + constraints.
+`skills/_manifest.jsonl` line count 14 → 17.
+
+### Architectural notes (why overlays, not core)
+
+The architecture rule "vertical-specific taxonomies live in a config
+layer, not core schema" is respected throughout:
+
+- **No new core domains.** Venture uses existing `deals`,
+  `companies`, `people`, `meetings`, `concepts` from `CORE_DOMAINS`.
+  Type-specific keys (`type: portfolio_company`, `type:
+  ic_decision`) live in `frontmatter.extra`, not as new domains.
+- **No new core predicates.** Venture vocabulary
+  (`lifecycle_status`, `ic_decision`, `ddq_status`, etc.) is a
+  prompt-tuning artifact. The `RelationshipFact` /  `UpdateFact`
+  schemas accept any string predicate. The constitution defines the
+  authoritative vocabulary; coherence checks at promote-time flag
+  values outside the list.
+- **No new core workflow primitives.** All three new skills compose
+  `compile_agent_context` + `create_proposal` + `review-proposals`
+  (no core changes).
+- **The overlay model itself is the wager.** A second vertical
+  (`overlays/pe/`) and third (`overlays/wealth/`) will land later
+  with the same shape. Common patterns that emerge across all three
+  graduate to core; vertical-specific patterns stay in their
+  overlay.
+
+### Verification
+
+- [x] `pytest` — 837/837 passed (zero core code touched; tests stay
+      green)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 80 source files
+- [x] `firm_template.yaml` round-trips through `load_systems_manifest`
+- [x] `constitution_seed.md` round-trips through `parse_page` /
+      `render_page` with all 7 extras preserved
+      (lifecycle_stages, ic_quorum, decision_rights,
+      diligence_required_artefacts, sourcing_targets,
+      ic_meeting_cadence, fund_thesis_review_cadence)
+- [x] All 4 page templates round-trip cleanly
+- [x] `skills/_manifest.jsonl` parses as valid JSONL with 17 entries
+
+### Next
+
+Per the prism plan:
+
+- **Week 2**: C (Context Farmer surface) — `synthesis/coverage.py` +
+  `dashboard.farming.base` + ADR-0012. Parallel: `weekly-portfolio-update`
+  workflow skill (B-slice 2).
+- **Weeks 3–4**: E (pilot rehearsal pack).
+- **Weeks 5–6**: D (typed sync-back, P5).
+- **Weeks 7–8**: B-rest (deal-memo-draft, quarterly-lp-update,
+  IC-prep, partner-1on1-prep).
+
+The venture overlay is now ready for Sven's personal agent to dogfood
+on a synthetic venture firm directory: copy `overlays/venture/firm_template.yaml`
++ `constitution_seed.md` into a test firm dir, instantiate one
+deal page from `page_templates/deal.md`, walk it from `sourced` →
+`diligence` → `ic` → `decision` via `update-deal-status` +
+`record-ic-decision`. Each transition should produce a Proposal that
+review-proposals shows for approval.
+
+## P7-A Week 1.5 — Hermes-feedback acceptance polish (2026-04-25)
+
+Five sharp critiques from the Hermes-agent post-Week-1 review that
+materially improve the venture overlay before merging to main.
+Bundled into one commit. Plan section: "Week 1.5 polish commit
+(Hermes-feedback acceptance)" in
+`/Users/svenwellmann/.claude/plans/okay-lets-envision-a-joyful-prism.md`.
+
+### What landed
+
+1. **Contract tests for the venture overlay** —
+   `tests/test_overlay_contract.py` (new). 32 parametrized tests
+   covering: `firm_template.yaml` parses via `load_systems_manifest`
+   with all 6 role bindings; `constitution_seed.md` round-trips
+   with all 12 extras preserved (lifecycle_stages + 5 sub-state
+   vocabularies + ic_quorum + decision_rights +
+   diligence_required_artefacts + sourcing_targets +
+   ic_meeting_cadence + fund_thesis_review_cadence); each page
+   template round-trips + uses CORE_DOMAINS + valid tier;
+   permissions_preset.md contains all 5 role presets + all 5 scope
+   names; prompt_examples.md contains the 7-predicate venture
+   vocabulary + worked-example markers. Catches drift if anyone
+   edits the overlay files without re-running smoke checks.
+
+2. **Constitution: parallel sub-state vocabularies (multi-axis
+   lifecycle)** — `overlays/venture/constitution_seed.md` extras
+   bumped from 7 to 12. Five new vocabulary lists declared:
+   `ddq_statuses`, `memo_statuses`, `ic_statuses`,
+   `closing_statuses`, `portfolio_statuses`. Body explanation
+   restructured around "canonical high-level + parallel sub-states"
+   pattern. Captures the Hermes critique that single
+   `lifecycle_status` collapses parallel state machines venture
+   really has (ddq workflow + memo workflow + IC workflow + closing
+   workflow + portfolio workflow all evolve independently).
+
+3. **Prompt examples: multi-fact-event pattern** —
+   `overlays/venture/prompt_examples.md` extended with worked
+   example 1.5 ("DDQ received") showing one source event emitting
+   four facts: a sub-state UpdateFact (ddq_status: sent →
+   complete), an EventFact (ddq_received_at: 2026-04-22), an
+   OpenQuestion *recommending but not applying* a high-level
+   lifecycle_status advance, and a separate next_step commitment.
+   Predicate vocabulary table extended to 11 venture-specific
+   predicates (5 sub-state + the original 6).
+
+4. **`valid_from` = source-attested event date convention** — both
+   `skills/update-deal-status/SKILL.md` and
+   `skills/record-ic-decision/SKILL.md` now explicitly require
+   that every UpdateFact's `valid_from` is the date the source
+   attests the transition happened (DDQ received Monday, extracted
+   Wednesday → triple's `valid_from = Monday`, proposal's
+   `created_at = Wednesday`). Substrate already supports this
+   correctly; the convention captures it as skill-level discipline
+   so timeline queries stay correct.
+
+5. **Workflow-skills-never-mutate-truth invariant (named)** —
+   `docs/ABSTRACTIONS.md` gains a new "Workflow skill invariant"
+   section under skills registry. The rule was implicit before
+   ("never auto-promote"); now it's a named architectural rule:
+   workflow skills create Proposals + draft events, NEVER call
+   `promote()` directly, NEVER write to `KnowledgeGraph` directly,
+   NEVER modify pages directly. The invariant is restated as the
+   first constraint in both venture workflow skills' constraints
+   blocks (so the rule is enforced at design time + visible at use
+   time). Cited compliance: `meeting-prep`, `update-deal-status`,
+   `record-ic-decision`, `extract-from-staging`,
+   `detect-firm-candidates`, `onboard-venture-firm`.
+
+6. **MCP firm-plane connection as workflow-skill prereq** — both
+   `update-deal-status` + `record-ic-decision` SKILL.md preconditions
+   now explicitly require the host agent to be configured to call
+   the firm KG / page / proposal MCP tools (Step 18 surface) against
+   the firm directory. MemPalace-direct alone cannot walk the
+   lifecycle; the firm-plane temporal+stateful state is what makes
+   governance visible. Configuration only; no new code.
+
+### Verification
+
+- [x] `pytest` — 869/869 passed (was 837 + 32 new contract tests)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 80 source files
+- [x] `tests/test_skills_registry.py` — manifest entries match
+      SKILL.md frontmatter (manifest updated to mirror the new
+      preconditions + constraints in both venture workflow skills)
+- [x] Constitution round-trips with all 12 extras preserved
+- [x] All 4 page templates round-trip cleanly (covered by parametrized
+      contract tests)
+- [x] Workflow-skills-never-mutate-truth invariant named in
+      ABSTRACTIONS.md + repeated in every venture workflow skill's
+      constraints
+
+### What's next
+
+Week 2 of the prism plan: **C (Context Farmer surface)** +
+**B-slice 2 (`weekly-portfolio-update` skill)** in parallel. **H
+(personal-plane temporal KG / restore the structured personal brain)**
+runs concurrently in Weeks 2–3. ADR-0013 documents the personal-KG
+restoration design.

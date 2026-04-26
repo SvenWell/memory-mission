@@ -4,11 +4,20 @@ Read this file first. Full `SKILL.md` contents load only when a skill's
 triggers match the current task. Machine-readable equivalent:
 `skills/_manifest.jsonl`. Conventions: `skills/_writing-skills.md`.
 
-**8 skills shipped** as of 2026-04-25. The three personal-source
-backfills (gmail, granola, calendar) all route through P2's envelope
-path: load `firm/systems.yaml`, call the per-app envelope helper, and
-write via `StagingWriter.write_envelope`. Visibility maps to firm
-scope per the manifest — fail-closed by default (ADR-0007).
+**17 skills shipped** as of 2026-04-25. Backfill skills (gmail, outlook,
+granola, calendar, drive/firm-artefacts, onedrive, affinity, attio,
+notion, slack) route through P2's envelope path: load `firm/systems.yaml`,
+call the per-app envelope helper, and write via
+`StagingWriter.write_envelope`. Visibility maps to firm scope per the
+manifest — fail-closed by default (ADR-0007).
+
+The three venture-overlay workflow skills (`update-deal-status`,
+`record-ic-decision`, `onboard-venture-firm`) are part of P7-A and
+ride on the venture overlay (`overlays/venture/`). They consume the
+constitution's authoritative vocabulary (`lifecycle_stages`,
+`ic_quorum`, `decision_rights`) and write `UpdateFact` /
+`RelationshipFact` / page proposals through the standard
+review-proposals gate — never auto-promote.
 
 ## backfill-gmail
 
@@ -299,3 +308,64 @@ Constraints: no LLM call inside the skill (host owns it), must not
 include superseded facts, every fact cites source_closet /
 source_file, no auto-promotion of observations, respect tier_floor
 in constitutional-mode firms.
+
+## update-deal-status
+
+Workflow skill on the venture overlay (P7-A). Resolves a deal entity,
+compiles current deal context, asks the host LLM to propose the
+next-stage lifecycle transition + rationale, then creates a Proposal
+containing an `UpdateFact` (lifecycle_status: old → new) + optional
+`EventFact` for human review through review-proposals. Never
+auto-promotes. Validates the proposed stage against the constitution's
+`lifecycle_stages` vocabulary. For `diligence → memo` transitions,
+checks `diligence_required_artefacts` coverage; missing artefacts
+surface as forcing questions. Decision-stage transitions are blocked
+— use `record-ic-decision` instead.
+
+Triggers: "update deal", "move deal to", "advance deal", "deal
+status", "ddq complete", "ddq sent", "memo drafted", "deal passed",
+"deal closed"
+
+Constraints: never auto-promote, every transition cites source,
+lifecycle vocabulary bounded by constitution, decision-stage
+transitions are record-ic-decision's job.
+
+## record-ic-decision
+
+Workflow skill on the venture overlay (P7-A). Resolves a deal
+entity in `lifecycle_status: ic`, extracts vote details from the IC
+meeting transcript, validates IC quorum against the constitution's
+`ic_quorum` field (below-quorum votes produce a `tier=policy` page
+instead of `tier=decision`), validates `decision_rights` ceilings,
+then drafts a `tier=decision` page bundled with `UpdateFact`
+(lifecycle_status: ic → decision) + `ic_decision` predicate fact + (if
+`invest`) investment-term facts. Creates a Proposal — never
+auto-promotes. Dissenting votes recorded with attribution.
+
+Triggers: "record IC decision", "log IC outcome", "approve
+investment", "IC vote complete", "IC decision", "investment committee
+decided"
+
+Constraints: IC quorum validated structurally, decision_rights
+ceilings checked, every IC decision cites the meeting transcript,
+dissenting votes attributed by partner.
+
+## onboard-venture-firm
+
+Administrator skill on the venture overlay (P7-A). Scaffolds a new
+venture firm by copying `overlays/venture/firm_template.yaml` →
+`firm/systems.yaml`, `overlays/venture/permissions_preset.md` →
+`firm/protocols/permissions.md`, page templates → `firm/_templates/venture/`,
+and **proposes** the constitution as a `tier=constitution` page through
+review-proposals (the firm's partners review + ratify; never
+auto-promoted). Optionally runs an initial `backfill-firm-artefacts`
+against the firm's investment-thesis Drive folder. Writes a
+setup-confirmation page summarizing what was copied and what
+placeholders need replacement.
+
+Triggers: "onboard venture firm", "set up venture pilot", "scaffold
+venture overlay", "initialize venture firm", "bootstrap venture firm"
+
+Constraints: administrator-run only, never overwrites existing firm
+config without explicit confirmation, constitution goes through
+review-proposals (no auto-promotion), Drive backfill is optional.

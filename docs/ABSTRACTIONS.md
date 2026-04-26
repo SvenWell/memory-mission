@@ -695,10 +695,37 @@ category: <ingestion | governance | workflow | ...>
 ---
 ```
 
+### Workflow skill invariant
+
+> **Workflow skills never mutate firm truth directly.** They create
+> Proposals + draft events. They do NOT call `promote()` directly,
+> do NOT write to `KnowledgeGraph` directly, do NOT modify pages
+> directly. The `review-proposals` workflow is the *single mutation
+> surface* for firm truth.
+
+This is a load-bearing architectural rule, not a stylistic preference.
+The promotion gate is what makes the firm KG governable; any workflow
+skill that bypasses it makes the entire governance story optional.
+Every workflow-tier skill repeats this invariant in its constraints
+block, so the rule is enforced at design time + visible at use time.
+
+Shipped workflow skills that follow the invariant: `meeting-prep`
+(reads-only — never writes; the strictest case), `update-deal-status`
+(writes Update/Event proposals through `create_proposal`),
+`record-ic-decision` (writes a tier=decision page + multiple typed
+fact proposals through `create_proposal`).
+
+The `extract-from-staging` skill is also write-through-proposal-only
+(category: ingestion, but same rule). The administrator skills
+(`detect-firm-candidates`, `onboard-venture-firm`) likewise create
+proposals; they never bypass review.
+
 ### Shipped skills
 
-14 shipped. All backfill skills route through the envelope path
+17 shipped. All backfill skills route through the envelope path
 (`make_<app>_connector` → `<app>_*_to_envelope` → `StagingWriter.write_envelope`).
+All workflow skills follow the never-mutate-truth-directly invariant
+(above).
 
 | Skill | Category | Plane | What it does |
 |---|---|---|---|
@@ -716,6 +743,9 @@ category: <ingestion | governance | workflow | ...>
 | `review-proposals` | governance | firm | Surface pending proposals, human approves with rationale |
 | `detect-firm-candidates` | governance | firm | Admin: scan personal planes, stage federated firm proposals |
 | `meeting-prep` | workflow | — | Compile distilled `AgentContext` for a workflow agent |
+| `update-deal-status` | workflow | firm | Venture overlay (P7-A): propose lifecycle/sub-state transitions through review |
+| `record-ic-decision` | workflow | firm | Venture overlay (P7-A): propose tier=decision IC outcome with quorum + decision_rights validation |
+| `onboard-venture-firm` | ingestion | firm | Venture overlay (P7-A): scaffold a new firm directory + propose constitution through review |
 
 ---
 

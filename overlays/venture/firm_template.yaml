@@ -1,0 +1,120 @@
+# Default firm/systems.yaml for a venture-fund firm using memory-mission.
+#
+# Copy this file to <MM_WIKI_ROOT>/firm/systems.yaml when onboarding a new
+# venture firm, then tune list ids + workspace ids to match the firm's
+# actual Affinity / Notion / Drive setup.
+#
+# Six capability roles bound to vertical-typical apps:
+#   email      → gmail (swap to outlook for M365 firms)
+#   calendar   → gcal  (swap to outlook calendar for M365 firms)
+#   transcript → granola
+#   document   → drive (swap to one_drive for M365 firms)
+#   workspace  → affinity (the dominant venture CRM; swap to attio for newer firms)
+#   chat       → slack (DMs go personal, channels go firm; helper enforces structurally)
+#
+# Loader: src/memory_mission/ingestion/systems_manifest.py (load_systems_manifest)
+# Recipe: docs/recipes/systems-yaml.md
+# Visibility surface per app: see envelopes.py docstrings + recipe table
+#
+# All visibility rules below are venture-defaults. Override per-firm.
+# Fail-closed by default — bindings without `default_visibility` reject any
+# item whose visibility metadata doesn't match a rule.
+
+firm_id: venture-firm-template
+
+bindings:
+
+  email:
+    app: gmail
+    target_plane: personal
+    visibility_rules:
+      # Operators set Gmail labels on outbound LP correspondence as
+      # "lp-only" so the brain treats them as partner-restricted.
+      - if_label: lp-only
+        scope: lp-only
+      # Cross-fund or co-investor sharing labels.
+      - if_label: external-shared
+        scope: external-shared
+    default_visibility: employee-private
+
+  calendar:
+    app: gcal
+    target_plane: personal
+    visibility_rules:
+      # Public events (board observer slots, public conferences) → external-shared.
+      - if_field: { gcal_visibility: public }
+        scope: external-shared
+      # Explicitly-private events → employee-private.
+      - if_field: { gcal_visibility: private }
+        scope: employee-private
+    default_visibility: employee-private
+
+  transcript:
+    app: granola
+    target_plane: personal
+    # Granola transcripts rarely carry rich visibility metadata.
+    # Default everything to partner-only — most VC calls (founder pitches,
+    # IC discussions, partner 1:1s) are sensitive by default.
+    default_visibility: partner-only
+
+  document:
+    app: drive
+    target_plane: firm
+    visibility_rules:
+      # Files shared via an anonymous link → public.
+      - if_field: { drive_anyone: true }
+        scope: public
+    # Otherwise treat firm Drive as partner-only.
+    default_visibility: partner-only
+
+  workspace:
+    app: affinity
+    target_plane: firm
+    visibility_rules:
+      # Replace these list ids with the firm's actual Affinity list ids
+      # (run `list_lists` once via the affinity connector to discover them).
+      # Pattern: deal-pipeline + portfolio + LP-network are partner-only;
+      # sourced + screening lists are firm-internal.
+
+      # Active Pipeline list — partner-only by default.
+      - if_label: list:42
+        scope: partner-only
+      # Portfolio Companies list — firm-internal (everyone sees current portfolio).
+      - if_label: list:91
+        scope: firm-internal
+      # LP Network list — partner-only.
+      - if_label: list:104
+        scope: partner-only
+      # Co-Investor Network list — firm-internal.
+      - if_label: list:107
+        scope: firm-internal
+      # Globally-known companies (Affinity's `global: true` flag) — external-shared
+      # by default since these aren't firm-private records.
+      - if_label: global
+        scope: external-shared
+    default_visibility: firm-internal
+
+  chat:
+    app: slack
+    # NOTE: target_plane=firm is the default for non-DM channels.
+    # The slack envelope helper structurally overrides target_plane=personal
+    # whenever slack_is_im or slack_is_mpim is true (DMs / group DMs are
+    # always employee-private regardless of any rule). See ADR-0011.
+    target_plane: firm
+    # CRITICAL ORDERING: DMs in Slack are also is_private. The is_im / is_mpim
+    # rules MUST fire before the is_private rule, otherwise DMs get scoped
+    # as partner-only instead of employee-private.
+    visibility_rules:
+      # DMs and group DMs → employee-private (and helper forces personal plane).
+      - if_field: { slack_is_im: true }
+        scope: employee-private
+      - if_field: { slack_is_mpim: true }
+        scope: employee-private
+      # External shared channels (e.g. shared-with-portco-XYZ) → external-shared.
+      - if_field: { slack_is_ext_shared: true }
+        scope: external-shared
+      # Private channels (#partners, #ic, #lp-relations) → partner-only.
+      - if_field: { slack_is_private: true }
+        scope: partner-only
+    # Public-channel default: firm-internal.
+    default_visibility: firm-internal
