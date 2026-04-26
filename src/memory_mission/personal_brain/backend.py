@@ -22,11 +22,14 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import datetime
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from memory_mission.ingestion.roles import NormalizedSourceItem
+
+if TYPE_CHECKING:
+    from memory_mission.personal_brain.personal_kg import PersonalKnowledgeGraph
 
 
 class Citation(BaseModel):
@@ -223,6 +226,26 @@ class PersonalMemoryBackend(Protocol):
 
         Does NOT promote. The proposal pipeline gates every firm-plane
         write; this method only surfaces signal.
+        """
+        ...
+
+    def personal_kg(self, employee_id: str) -> PersonalKnowledgeGraph:
+        """Return the per-employee temporal KG (ADR-0013).
+
+        Backends maintain one ``PersonalKnowledgeGraph`` per employee
+        (lazily constructed, cached). The returned KG auto-applies
+        ``scope=employee_<id>`` on every write and
+        ``viewer_scopes={employee_<id>}`` on every read — cross-employee
+        leak is structurally impossible.
+
+        The KG sits alongside the substrate's retrieval layer
+        (MemPalace's ChromaDB index in the default impl). Retrieval
+        answers "did I see something about X?"; the KG answers "what
+        do I currently believe about X, when did it become true,
+        and what evidence supports it?".
+
+        See ADR-0013 for the architectural rationale and the
+        relationship to ADR-0004 (MemPalace adoption).
         """
         ...
 

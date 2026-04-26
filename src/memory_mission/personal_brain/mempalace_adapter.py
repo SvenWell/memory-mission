@@ -39,6 +39,7 @@ from memory_mission.personal_brain.backend import (
     PersonalHit,
     WorkingContext,
 )
+from memory_mission.personal_brain.personal_kg import PersonalKnowledgeGraph
 
 
 class _PerEmployeeInstance:
@@ -66,6 +67,7 @@ class MemPalaceAdapter:
         self._firm_root = firm_root
         self._identity = identity_resolver
         self._instances: dict[str, _PerEmployeeInstance] = {}
+        self._personal_kgs: dict[str, PersonalKnowledgeGraph] = {}
 
     def _instance(self, employee_id: str) -> _PerEmployeeInstance:
         safe_employee_id = validate_employee_id(employee_id)
@@ -73,6 +75,26 @@ class MemPalaceAdapter:
             palace_path = self._firm_root / "personal" / safe_employee_id / "mempalace"
             self._instances[safe_employee_id] = _PerEmployeeInstance(palace_path)
         return self._instances[safe_employee_id]
+
+    def personal_kg(self, employee_id: str) -> PersonalKnowledgeGraph:
+        """Return the per-employee temporal KG (ADR-0013).
+
+        Lazily constructs one ``PersonalKnowledgeGraph`` per employee
+        and caches it. The KG file lives at
+        ``firm_root/personal/<employee_id>/personal_kg.db``, alongside
+        the MemPalace palace directory. Both serve the same employee:
+        MemPalace = recall substrate (vector + citations); the KG =
+        temporal entity-state (Bayesian corroboration, valid_from/
+        valid_to, scope-isolated).
+        """
+        safe_employee_id = validate_employee_id(employee_id)
+        if safe_employee_id not in self._personal_kgs:
+            self._personal_kgs[safe_employee_id] = PersonalKnowledgeGraph.for_employee(
+                firm_root=self._firm_root,
+                employee_id=safe_employee_id,
+                identity_resolver=self._identity,
+            )
+        return self._personal_kgs[safe_employee_id]
 
     # ---------- Protocol surface ----------
 
