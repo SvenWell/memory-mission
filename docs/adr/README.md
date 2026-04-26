@@ -60,6 +60,7 @@ proposed → active → superseded
 | [0005](0005-sqlite-per-firm.md) | SQLite per firm for all persistent state | active |
 | [0007](0007-capability-based-connectors.md) | Capability-based connector roles + fail-closed visibility mapping | active |
 | [0011](0011-chat-system-role.md) | `chat_system` role for Slack-shape integrations (per-message envelope + helper-side plane override) | active |
+| [0013](0013-personal-plane-temporal-kg.md) | Personal-plane temporal KG alongside MemPalace (per-employee `KnowledgeGraph` instance, scope auto-applied) | active |
 
 Pending ADRs — will be written as the corresponding phase lands (see `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md`):
 

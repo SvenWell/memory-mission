@@ -2985,3 +2985,98 @@ Week 2 of the prism plan: **C (Context Farmer surface)** +
 (personal-plane temporal KG / restore the structured personal brain)**
 runs concurrently in Weeks 2–3. ADR-0013 documents the personal-KG
 restoration design.
+
+## P7-A Week 2 — Personal-plane temporal KG (H, ADR-0013) (2026-04-26)
+
+The architectural correction Sven's repeated dogfood questions kept
+surfacing: personal memory should be a temporal KG too, not just
+recall. Per
+`/Users/svenwellmann/.claude/plans/okay-lets-envision-a-joyful-prism.md`
+this is facet H.
+
+### What landed
+
+- **ADR-0013** — `docs/adr/0013-personal-plane-temporal-kg.md`.
+  Documents the asymmetry between firm KG and personal MemPalace,
+  why ADR-0004's deletion of the unwired four-layer personal_brain/
+  was correct cleanup but incomplete architecture, the
+  per-employee-KG design with employee-scope auto-application, and
+  the explicit relationship to ADR-0004 (extends, doesn't supersede).
+- **`PersonalKnowledgeGraph`** —
+  `src/memory_mission/personal_brain/personal_kg.py`. Wraps the
+  existing `KnowledgeGraph` substrate at
+  `firm_root/personal/<employee_id>/personal_kg.db`. Two-layer
+  cross-employee isolation: per-employee DB file (path-isolated, with
+  `validate_employee_id` defense at construction) AND scope
+  auto-application on every read/write. `add_triple` doesn't even
+  accept a `scope` kwarg — personal triples cannot escape their
+  employee scope by construction. `find_current_triple` defends
+  further by dropping any cross-scope hit.
+- **`PersonalMemoryBackend` Protocol extended** with
+  `personal_kg(employee_id) -> PersonalKnowledgeGraph`. Existing
+  Protocol methods (ingest/query/citations/resolve_entity/
+  working_context/candidate_facts) unchanged.
+- **`MemPalaceAdapter`** maintains a per-employee
+  `PersonalKnowledgeGraph` cache (analogous to its existing
+  `_PerEmployeeInstance` cache for the MemPalace palace). Lazy
+  construction; one KG per employee shared across calls.
+- **`_FakeInMemoryBackend`** in
+  `tests/test_personal_backend_contract.py` extended to satisfy the
+  Protocol — uses a tmp-dir-backed PersonalKnowledgeGraph + a
+  `LocalIdentityResolver`. The contract test
+  `test_fake_satisfies_protocol` now passes against the extended
+  Protocol.
+- **`tests/test_personal_kg.py`** is new — 18 tests covering
+  per-employee construction at the standard path layout, path-
+  traversal defense (6 unsafe employee_ids parametrized),
+  cross-employee isolation (separate DB files + scope filter),
+  auto-scope on writes (scope kwarg refused), foreign-scope-triple
+  filter on reads, temporal semantics inherited from KnowledgeGraph
+  (corroborate Noisy-OR, find_current_triple, invalidate, timeline),
+  context-manager close.
+
+### Design notes
+
+- **MemPalace stays as the retrieval substrate.** ADR-0013 extends
+  ADR-0004; it doesn't supersede. MemPalace handles vector search +
+  citations; the personal KG handles temporal entity-state.
+- **Cross-employee leak structurally blocked at two layers.**
+  Path isolation is the primary mechanism (each employee has their
+  own DB file, validated with `validate_employee_id` before any
+  side effect). Scope auto-application is defense-in-depth (would
+  matter if a future consolidation ever put multiple employees in
+  one DB). `find_current_triple` adds a third layer at read time.
+- **Identity continuity inside personal.** The per-employee KG uses
+  the firm-wide IdentityResolver, so personal "Sarah Chen" entities
+  resolve to the same `p_<id>` the firm KG would use. When
+  personal facts graduate to firm via the proposal pipeline, the
+  entity ID is already correct.
+- **MVP scope intentional.** The KG is empty by default; the host
+  agent or extraction skill writes triples explicitly. Ingest-time
+  entity rollup (auto-write `(entity, mentioned_in, source)`
+  triples from NormalizedSourceItem at ingest time) is deferred to
+  a follow-up commit. Working-memory pages
+  (`tier: working` / `domain: working_memory`) are also deferred.
+  This commit is the architectural primitive; ingestion + working-
+  memory wiring lands once dogfood reveals what's actually needed.
+
+### Verification
+
+- [x] `pytest` — 887/887 passed (+18 new personal-KG tests)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 81 source files (+1)
+- [x] `_FakeInMemoryBackend` satisfies the extended Protocol
+- [x] All 6 unsafe employee_id shapes rejected before any
+      filesystem side effect
+- [x] Two employees have separate DB files (path isolation
+      validated end-to-end)
+- [x] Foreign-scope triple planted via underlying KG is invisible
+      through the wrapper (auto-filter validated end-to-end)
+
+### Next
+
+Per the prism plan, Week 2 also wants C (Context Farmer surface) +
+B-slice 2 (`weekly-portfolio-update` workflow skill). Both are
+independent of H and can ship in subsequent commits without
+blocking. After Week 2, Weeks 3–4 are E (pilot rehearsal pack)
+followed by Weeks 5–6 D (typed sync-back, P5).
