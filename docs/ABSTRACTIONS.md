@@ -675,6 +675,86 @@ with a different scope.
 
 ---
 
+## Personal-plane temporal KG (`personal_brain/personal_kg.py`)
+
+Per-employee instance of the firm `KnowledgeGraph`, scoped to a single
+employee. ADR-0013 — extends ADR-0004 (MemPalace adoption) with the
+state layer that ADR-0004 deferred.
+
+### `PersonalKnowledgeGraph`
+
+```python
+class PersonalKnowledgeGraph:
+    def __init__(self, *, db_path: Path | str, employee_id: str,
+                 identity_resolver: IdentityResolver) -> None: ...
+
+    @classmethod
+    def for_employee(cls, *, firm_root, employee_id, identity_resolver
+                    ) -> PersonalKnowledgeGraph: ...
+```
+
+Construct via `PersonalKnowledgeGraph.for_employee(...)` for the
+standard path layout: `<firm_root>/personal/<validated_employee_id>/personal_kg.db`.
+
+Properties:
+
+- `employee_id: str` — validated via `validate_employee_id`
+- `scope: str` — auto-derived as `f"employee_{employee_id}"`
+- `identity_resolver: IdentityResolver` — the firm-wide resolver, shared with the firm KG (so personal and firm planes speak the same `p_<id>` / `o_<id>`)
+
+### Auto-scope semantics
+
+- **Writes** auto-apply `scope=self.scope` — `add_triple` doesn't
+  even accept a `scope` parameter. Personal triples cannot escape
+  their employee scope by construction.
+- **Reads** auto-apply `viewer_scopes={self.scope}` — cross-employee
+  triples are invisible even if they ever ended up in the same DB
+  file (defense in depth; the per-employee path layout is the
+  primary isolation).
+- **`find_current_triple`** defends additionally: if the underlying
+  KG returns a triple whose scope isn't this employee's scope,
+  returns `None` (treats as no match).
+
+### Surface (auto-scoped delegations to `KnowledgeGraph`)
+
+| Method | Notes |
+|---|---|
+| `add_entity(name, *, entity_type, properties)` | Direct delegate; entities aren't scope-tagged in the schema |
+| `add_triple(subject, predicate, obj, *, valid_from, valid_to, confidence, source_closet, source_file, tier)` | `scope` is NOT a parameter; auto-applied |
+| `corroborate(subject, predicate, obj, *, confidence, source_closet, source_file)` | `scope` auto-applied; raises `ValueError` if existing triple's scope doesn't match (cross-leak guard) |
+| `find_current_triple(subject, predicate, obj)` | Returns `None` for cross-scope hits |
+| `invalidate(subject, predicate, obj, *, ended)` | Per-employee DB file means only this employee's triples ever match |
+| `query_entity(name, *, as_of, direction)` | `viewer_scopes` auto-applied as `{employee_<id>}` |
+| `query_relationship(predicate, *, as_of)` | Same |
+| `timeline(entity_name)` | Same |
+
+### Helper functions
+
+- `employee_scope(employee_id) -> str` — returns the canonical scope string after validating the employee_id
+- `open_personal_kg(*, firm_root, employee_id, identity_resolver)` — context manager that opens + closes the KG cleanly
+
+### How it sits alongside MemPalace
+
+```
+PersonalMemoryBackend (Protocol, ADR-0004 + ADR-0013)
+        │                              │
+        ▼                              ▼
+MemPalace (vector + citations)    PersonalKnowledgeGraph (temporal state)
+firm/personal/<emp>/mempalace/    firm/personal/<emp>/personal_kg.db
+```
+
+Both serve the same employee. MemPalace handles "did I see something
+about X?" recall; the personal KG handles "what do I currently
+believe about X, when did it become true, and what evidence supports
+it?" state.
+
+`MemPalaceAdapter` exposes the KG via the new `personal_kg(employee_id)`
+Protocol method, which lazily constructs + caches one
+`PersonalKnowledgeGraph` per employee (analogous to its existing
+`_PerEmployeeInstance` cache for the MemPalace palace).
+
+---
+
 ## Skills registry (`skills/`)
 
 Every skill is a directory with `SKILL.md` (frontmatter + body), registered in `skills/_index.md` (human-readable) and `skills/_manifest.jsonl` (machine-parsable, one line per skill).

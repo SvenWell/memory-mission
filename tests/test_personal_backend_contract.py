@@ -15,14 +15,18 @@ through the bridge shape, etc.
 
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic import TypeAdapter
 
 from memory_mission.extraction.schema import ExtractedFact
+from memory_mission.identity.base import IdentityResolver
+from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.ingestion.roles import NormalizedSourceItem
 from memory_mission.personal_brain.backend import (
     CandidateFact,
@@ -33,6 +37,7 @@ from memory_mission.personal_brain.backend import (
     PersonalMemoryBackend,
     WorkingContext,
 )
+from memory_mission.personal_brain.personal_kg import PersonalKnowledgeGraph
 from tests.fixtures.pilot_tasks.scenarios import (
     ALL_SCENARIOS,
     Scenario,
@@ -48,9 +53,29 @@ class _FakeInMemoryBackend:
     passes today and a stable harness MemPalaceAdapter slots into.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, tmp_root: Path | None = None) -> None:
         self._items: dict[str, list[NormalizedSourceItem]] = {}
         self._hit_lookup: dict[tuple[str, str], NormalizedSourceItem] = {}
+        # Personal KG support (ADR-0013): per-employee KGs lazily
+        # constructed under a tmp root if the test wants to exercise
+        # the personal_kg() Protocol method.
+        self._personal_kgs: dict[str, PersonalKnowledgeGraph] = {}
+        self._tmp_root: Path = tmp_root or Path(tempfile.mkdtemp(prefix="fake-pkg-"))
+        self._identity_resolver: IdentityResolver | None = None
+
+    def _resolver(self) -> IdentityResolver:
+        if self._identity_resolver is None:
+            self._identity_resolver = LocalIdentityResolver(self._tmp_root / "identity.sqlite")
+        return self._identity_resolver
+
+    def personal_kg(self, employee_id: str) -> PersonalKnowledgeGraph:
+        if employee_id not in self._personal_kgs:
+            self._personal_kgs[employee_id] = PersonalKnowledgeGraph.for_employee(
+                firm_root=self._tmp_root,
+                employee_id=employee_id,
+                identity_resolver=self._resolver(),
+            )
+        return self._personal_kgs[employee_id]
 
     def ingest(
         self,
