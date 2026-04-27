@@ -164,13 +164,21 @@ def find_missing_page_coverage(
     employee_id: str | None = None,
     min_triple_mentions: int = 3,
     min_proposal_mentions: int = 0,
+    count_objects: bool = False,
 ) -> list[MissingPageCoverage]:
     """Entities mentioned often but with no doctrine-tier page.
 
-    Counts entity mentions across (a) currently-true KG triples
-    (subject or object position) and (b) pending+approved proposals'
-    ``target_entity``. Surfaces entities exceeding either threshold
-    that don't yet have a doctrine-or-higher page.
+    Counts entity mentions across (a) currently-true KG triples and
+    (b) pending+approved proposals' ``target_entity`` filtered to
+    ``plane`` / ``employee_id`` so a firm-plane farming report does
+    not surface personal-plane proposal targets.
+
+    By default only **subjects** are counted in (a) because objects
+    are commonly literals (``portfolio``, ``active``, ``$20m``) that
+    would produce false missing-page work. Set ``count_objects=True``
+    to additionally count objects that are known KG entities (each is
+    verified via ``kg.get_entity``); literal objects are still
+    skipped.
 
     Operator action: create + propose a person/company/concept page;
     promote stub pages to doctrine after the first N corroborated
@@ -187,16 +195,37 @@ def find_missing_page_coverage(
             page_keys.add(alias)
 
     triple_counts: dict[str, int] = defaultdict(int)
-    for triple in kg.timeline():
-        if triple.valid_to is not None:
-            continue
+    # Two-pass when counting objects: first pass collects entity-like
+    # names (anything appearing as subject, plus anything explicitly
+    # registered via ``add_entity``); second pass counts subject + (if
+    # gated) object mentions. ``add_triple`` does NOT auto-register
+    # entities, so a strict ``kg.get_entity`` gate would miss almost
+    # everything; subjects-of-some-triple is the practical signal.
+    valid_triples = [t for t in kg.timeline() if t.valid_to is None]
+    if count_objects:
+        entity_names: set[str] = {t.subject for t in valid_triples}
+        # Cache per-object explicit-entity lookup so a 100k-triple KG
+        # hits ``kg.get_entity`` at most once per distinct object name.
+        explicit_lookup: dict[str, bool] = {}
+
+        def _is_entity_like(name: str) -> bool:
+            if name in entity_names:
+                return True
+            if name not in explicit_lookup:
+                explicit_lookup[name] = kg.get_entity(name) is not None
+            return explicit_lookup[name]
+
+    for triple in valid_triples:
         triple_counts[triple.subject] += 1
-        triple_counts[triple.object] += 1
+        if count_objects and _is_entity_like(triple.object):
+            triple_counts[triple.object] += 1
 
     proposal_counts: dict[str, int] = defaultdict(int)
     if store is not None:
         for status in ("pending", "approved"):
-            for proposal in store.list(status=status):
+            for proposal in store.list(status=status, target_plane=plane):
+                if employee_id is not None and proposal.target_employee_id != employee_id:
+                    continue
                 proposal_counts[proposal.target_entity] += 1
 
     out: list[MissingPageCoverage] = []
