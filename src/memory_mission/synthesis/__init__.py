@@ -34,10 +34,28 @@ from memory_mission.synthesis.context import (
     AttendeeContext,
     DoctrineContext,
 )
+from memory_mission.synthesis.individual_boot import (
+    ActiveThread,
+    BootPreference,
+    Commitment,
+    EntityState,
+    IndividualBootContext,
+    ProjectStatus,
+    RecentDecision,
+    compile_individual_boot_context,
+)
 
 __all__ = [
+    "ActiveThread",
     "AgentContext",
     "AttendeeContext",
+    "BootPreference",
+    "Commitment",
     "DoctrineContext",
+    "EntityState",
+    "IndividualBootContext",
+    "ProjectStatus",
+    "RecentDecision",
     "compile_agent_context",
+    "compile_individual_boot_context",
 ]
