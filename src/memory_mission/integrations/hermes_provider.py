@@ -541,19 +541,42 @@ class MemoryMissionProvider:
     # ------------------------------------------------------------------ #
 
     def _tool_boot_context(self, args: dict[str, Any]) -> dict[str, Any]:
-        boot = compile_individual_boot_context(
-            user_id=self._require_user_id(),
-            agent_id=self._agent_id,
-            kg=self._require_kg(),
-            engine=self._engine,
-            identity_resolver=self._identity,
-            task_hint=args.get("task_hint"),
-            token_budget=int(args.get("token_budget", 4000)),
-        )
-        payload = boot.model_dump(mode="json")
-        payload["render"] = boot.render()
-        payload["aspect_counts"] = boot.aspect_counts
-        return payload
+        # Wrap in structured error capture: when the host runtime hits
+        # an exception (Hermes 2026-04-27 reported "unhashable type:
+        # 'slice'" surfacing through this path), it should still see
+        # an actionable response shape rather than a bare traceback.
+        try:
+            boot = compile_individual_boot_context(
+                user_id=self._require_user_id(),
+                agent_id=self._agent_id,
+                kg=self._require_kg(),
+                engine=self._engine,
+                identity_resolver=self._identity,
+                task_hint=args.get("task_hint"),
+                token_budget=int(args.get("token_budget", 4000)),
+            )
+            payload = boot.model_dump(mode="json")
+            payload["render"] = boot.render()
+            payload["aspect_counts"] = boot.aspect_counts
+            return payload
+        except Exception as exc:  # noqa: BLE001 - explicit structured surface
+            import traceback
+
+            return {
+                "error": "boot_context_failed",
+                "exception_type": type(exc).__name__,
+                "detail": str(exc),
+                "traceback": traceback.format_exc(),
+                "render": "",
+                "aspect_counts": {
+                    "active_threads": 0,
+                    "commitments": 0,
+                    "preferences": 0,
+                    "recent_decisions": 0,
+                    "relevant_entities": 0,
+                    "project_status": 0,
+                },
+            }
 
     def _tool_list_threads(self) -> list[dict[str, Any]]:
         kg = self._require_kg()

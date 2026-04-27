@@ -329,6 +329,31 @@ def test_token_budget_truncates_lower_priority_aspects_first(
     assert len(ctx.relevant_entities) < 10
 
 
+def test_individual_boot_context_is_hashable_with_data(kg: PersonalKnowledgeGraph) -> None:
+    """Frozen Pydantic with list fields needs custom __hash__ — agent
+    runtimes (Hermes, etc.) cache / set-membership the result."""
+    from datetime import date as _date
+
+    kg.add_triple(
+        "thread-x",
+        "thread_status",
+        "active",
+        valid_from=_date(2026, 4, 27),
+        source_closet="c",
+        source_file="f",
+    )
+    kg.add_triple("memory-mission", "is_a", "project", valid_from=_date(2026, 4, 1))
+
+    ctx = compile_individual_boot_context(user_id="sven", agent_id="hermes", kg=kg)
+    # Must not raise; previously raised TypeError: unhashable type: 'list'
+    h1 = hash(ctx)
+    h2 = hash(ctx)
+    assert h1 == h2  # deterministic
+    # And the inner aspect with a list field also hashable.
+    if ctx.relevant_entities:
+        hash(ctx.relevant_entities[0])
+
+
 def test_aspects_are_frozen_pydantic() -> None:
     """All aspect models must be frozen (no mutation post-construction)."""
     from memory_mission.synthesis.individual_boot import (

@@ -133,6 +133,12 @@ class EntityState(BaseModel):
     def display_name(self) -> str:
         return self.canonical_name or self.entity_id
 
+    def __hash__(self) -> int:
+        # Pydantic's frozen default hash fails on list fields. Use a
+        # stable JSON-based hash so containers (sets, dict keys, agent-
+        # framework caches) work regardless of contents.
+        return hash(self.model_dump_json())
+
 
 class ProjectStatus(BaseModel):
     """Project page snapshot with currently-true status triple."""
@@ -178,6 +184,14 @@ class IndividualBootContext(BaseModel):
             "relevant_entities": len(self.relevant_entities),
             "project_status": len(self.project_status),
         }
+
+    def __hash__(self) -> int:
+        # Pydantic's frozen default hash fails on list fields (and
+        # this model has many). Use a stable JSON-based hash so any
+        # downstream framework that hashes the model (set membership,
+        # dict keys, lru_cache, response caching) works regardless of
+        # field shape. Hermes' integration was hitting this 2026-04-27.
+        return hash(self.model_dump_json())
 
     def render(self) -> str:
         """Markdown render suitable for system-prompt injection."""
