@@ -3080,3 +3080,80 @@ B-slice 2 (`weekly-portfolio-update` workflow skill). Both are
 independent of H and can ship in subsequent commits without
 blocking. After Week 2, Weeks 3–4 are E (pilot rehearsal pack)
 followed by Weeks 5–6 D (typed sync-back, P5).
+
+## P7-A Week 2 — Context Farmer surface (C, ADR-0012) (2026-04-27)
+
+Manifesto-native vocabulary made operable. The Context Farmer role
+("humans tend the brain by maintaining context quality, not just
+consuming retrieval") gets a concrete surface: an always-on Bases
+dashboard for daily UX + a Python module for cross-cutting analytics
+the dashboard can't compute natively.
+
+### What landed
+
+- **ADR-0012** — `docs/adr/0012-context-farming-surface.md`. Documents
+  the two-layer split (Bases for native page views, Python for joins
+  across pages + KG + proposals), the 5 named farming primitives +
+  what each detects + the operator intervention each enables, and the
+  explicit relationship to the existing `dashboard.base` (extends,
+  doesn't replace).
+- **`synthesis/coverage.py`** — pure-function module exposing 5 named
+  primitives: `compute_domain_coverage`, `find_decayed_pages`,
+  `find_missing_page_coverage`, `find_attribution_debt`,
+  `find_low_corroboration_clusters`. All take existing substrate
+  handles (`BrainEngine` / `KnowledgeGraph` / `ProposalStore`); all
+  return frozen Pydantic aggregates. Zero new tables, zero new
+  storage.
+- **`dashboard.farming.base`** —
+  `src/memory_mission/memory/templates/dashboard.farming.base`. Five
+  farming-native Bases views: domain coverage (groupBy domain), decay
+  flags (formula `age_days > 90` + tier filter), constitution review
+  queue (oldest reviewed_at first), provenance debt (no-sources
+  filter), stub pages (file.size < 1.5KB at doctrine+).
+  Operator copies into `firm/` alongside `dashboard.base`.
+- **`tests/test_coverage.py`** — 16 tests covering happy path +
+  empty-substrate + threshold-edge cases for each primitive, plus a
+  Pydantic-frozen sanity test on all 5 aggregate models.
+
+### Architectural notes
+
+- **Bases for the daily UX, Python for joins.** Bases reads
+  page-level frontmatter natively — perfect for "domain coverage"
+  and "decay flags." The 3 cross-cutting primitives
+  (`find_missing_page_coverage`, `find_attribution_debt`,
+  `find_low_corroboration_clusters`) need joins across pages + KG +
+  proposals that Bases can't express. The Python module is the
+  programmatic surface a workflow skill or admin script consumes.
+- **5 primitives = 5 operator interventions.** Per ADR-0012, each
+  primitive maps to a specific Context Farmer action: notice
+  under-promoted domains, schedule doctrine reviews, create missing
+  pages, attach post-hoc provenance, trigger targeted re-extraction.
+  Without a named intervention a primitive is decoration; the
+  surface earns its keep by enabling specific moves.
+- **Reuses existing substrate.** No new tables, no new SQLite
+  files. The substrate already has every metadata field the views
+  need (`tier`, `confidence`, `valid_to`, `source_closet`,
+  `reviewed_at`, page domain). The primitives are *readers*, not
+  schema additions.
+- **Manifesto-aligned vocabulary, architecture-coupled semantics.**
+  "Context Farmer" is the manifesto framing; the primitives are
+  defined in our substrate's language. If the term fades the
+  surface still works.
+
+### Verification
+
+- [x] `pytest` — 903/903 passed (+16 new coverage tests)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 82 source files (+1)
+- [x] `dashboard.farming.base` parses as valid YAML
+- [x] All 5 aggregate models are frozen Pydantic
+- [x] Each primitive handles empty substrate cleanly
+- [x] Each primitive's threshold-edge behavior is documented + tested
+
+### Next
+
+Per the prism plan, B-slice 2 (`weekly-portfolio-update` workflow
+skill) is the remaining Week 2 deliverable. Once that lands, Week 2
+is complete and Weeks 3–4 (E pilot rehearsal pack) can begin. Then
+Weeks 5–6 (D typed sync-back) and Weeks 7–8 (B-rest workflow
+skills).

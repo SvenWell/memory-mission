@@ -1,0 +1,133 @@
+# Memory Mission firm-plane Context-Farming dashboard — native Obsidian Bases view.
+#
+# Copy this file to ``<vault_root>/firm/dashboard.farming.base`` (or anywhere
+# under ``firm/``). Open in Obsidian v1.9.10 or later. Sits alongside
+# ``dashboard.base`` (Move 2) — they're complementary:
+#
+# * ``dashboard.base`` — retrieval views (what's in the brain?).
+# * ``dashboard.farming.base`` — context-farming views (what does the brain
+#   need from the farmer?). ADR-0012.
+#
+# Five views, all firm-plane only. Each maps to a specific operator
+# intervention the Context Farmer takes:
+#
+# 1. Domain coverage — page count per domain, grouped by tier
+# 2. Decay flags — doctrine+ pages > 90d untouched
+# 3. Constitution review queue — constitution-tier pages by reviewed_at age
+# 4. Provenance debt — pages without `sources` frontmatter populated
+# 5. Stub pages — high-confidence claims but small page bodies
+#
+# For the cross-cutting analytics that Bases can't compute natively
+# (entities mentioned in proposals but missing pages; KG-side
+# attribution debt; low-corroboration concentrations) see
+# ``synthesis/coverage.py`` (ADR-0012).
+
+filters:
+  and:
+    - file.inFolder("firm")
+    - 'file.ext == "md"'
+
+formulas:
+  age_days: '(now() - file.mtime).days'
+  reviewed_age_days: 'if(reviewed_at, (now() - reviewed_at).days, null)'
+  has_sources: 'if(sources, sources.length > 0, false)'
+  is_stub: 'file.size < 1500'
+  needs_review: 'if(reviewed_at, false, true)'
+
+properties:
+  type:
+    displayName: "Type"
+  tier:
+    displayName: "Tier"
+  domain:
+    displayName: "Domain"
+  confidence:
+    displayName: "Confidence"
+  reviewed_at:
+    displayName: "Last reviewed"
+  formula.age_days:
+    displayName: "Age (days)"
+  formula.reviewed_age_days:
+    displayName: "Days since review"
+  formula.has_sources:
+    displayName: "Has sources"
+  formula.is_stub:
+    displayName: "Stub"
+
+views:
+  # 1. Domain coverage — at-a-glance health per domain.
+  # Grouped by domain, ordered by tier so the operator can see whether
+  # each domain has constitution/doctrine/policy content or only
+  # decision-tier accumulation (the under-promoted-domain signal).
+  - type: table
+    name: "Domain coverage"
+    order:
+      - file.name
+      - tier
+      - confidence
+    groupBy:
+      property: domain
+      direction: ASC
+
+  # 2. Decay flags — doctrine+ pages > 90d untouched.
+  # The reviewer should rise to either reviewing-and-affirming
+  # (set reviewed_at = today) or amending/invalidating.
+  - type: table
+    name: "Decay flags (doctrine+ untouched 90d+)"
+    limit: 50
+    filters:
+      and:
+        - or:
+            - 'tier == "constitution"'
+            - 'tier == "doctrine"'
+        - or:
+            - 'formula.age_days > 90'
+            - 'formula.reviewed_age_days > 90'
+    order:
+      - tier
+      - formula.age_days
+      - formula.reviewed_age_days
+
+  # 3. Constitution review queue — ordered oldest-review-first so the
+  # farmer attacks the most-overdue ones at the top.
+  - type: table
+    name: "Constitution review queue"
+    filters:
+      and:
+        - 'tier == "constitution"'
+    order:
+      - reviewed_at
+      - formula.age_days
+      - file.name
+
+  # 4. Provenance debt — pages with no sources frontmatter populated.
+  # Per ADR-0002 every page should cite its sources; missing sources
+  # is correctness-grade truth without compliance-grade attribution.
+  - type: table
+    name: "Provenance debt (no sources)"
+    limit: 50
+    filters:
+      and:
+        - 'formula.has_sources == false'
+        - or:
+            - 'tier == "constitution"'
+            - 'tier == "doctrine"'
+            - 'tier == "policy"'
+    order:
+      - tier
+      - file.name
+
+  # 5. Stub pages — small page bodies that may need fleshing out.
+  # The Context Farmer attends to under-developed authoritative content.
+  - type: table
+    name: "Stub pages (under 1.5KB)"
+    limit: 50
+    filters:
+      and:
+        - 'formula.is_stub == true'
+        - or:
+            - 'tier == "constitution"'
+            - 'tier == "doctrine"'
+    order:
+      - tier
+      - file.name

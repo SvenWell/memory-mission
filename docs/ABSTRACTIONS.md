@@ -675,6 +675,51 @@ with a different scope.
 
 ---
 
+## Coverage primitives (`synthesis/coverage.py`)
+
+Context-farming aggregate functions (ADR-0012). Five named primitives
+the operator uses to detect what the brain needs from the farmer.
+
+### Aggregate models (Pydantic, frozen)
+
+| Model | What it represents |
+|---|---|
+| `DomainCoverage` | Page count per domain, broken down by tier |
+| `DecayedPage` | Doctrine+ page untouched in N+ days |
+| `MissingPageCoverage` | Entity referenced by N+ triples or N+ proposals without an existing doctrine page |
+| `AttributionDebt` | Currently-true triple missing `source_closet` or `source_file` |
+| `LowCorroborationCluster` | Entity with N+ currently-true triples below confidence floor |
+
+### Functions
+
+```python
+compute_domain_coverage(engine, *, plane=None, employee_id=None) -> list[DomainCoverage]
+find_decayed_pages(engine, *, plane=None, employee_id=None,
+                   min_age_days=90, min_tier="doctrine", now=None) -> list[DecayedPage]
+find_missing_page_coverage(engine, kg, store=None, *, plane=None, employee_id=None,
+                           min_triple_mentions=3, min_proposal_mentions=0) -> list[MissingPageCoverage]
+find_attribution_debt(kg) -> list[AttributionDebt]
+find_low_corroboration_clusters(kg, *, confidence_floor=0.7,
+                                min_cluster_size=3) -> list[LowCorroborationCluster]
+```
+
+All pure functions over the existing `BrainEngine` + `KnowledgeGraph` +
+`ProposalStore`. No new tables, no new storage. Each maps to a specific
+operator intervention (review doctrine; create missing pages; attach
+post-hoc provenance; trigger targeted re-extraction). See ADR-0012 for
+the rationale + the Bases-vs-Python split.
+
+### Companion: `dashboard.farming.base`
+
+`src/memory_mission/memory/templates/dashboard.farming.base` — Obsidian
+Bases YAML extending `dashboard.base` with five farming-native views
+(domain coverage / decay flags / constitution review queue /
+provenance debt / stub pages). Bases handles the always-on operator
+UX; the Python primitives handle cross-cutting analytics that need
+joins.
+
+---
+
 ## Personal-plane temporal KG (`personal_brain/personal_kg.py`)
 
 Per-employee instance of the firm `KnowledgeGraph`, scoped to a single

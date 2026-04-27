@@ -60,7 +60,7 @@ memory-mission/
 │   ├── meeting-prep/         ← distilled context for workflow agents
 │   └── _index.md             ← human-readable skill registry
 │
-├── tests/                    ← 887 tests, pytest, mypy strict
+├── tests/                    ← 903 tests, pytest, mypy strict
 ├── BUILD_LOG.md              ← per-step history, append-only
 ├── CLAUDE.md                 ← one-line @docs/AGENTS.md shim
 ├── README.md                 ← public entry point
