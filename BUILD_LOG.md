@@ -3157,3 +3157,104 @@ skill) is the remaining Week 2 deliverable. Once that lands, Week 2
 is complete and Weeks 3–4 (E pilot rehearsal pack) can begin. Then
 Weeks 5–6 (D typed sync-back) and Weeks 7–8 (B-rest workflow
 skills).
+
+## P7-A Week 2 — B-slice 2 weekly-portfolio-update skill (2026-04-27)
+
+Closes Week 2 of the joyful-prism plan. Read-only portfolio digest
+skill on the venture overlay — the fourth and final workflow skill in
+the P7-A first slice (alongside `update-deal-status`,
+`record-ic-decision`, `onboard-venture-firm`).
+
+### What landed
+
+- **`skills/weekly-portfolio-update/SKILL.md`** — 18th skill. Mirrors
+  `meeting-prep`'s read-only briefing pattern but aggregates per-company
+  snapshots across the firm's portfolio. For each deal currently in
+  `lifecycle_status: portfolio`, calls `compile_agent_context` once
+  (role=`weekly-portfolio-update`, plane=`firm`, tier_floor=`policy`),
+  then aggregates renders into a partner-ready markdown digest organized
+  as Active portfolio / Recent state changes / Needs attention / Archive
+  deltas. Hands the render to the host LLM for narrative shaping.
+  Surfaces stale companies (last quarterly update gap exceeds the
+  page's `quarterly_update_cadence_days`) as forcing questions.
+- **Read-only by contract.** No `create_proposal`, no KG writes, no
+  page mutations. The INVARIANT phrasing from Week 1.5 is restated in
+  the constraints. When the operator confirms a state change during
+  digest review, the skill routes them to `update-deal-status` /
+  `record-ic-decision` with the source artefact — never drafts
+  proposals inline.
+- **`skills/_index.md`** — header bumped to "18 skills shipped"; lead
+  paragraph updated to name 4 venture-overlay workflow skills (was
+  3); added a `## weekly-portfolio-update` section after
+  `## onboard-venture-firm` mirroring the prose shape of the other
+  workflow skill entries.
+- **`skills/_manifest.jsonl`** — appended one JSONL entry. Round-trip
+  validated via `tests/test_skills_registry.py` (manifest fields
+  match SKILL.md frontmatter exactly).
+- **`docs/AGENTS.md`** — shipped-state line bumped to "18 skills
+  shipped"; "Next" pointer pivoted to **E (pilot rehearsal pack)
+  Weeks 3–4** since H (personal KG) and C (Context Farmer surface)
+  both landed earlier this week.
+
+### Architectural notes
+
+- **Fourth workflow skill, same compile-then-LLM-then-DraftEvent
+  pattern.** `compile_agent_context` proves itself as the load-bearing
+  primitive across `meeting-prep`, `update-deal-status`,
+  `record-ic-decision`, and now `weekly-portfolio-update`. Same
+  function, different `role` value per skill, different scope
+  (single attendee → single deal entity → portfolio set).
+- **Read-only ≠ write-only.** This skill demonstrates that the
+  workflow-skills-never-mutate-truth invariant applies to read-only
+  skills too. The constraint isn't about whether the skill writes
+  *anywhere* — it's about whether the skill mutates *firm truth*.
+  Read-only skills emit `DraftEvent`s; they don't propose. When the
+  user wants to act, the skill explicitly hands off to a write-side
+  sibling.
+- **Per-page cadence beats firm-level default.** The skill reads
+  `quarterly_update_cadence_days` from each portfolio company's page
+  frontmatter — different companies have different review cadences
+  (a Series A board meets bimonthly; a late-stage portfolio company
+  may only update quarterly). When the field is missing, the skill
+  surfaces a forcing question rather than falling back to the
+  constitution's `fund_thesis_review_cadence` without explicit
+  operator approval.
+- **Strategic reframe noted in plan file** (`~/.claude/plans/sprightly-cooking-oasis.md`):
+  GBrain comparison + agent+terminal thesis arrived this session.
+  Substrate already aligns (files-first, markdown-with-frontmatter,
+  no LLM SDK in src/). The KG keeps load-bearing status for KGRAG
+  multi-hop + temporal validity + Bayesian corroboration — the query
+  shapes grep+semantic can't cheaply replicate. Scored hybrid
+  retrieval (Cypher-style) explicitly killed; agent+terminal beats
+  it for the queries that don't need structure. ADR-0014 stub
+  (agent+terminal compatibility as a load-bearing constraint) to
+  follow in a separate commit.
+
+### Verification
+
+- [x] `pytest` — 903/903 passed (test count unchanged; this commit
+      is markdown + manifest only)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 82 source files (unchanged)
+- [x] `tests/test_skills_registry.py` — all 18 skills round-trip
+      between SKILL.md frontmatter and `_manifest.jsonl`
+- [x] `_index.md` references all 18 skill names
+- [x] SKILL.md ends with the required `## Self-rewrite hook` section
+
+### Next
+
+Week 2 is complete on `SvenWell/office-hours`. The branch is now ready
+to merge to main as a Week-2-complete unit (C + B-slice 2 together,
+mirroring the Week 1 + Week 1.5 cadence). The merge decision is the
+user's call — recommendation is to bundle.
+
+After Week 2 lands on main:
+- Optional small commit: ADR-0014 stub naming agent+terminal
+  compatibility as a load-bearing constraint (15-30 min).
+- Weeks 3–4: facet **E** (pilot rehearsal pack) — bundles A+B+C
+  artifacts + golden-path corpus + 10-task benchmark harness +
+  one-command spinup.
+- Weeks 5–6: facet **D** (typed sync-back, P5) — Affinity first, then
+  Attio.
+- Weeks 7–8: facet **B-rest** — `deal-memo-draft`,
+  `quarterly-lp-update`, `IC-prep`, `partner-1on1-prep`.
