@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memory-mission"
-version = "0.1.2"
+version = "0.1.3"
 description = "Governed context engine for AI agents — files-first substrate with operating + evidence memory layers, individual + firm planes, review-gated promotion."
 readme = "README.md"
 requires-python = ">=3.12"

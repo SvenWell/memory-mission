@@ -434,6 +434,57 @@ def search_recall(query: str, limit: int = 10) -> dict[str, Any]:
     return {"hits": [h.model_dump(mode="json") for h in hits]}
 
 
+# ---------- Identity resolution ----------
+
+
+@mcp.tool()
+def resolve_entity(name: str) -> dict[str, Any]:
+    """Resolve a typed identifier or bare entity name to canonical form.
+
+    For typed identifiers (``email:foo@bar.com``, ``linkedin:abc``):
+    returns the bound ``identity_id``, ``canonical_name``, and the full
+    set of identifiers attached to that identity.
+
+    For bare names not registered in the resolver: returns the name as
+    ``entity_name`` with ``identity_id=None`` — KG triples are indexed
+    by entity name directly so the pass-through is valid.
+
+    Use as STEP 1 of any retrieval planner that wants to disambiguate
+    'sven' vs 'email:sven@example.com' before querying KG state.
+    """
+    ctx = _ctx()
+    name = name.strip()
+    if not name:
+        raise ValueError("name must be a non-empty string")
+
+    # ``LocalIdentityResolver.lookup`` requires typed-identifier form
+    # (``type:value``). Bare names pass through as entity names.
+    if ":" not in name:
+        return {
+            "entity_name": name,
+            "identity_id": None,
+            "canonical_name": None,
+            "identifiers": [],
+        }
+
+    identity_id = ctx.identity.lookup(name)
+    if identity_id is None:
+        return {
+            "entity_name": name,
+            "identity_id": None,
+            "canonical_name": None,
+            "identifiers": [],
+        }
+    identity = ctx.identity.get_identity(identity_id)
+    bindings = ctx.identity.bindings(identity_id)
+    return {
+        "entity_name": name,
+        "identity_id": identity_id,
+        "canonical_name": identity.canonical_name if identity else None,
+        "identifiers": list(bindings),
+    }
+
+
 # ---------- CLI ----------
 
 

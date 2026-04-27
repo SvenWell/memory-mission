@@ -80,6 +80,7 @@ TOOL_RECORD_PREFERENCE = "mm_record_preference"
 TOOL_RECORD_DECISION = "mm_record_decision"
 TOOL_QUERY_ENTITY = "mm_query_entity"
 TOOL_SEARCH_RECALL = "mm_search_recall"
+TOOL_RESOLVE_ENTITY = "mm_resolve_entity"
 
 
 class MemoryMissionProvider:
@@ -403,6 +404,28 @@ class MemoryMissionProvider:
                     "required": ["query"],
                 },
             },
+            {
+                "name": TOOL_RESOLVE_ENTITY,
+                "description": (
+                    "IDENTITY RESOLUTION — resolve a typed identifier "
+                    "(e.g. 'email:sven@example.com', 'linkedin:sven-w-123') "
+                    "to the canonical entity record: identity_id, "
+                    "canonical_name, and all bound identifiers. For bare "
+                    "names not registered as typed identifiers, returns the "
+                    "name as entity_name with null identity_id — KG triples "
+                    "are indexed by entity name directly so that's a valid "
+                    "pass-through. Use as STEP 1 of any retrieval planner "
+                    "that wants to disambiguate 'sven' / 'email:sven@x.com' "
+                    "before querying state."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                    },
+                    "required": ["name"],
+                },
+            },
         ]
 
     def handle_tool_call(self, name: str, args: dict[str, Any]) -> Any:
@@ -424,6 +447,8 @@ class MemoryMissionProvider:
             return self._tool_query_entity(args)
         if name == TOOL_SEARCH_RECALL:
             return self._tool_search_recall(args)
+        if name == TOOL_RESOLVE_ENTITY:
+            return self._tool_resolve_entity(args)
         # Unknown tool — keep KG reference live to satisfy the type checker.
         del kg
         raise ValueError(f"Unknown Memory Mission tool: {name}")
@@ -716,6 +741,51 @@ class MemoryMissionProvider:
             triples = [t for t in triples if t.valid_to is None]
         return [t.model_dump(mode="json") for t in triples]
 
+    def _tool_resolve_entity(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Resolve a typed identifier or bare entity name to canonical form.
+
+        Behavior:
+        - If ``name`` is registered as a typed identifier in the
+          ``IdentityResolver`` (``email:...``, ``linkedin:...``, etc.),
+          returns ``{entity_name, identity_id, canonical_name, identifiers}``.
+        - Otherwise returns ``{entity_name, identity_id: None,
+          canonical_name: None, identifiers: []}`` — a valid pass-through
+          since KG triples are indexed by entity name directly.
+        """
+        name = str(args.get("name", "")).strip()
+        if not name:
+            raise ValueError("name must be a non-empty string")
+        if self._identity is None:
+            raise RuntimeError("identity resolver not initialized")
+
+        # ``LocalIdentityResolver.lookup`` requires typed-identifier form
+        # (``type:value``). Bare names (``memory-mission``, ``sven``) aren't
+        # registered identifiers — return the pass-through shape directly.
+        if ":" not in name:
+            return {
+                "entity_name": name,
+                "identity_id": None,
+                "canonical_name": None,
+                "identifiers": [],
+            }
+
+        identity_id = self._identity.lookup(name)
+        if identity_id is None:
+            return {
+                "entity_name": name,
+                "identity_id": None,
+                "canonical_name": None,
+                "identifiers": [],
+            }
+        identity = self._identity.get_identity(identity_id)
+        bindings = self._identity.bindings(identity_id)
+        return {
+            "entity_name": name,
+            "identity_id": identity_id,
+            "canonical_name": identity.canonical_name if identity else None,
+            "identifiers": list(bindings),
+        }
+
     def _tool_search_recall(self, args: dict[str, Any]) -> dict[str, Any]:
         if self._backend is None:
             return {
@@ -795,6 +865,7 @@ __all__ = [
     "TOOL_RECORD_COMMITMENT",
     "TOOL_RECORD_DECISION",
     "TOOL_RECORD_PREFERENCE",
+    "TOOL_RESOLVE_ENTITY",
     "TOOL_SEARCH_RECALL",
     "TOOL_THREAD_STATUS",
     "MemoryMissionProvider",

@@ -3516,3 +3516,87 @@ prior KGs.
   under any other. Hermes is doing the agent-side version. Substrate
   follows when usage justifies.
 - **`sync_turn` real ingestion** — still V1 no-op per ADR-0015.
+
+## v0.1.3 release — mm_resolve_entity tool + granola-extraction-pilot skill (2026-04-27)
+
+Third signal-driven patch. Hermes' live operation validated the
+three-layer architecture (KG = current truth, MemPalace = evidence,
+boot compiler = injection, tools = interface) and articulated the
+synthesis pattern as KG-RAG. Hermes also flagged "step 1 of any
+retrieval planner = resolve identifier to canonical entity" as a
+small substrate gap. Sven separately raised the meta-question: he
+was verbally directing Hermes through workflows like the Granola
+backfill — should those be skills?
+
+This patch ships:
+
+1. **`mm_resolve_entity(name)` tool** on both the Hermes provider
+   and the MCP server — surfaces the existing `IdentityResolver` to
+   the agent layer. For typed identifiers (`email:foo@bar.com`,
+   `linkedin:abc`): returns `{entity_name, identity_id,
+   canonical_name, identifiers}`. For bare names (no colon): passes
+   through with `identity_id=None` (KG triples are indexed by entity
+   name directly so bare names are valid). Used as STEP 1 of any
+   retrieval planner that wants to disambiguate before querying KG
+   state. ~50 LOC + 6 behavior tests + 1 contract pin.
+
+   Tool count is now **9** (was 8). Pinned in
+   `tests/test_provider_contract.py::test_tool_count_is_nine`.
+
+2. **`skills/granola-extraction-pilot/SKILL.md`** — captures
+   Hermes' 3-layer narrow-slice import workflow. Markdown only;
+   composes existing skills (`backfill-granola` →
+   `extract-from-staging` w/ dry-run JSONL → `review-proposals`).
+   Refuses full-corpus extraction by design — surfaces a forcing
+   question if the operator tries. INVARIANT: evidence stays in
+   staging, extraction emits dry-run, curated promotion runs through
+   the existing review gate. Registered as the **19th** skill in
+   `_index.md` + `_manifest.jsonl`.
+
+3. **Memory writes** capture two durable lessons:
+   - `project_three_layer_architecture_validated.md` — the KG-RAG
+     split as Hermes articulated it; "retrieval planner" stays
+     agent-side per OS-vs-app.
+   - `feedback_skills_are_co_authorable.md` — answers Sven's
+     skills question: yes, Memory Mission has `skills/`; SKILL.md is
+     markdown the agent reads at runtime; new skills get co-authored
+     (agent describes its workflow → user/me captures it as
+     SKILL.md). Pattern is "verbal direction → SKILL.md once it
+     stabilizes," same as how the venture overlay's 4 workflow
+     skills got built.
+
+### Verification
+
+- `uv run pytest -q` → 1036 passed (was 1030, +6 for resolve_entity
+  + the new contract test)
+- `uv run mypy src/` → no issues, 91 source files (no new src/
+  files; the skill is pure markdown)
+- `uv run ruff check + format --check` → clean
+- `tests/test_skills_registry.py` round-trips both
+  `granola-extraction-pilot` SKILL.md ↔ `_manifest.jsonl`
+
+### Hermes pin update
+
+```yaml
+pip_dependencies:
+  - "git+https://github.com/SvenWell/memory-mission.git@v0.1.3"
+```
+
+After bump + reinstall, `mm_resolve_entity` shows up in Hermes' tool
+list. Hermes' agent-side retrieval planner (when built) gets a clean
+step-1 primitive instead of guessing entity name forms.
+
+### Open
+
+- **Granola dry-run JSONL output flag in `extract-from-staging`** —
+  the SKILL.md describes the orchestration but the underlying skill
+  doesn't yet have a `--dry-run` mode. First run of
+  `granola-extraction-pilot` will surface whether that flag needs to
+  ship as a code change vs. just a host-LLM convention.
+- **`overlays/wealth-ai/` overlay** — for the 17 wealth-ai-tagged
+  Granola meetings Hermes flagged. Vertical-specific extraction
+  vocabulary, page templates. Defer until first pilot run produces
+  signal about what predicates the wealth-ai slice actually needs.
+- **`sync_turn` real ingestion** — still V1 no-op.
+- **Identity alias mechanism** (substrate-level) — still v0.2.0
+  candidate. Hermes' agent-side alias work is in flight.

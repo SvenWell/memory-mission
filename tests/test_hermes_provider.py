@@ -28,6 +28,7 @@ from memory_mission.integrations.hermes_provider import (
     TOOL_RECORD_COMMITMENT,
     TOOL_RECORD_DECISION,
     TOOL_RECORD_PREFERENCE,
+    TOOL_RESOLVE_ENTITY,
     TOOL_SEARCH_RECALL,
     TOOL_THREAD_STATUS,
     MemoryMissionProvider,
@@ -123,7 +124,7 @@ def test_initialize_with_explicit_kwargs(tmp_path: Path) -> None:
 # ---------- Tool schemas ----------
 
 
-def test_get_tool_schemas_lists_eight_mm_tools(provider: MemoryMissionProvider) -> None:
+def test_get_tool_schemas_lists_nine_mm_tools(provider: MemoryMissionProvider) -> None:
     names = [s["name"] for s in provider.get_tool_schemas()]
     assert names == [
         TOOL_BOOT_CONTEXT,
@@ -134,6 +135,7 @@ def test_get_tool_schemas_lists_eight_mm_tools(provider: MemoryMissionProvider) 
         TOOL_RECORD_DECISION,
         TOOL_QUERY_ENTITY,
         TOOL_SEARCH_RECALL,
+        TOOL_RESOLVE_ENTITY,
     ]
     # Every schema names a tool starting with the mm_ prefix to avoid
     # collision with other Hermes providers' tool names.
@@ -272,6 +274,50 @@ def test_search_recall_without_backend_returns_structured_error(
     out = provider.handle_tool_call(TOOL_SEARCH_RECALL, {"query": "anything"})
     assert out["error"] == "no_recall_backend"
     assert out["hits"] == []
+
+
+# ---------- mm_resolve_entity ----------
+
+
+def test_resolve_entity_returns_passthrough_for_unknown_name(
+    provider: MemoryMissionProvider,
+) -> None:
+    """Bare names not registered as typed identifiers pass through unchanged."""
+    out = provider.handle_tool_call(TOOL_RESOLVE_ENTITY, {"name": "memory-mission"})
+    assert out == {
+        "entity_name": "memory-mission",
+        "identity_id": None,
+        "canonical_name": None,
+        "identifiers": [],
+    }
+
+
+def test_resolve_entity_resolves_typed_identifier_to_identity(
+    provider: MemoryMissionProvider,
+) -> None:
+    """A typed identifier registered with the resolver returns full canonical record."""
+    # Bind two typed identifiers to one identity.
+    resolver = provider._identity  # noqa: SLF001 - tests inspect provider state
+    assert resolver is not None
+    identity_id = resolver.resolve(
+        identifiers={"email:sven@example.com", "linkedin:sven-w-123"},
+        entity_type="person",
+        canonical_name="Sven Wellmann",
+    )
+
+    out = provider.handle_tool_call(TOOL_RESOLVE_ENTITY, {"name": "email:sven@example.com"})
+    assert out["entity_name"] == "email:sven@example.com"
+    assert out["identity_id"] == identity_id
+    assert out["canonical_name"] == "Sven Wellmann"
+    assert set(out["identifiers"]) == {
+        "email:sven@example.com",
+        "linkedin:sven-w-123",
+    }
+
+
+def test_resolve_entity_rejects_empty_name(provider: MemoryMissionProvider) -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        provider.handle_tool_call(TOOL_RESOLVE_ENTITY, {"name": "   "})
 
 
 def test_unknown_tool_raises(provider: MemoryMissionProvider) -> None:

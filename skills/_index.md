@@ -4,7 +4,7 @@ Read this file first. Full `SKILL.md` contents load only when a skill's
 triggers match the current task. Machine-readable equivalent:
 `skills/_manifest.jsonl`. Conventions: `skills/_writing-skills.md`.
 
-**18 skills shipped** as of 2026-04-27. Backfill skills (gmail, outlook,
+**19 skills shipped** as of 2026-04-27. Backfill skills (gmail, outlook,
 granola, calendar, drive/firm-artefacts, onedrive, affinity, attio,
 notion, slack) route through P2's envelope path: load `firm/systems.yaml`,
 call the per-app envelope helper, and write via
@@ -401,3 +401,27 @@ include superseded facts, every fact cites source_closet /
 source_file, tier_floor defaults to `policy`, firm plane only,
 stale-detection threshold reads each company's frontmatter (no
 constitution-level fallback without explicit operator ask).
+
+## granola-extraction-pilot
+
+Narrow-slice 3-layer Granola transcript import pipeline. Runs the
+operator-supplied filter (tag / date range / explicit meeting IDs)
+against the staged Granola corpus, asks the host LLM to extract
+typed facts with provenance, writes a dry-run JSONL the operator
+inspects BEFORE any KG write, then promotes only the marked
+high-signal subset through `review-proposals`. Encodes Hermes'
+2026-04-27 framing: Memory Mission stores current truth + structured
+history; Granola remains the dated evidence base; this skill is the
+controlled bridge between the two. Refuses full-corpus extraction
+by design — surfaces a forcing question if the operator asks.
+
+Triggers: "granola pilot", "narrow-slice extraction", "wealth-ai
+backfill", "extract granola pilot", "granola extraction pilot"
+
+Constraints: INVARIANT 3-layer split (evidence stays in staging,
+extraction emits dry-run JSONL, curated promotion via
+review-proposals — never auto-promote); narrow-slice only; every
+fact carries source_closet=granola + source_file + source_quote
+(no quote, no fact); low-confidence (<0.6) facts dropped, not
+promoted as open_questions; entity merges go through
+identity_resolver, not extraction.

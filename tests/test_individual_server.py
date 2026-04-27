@@ -259,3 +259,37 @@ def test_search_recall_without_backend_returns_structured_error(installed_ctx) -
     out = server.search_recall("anything")
     assert out["error"] == "no_recall_backend"
     assert out["hits"] == []
+
+
+# ---------- resolve_entity ----------
+
+
+def test_resolve_entity_passthrough_for_unknown_name(installed_ctx) -> None:
+    """Bare names not registered as typed identifiers pass through unchanged."""
+    out = server.resolve_entity("memory-mission")
+    assert out == {
+        "entity_name": "memory-mission",
+        "identity_id": None,
+        "canonical_name": None,
+        "identifiers": [],
+    }
+
+
+def test_resolve_entity_resolves_typed_identifier(installed_ctx) -> None:
+    identity_id = installed_ctx.identity.resolve(
+        identifiers={"email:sven@example.com", "linkedin:sven-w-123"},
+        entity_type="person",
+        canonical_name="Sven Wellmann",
+    )
+    out = server.resolve_entity("email:sven@example.com")
+    assert out["identity_id"] == identity_id
+    assert out["canonical_name"] == "Sven Wellmann"
+    assert set(out["identifiers"]) == {
+        "email:sven@example.com",
+        "linkedin:sven-w-123",
+    }
+
+
+def test_resolve_entity_rejects_empty_name(installed_ctx) -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        server.resolve_entity("   ")
