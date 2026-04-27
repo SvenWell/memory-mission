@@ -44,8 +44,12 @@ name: memory_mission
 version: 0.1.0
 description: "Memory Mission individual memory backend for Hermes."
 pip_dependencies:
-  - "git+https://github.com/SvenWell/memory-mission.git@main"
+  - "git+https://github.com/SvenWell/memory-mission.git@v0.1.0"
 ```
+
+Pin to `@v0.1.0` (or a later release tag) for reproducibility. Use
+`@main` only when actively co-developing — main moves with every
+substrate-level commit.
 
 ### `__init__.py`
 
@@ -111,6 +115,79 @@ The state-vs-evidence split is structural: `mm_query_entity` is
 "what is true now" (operating memory); `mm_search_recall` is "what
 does the source say" (evidence memory). Use both when you need the
 compiled answer + its provenance.
+
+### Wiring MemPalace recall (optional but recommended)
+
+By default `mm_search_recall` returns `{"error": "no_recall_backend",
+"hits": []}` — Memory Mission Individual is fully usable for state
+without it. Wire MemPalace when you want the agent to also search
+past source documents (emails, transcripts, notes) with citations.
+
+The provider's `initialize(backend=...)` accepts any
+``PersonalMemoryBackend``. Today the canonical backend is
+``MemPalaceAdapter`` (ADR-0004). Construct it once, hand it in:
+
+```python
+# Inside the Hermes plugin discovery hook, OR in a custom wrapper
+# around the default register() entrypoint.
+from pathlib import Path
+
+from memory_mission.integrations.hermes_provider import MemoryMissionProvider
+from memory_mission.personal_brain import MemPalaceAdapter
+
+
+def register(ctx) -> None:  # type: ignore[no-untyped-def]
+    """Hermes plugin discovery hook with MemPalace wired in."""
+    provider = MemoryMissionProvider()
+
+    # Hermes will call provider.initialize(session_id) later; we monkey-
+    # the backend onto the call so MemPalace shows up at the right time.
+    original_initialize = provider.initialize
+
+    def _initialize_with_backend(session_id: str, **kwargs: object) -> None:
+        adapter = MemPalaceAdapter(
+            firm_root=Path("~/.memory-mission").expanduser(),
+        )
+        original_initialize(session_id, backend=adapter, **kwargs)
+
+    provider.initialize = _initialize_with_backend  # type: ignore[method-assign]
+    ctx.register_memory_provider(provider)
+```
+
+Or, for non-Hermes hosts that own the provider lifecycle directly:
+
+```python
+provider = MemoryMissionProvider()
+provider.initialize(
+    "session-id",
+    user_id="sven",
+    root="~/.memory-mission",
+    backend=MemPalaceAdapter(firm_root=Path("~/.memory-mission")),
+)
+```
+
+After wiring, `mm_search_recall(query="...")` returns
+`{"hits": [PersonalHit, ...]}` with citations. The hits include
+`role` (email / transcript / etc.), `external_id`, `url`, and
+`modified_at` per the `MemPalaceAdapter` contract.
+
+**Environment note for MemPalace.** MemPalace pulls chromadb +
+opentelemetry + protobuf transitively. Some Python environments hit a
+protobuf descriptor mismatch under the C++ binding. If chromadb fails
+to import on first call, set this env var before launching Hermes:
+
+```bash
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+```
+
+The MemPalaceAdapter import is already lazy in
+`memory_mission.personal_brain.__init__` (we keep the protobuf cost
+out of consumers that don't need recall) but the env override may
+still be required at MemPalace's own init.
+
+See ADR-0004 for the design context — why MemPalace was adopted as the
+personal-substrate recall layer and how it sits alongside the
+operating-memory KG.
 
 ## Path 2 — MCP server (stdio)
 

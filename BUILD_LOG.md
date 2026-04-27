@@ -3258,3 +3258,73 @@ After Week 2 lands on main:
   Attio.
 - Weeks 7–8: facet **B-rest** — `deal-memo-draft`,
   `quarterly-lp-update`, `IC-prep`, `partner-1on1-prep`.
+
+## v0.1.0 release tag — Hermes-ready substrate (2026-04-27)
+
+Tagged the first release so consumers (Hermes plugin discovery,
+non-Hermes agents, future packaging targets) can pin a stable surface
+instead of `@main` (a moving target). Rolling-release aliases stay
+available; explicit pinning is now an option.
+
+### What v0.1.0 ships (vs an empty repo)
+
+The full Memory Mission V1 substrate plus the Individual mode work:
+
+- V1 substrate (Steps 1–18): observability, durable runs, KG with
+  Bayesian corroboration (ADR-0001), two-plane split (ADR-0002),
+  promotion pipeline, federated cross-employee detector, identity
+  resolver, MCP firm-plane server (ADR-0003), per-firm SQLite
+  (ADR-0005), capability-based connectors (ADR-0007).
+- 10 Composio connectors (Gmail, Granola, Drive, Calendar, Outlook,
+  OneDrive/SharePoint, Slack, Notion, Attio, Affinity).
+- MemPalace personal substrate (ADR-0004) + per-employee personal KG
+  (ADR-0013).
+- P7-A venture overlay: constitution, page templates, lifecycle +
+  sub-state vocabularies, 4 workflow skills (`update-deal-status`,
+  `record-ic-decision`, `onboard-venture-firm`,
+  `weekly-portfolio-update`).
+- Context Farmer surface (ADR-0012): 5 coverage primitives + Bases
+  dashboard.
+- **Individual mode** (ADR-0015): `compile_individual_boot_context`
+  primitive, working-memory page helpers, Hermes-scoped MCP server
+  `memory-mission-individual/v1`, `MemoryMissionProvider` mirroring
+  the Hermes `MemoryProvider` ABC, Hermes-seed migration adapter for
+  `~/.hermes/memories/MEMORY.md` + `USER.md`.
+- 18 skills shipped, 976 tests, mypy strict on 89 source files.
+
+### What v0.1.0 explicitly does NOT yet ship
+
+- `sync_turn` real ingestion — V1 no-op. Hermes calls `mm_record_*`
+  when something durable should land. Conversational turn → evidence
+  envelope mapping deferred.
+- PyPI publication. The package is git-installable via
+  `pip install git+https://github.com/SvenWell/memory-mission.git@v0.1.0`.
+- Eval harness. Hermes builds its own from the structured
+  `IndividualBootContext` once dogfood signal arrives.
+
+### Why now
+
+Per Hermes' integration-time feedback (2026-04-27): "Memory Mission
+is the OS, Hermes is the app." The substrate compounds; the agent
+layer commoditizes as foundation models improve. Stop adding to the
+agent-facing surface; ship release-engineering work that makes the
+substrate stable for Hermes (and any other consumer) to integrate
+against.
+
+### Verification
+
+- `git tag -l` shows `v0.1.0`.
+- `git ls-remote --tags origin` includes the pushed tag.
+- `pyproject.toml` description updated from the original
+  wealth-management framing to the current "governed context engine
+  for agents" pitch (matches `docs/AGENTS.md`).
+- `docs/recipes/hermes-connect.md`'s `plugin.yaml` example now pins
+  `@v0.1.0` instead of `@main`.
+
+### Next
+
+Per the OS-vs-app reframe, post-tag work is governance hardening,
+contract stability, and waiting for Hermes-driven dogfood signal.
+The provider contract test suite (`tests/test_provider_contract.py`)
+ships alongside this tag to lock in the surface Hermes integrates
+against.
