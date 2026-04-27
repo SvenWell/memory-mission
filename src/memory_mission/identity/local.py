@@ -62,7 +62,12 @@ class LocalIdentityResolver:
     def __init__(self, db_path: Path | str) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path)
+        # ``check_same_thread=False``: agent runtimes (Hermes, Codex,
+        # Cursor, MCP servers) routinely create the connection in one
+        # thread and dispatch tool calls from another. SQLite's serial
+        # locking still protects writes; we just opt out of Python's
+        # default per-thread guard. Same pattern as ``durable/store.py``.
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         # WAL + busy_timeout: identity resolution runs from every MCP
         # process; multiple writers to one file need WAL + a block-on-lock

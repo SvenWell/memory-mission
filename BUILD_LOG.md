@@ -3328,3 +3328,74 @@ contract stability, and waiting for Hermes-driven dogfood signal.
 The provider contract test suite (`tests/test_provider_contract.py`)
 ships alongside this tag to lock in the surface Hermes integrates
 against.
+
+## v0.1.1 patch — SQLite cross-thread fix (2026-04-27)
+
+First real signal from Hermes' live integration. Hermes' tool
+dispatcher runs `handle_tool_call(...)` from a different thread than
+the one that opened SQLite handles in `initialize(...)`. Python's
+stdlib sqlite3 default raises:
+
+> SQLite objects created in a thread can only be used in that same
+> thread
+
+This blocked `mm_boot_context` and `mm_list_active_threads` in
+production — Hermes flagged it before any agent-side workaround was
+possible. The fix is the standard one: open with
+`check_same_thread=False`, the same pattern `durable/store.py` has
+used since Step 3.
+
+### What landed
+
+- `check_same_thread=False` added to all 5 SQLite-backed primitives:
+  - `memory/knowledge_graph.py` (write connection + read-only
+    `sql_query` connection)
+  - `identity/local.py` (`LocalIdentityResolver`)
+  - `promotion/proposals.py` (`ProposalStore`)
+  - `ingestion/mentions.py` (`MentionTracker`)
+  - (`durable/store.py` already had it.)
+- `tests/test_thread_safety.py` — 7 cross-thread regression tests.
+  Each opens a primitive on the test thread and exercises a real
+  read/write from a worker thread. The Hermes-specific repro
+  (`test_hermes_provider_lifecycle_across_threads`) reproduces the
+  exact failure mode — `initialize()` on main thread, tool calls on
+  worker — and asserts no `ProgrammingError`.
+
+### Why ``check_same_thread=False`` is safe here
+
+SQLite's internal serialized lock still protects writes. Multiple
+threads sharing one connection serialize writes through the engine's
+lock; the only Python-level thing we relax is the per-thread
+guard. This matches how Mem0 / Honcho / most agent-runtime SQLite
+backends handle the same problem. If we ever introduce truly
+parallel writers from different processes (not threads), we already
+have WAL + busy_timeout in `KnowledgeGraph` (Step 3 + Commit 1
+2026-04-23) to handle that path separately.
+
+### Verification
+
+- `pytest tests/test_thread_safety.py` — 7/7 pass.
+- Full `make check` — 1018 tests green (was 1011, +7 thread tests).
+- mypy strict clean on 89 source files.
+- Hermes can now call `mm_boot_context` and `mm_list_active_threads`
+  from its tool dispatcher without `ProgrammingError`.
+
+### Pin update for Hermes
+
+Hermes plugin.yaml should bump from `@v0.1.0` → `@v0.1.1`:
+
+```yaml
+pip_dependencies:
+  - "git+https://github.com/SvenWell/memory-mission.git@v0.1.1"
+```
+
+### Open
+
+- **MemPalace recall not yet wired** in Hermes' provider path — the
+  recipe doc in `docs/recipes/hermes-connect.md` shows how to thread
+  a `MemPalaceAdapter` into `initialize(backend=...)`. Hermes-side
+  application is the next dogfood-side step. `mm_search_recall`
+  returns `no_recall_backend` until applied.
+- **`sync_turn` still V1 no-op.** Conversational turns flow into MM
+  state via explicit `mm_record_*` tool calls. Auto-ingestion remains
+  deferred.

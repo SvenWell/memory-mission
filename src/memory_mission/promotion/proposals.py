@@ -152,7 +152,11 @@ class ProposalStore:
     def __init__(self, db_path: Path | str) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path)
+        # ``check_same_thread=False``: agent runtimes routinely open in
+        # one thread and dispatch from another. SQLite's serialized
+        # lock still protects writes. Same pattern as
+        # ``durable/store.py``, ``identity/local.py``, ``knowledge_graph.py``.
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         # WAL + busy_timeout: one MCP process per employee means multiple
         # writers against the same firm's proposal store. WAL + busy_timeout

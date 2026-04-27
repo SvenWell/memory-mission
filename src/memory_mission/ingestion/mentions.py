@@ -80,7 +80,9 @@ class MentionTracker:
     def __init__(self, db_path: Path | str) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path)
+        # ``check_same_thread=False``: see ``knowledge_graph.py`` for
+        # the full rationale. Agent-runtime threads share connections.
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()

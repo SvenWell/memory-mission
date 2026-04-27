@@ -286,7 +286,16 @@ class KnowledgeGraph:
     def __init__(self, db_path: Path | str) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._db_path)
+        # ``check_same_thread=False``: agent runtimes (Hermes, Codex,
+        # Cursor, MCP servers) routinely open the connection in one
+        # thread (``initialize()``) and dispatch tool calls from
+        # another (worker thread / asyncio loop / Telegram handler).
+        # SQLite's internal serialized lock still protects writes; we
+        # just opt out of Python's per-thread guard. Same pattern as
+        # ``durable/store.py``. Hermes 2026-04-27 hit
+        # "SQLite objects created in a thread can only be used in that
+        # same thread" without this — see BUILD_LOG v0.1.1.
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         # WAL + busy_timeout: one MCP process per employee means multiple
         # writers against the same firm DB (ADR-0003). WAL lets readers
@@ -742,7 +751,9 @@ class KnowledgeGraph:
         # cannot land a write because the engine refuses. ``query_only``
         # is defense-in-depth — it blocks side-effect statements
         # (PRAGMA, temp-table creation) that mode=ro alone tolerates.
-        ro_conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+        ro_conn = sqlite3.connect(
+            f"file:{self._db_path}?mode=ro", uri=True, check_same_thread=False
+        )
         ro_conn.row_factory = sqlite3.Row
         ro_conn.execute("PRAGMA query_only = ON")
         try:
