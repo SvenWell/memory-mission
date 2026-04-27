@@ -218,6 +218,156 @@ def test_find_missing_page_coverage_empty_substrate(tmp_path: Path) -> None:
     kg.close()
 
 
+def test_find_missing_page_coverage_skips_literal_objects_by_default(
+    tmp_path: Path,
+) -> None:
+    """Literal objects (statuses, currency strings) must not surface as missing pages.
+
+    Default ``count_objects=False`` only counts subjects. Repeated literals
+    like ``portfolio`` or ``$20m`` showing up as object 5x do NOT make
+    the literal a "missing entity page" candidate.
+    """
+    engine = InMemoryEngine()
+    kg = KnowledgeGraph(tmp_path / "kg.db")
+    # 5 deals all have lifecycle_status=portfolio. The literal "portfolio"
+    # appears as object 5 times but is not an entity.
+    for i in range(5):
+        kg.add_triple(f"deal-{i}", "lifecycle_status", "portfolio")
+
+    out = find_missing_page_coverage(engine, kg, plane="firm")
+    surfaced = {m.entity_name for m in out}
+    assert "portfolio" not in surfaced, "literal objects must not surface as missing pages"
+    kg.close()
+
+
+def test_find_missing_page_coverage_count_objects_includes_known_entities(
+    tmp_path: Path,
+) -> None:
+    """``count_objects=True`` counts objects only when ``kg.get_entity`` resolves.
+
+    A canonical entity (``acme-corp``) referenced as object 3+ times surfaces;
+    a literal (``portfolio``) referenced 5+ times does not.
+    """
+    engine = InMemoryEngine()
+    kg = KnowledgeGraph(tmp_path / "kg.db")
+    # Create acme-corp as a known entity by adding a triple with it as subject.
+    kg.add_triple("acme-corp", "type", "company")
+    # Reference acme-corp as object 3 times (different subjects).
+    kg.add_triple("alice", "works_at", "acme-corp")
+    kg.add_triple("bob", "works_at", "acme-corp")
+    kg.add_triple("carol", "advises", "acme-corp")
+    # Add a literal object 5 times — must NOT surface.
+    for i in range(5):
+        kg.add_triple(f"deal-{i}", "lifecycle_status", "portfolio")
+
+    out = find_missing_page_coverage(engine, kg, plane="firm", count_objects=True)
+    by_name = {m.entity_name: m for m in out}
+    assert "acme-corp" in by_name
+    # 1 subject mention (type=company) + 3 object mentions = 4
+    assert by_name["acme-corp"].triple_mention_count == 4
+    assert "portfolio" not in by_name
+    kg.close()
+
+
+def test_find_missing_page_coverage_scopes_proposals_by_plane(tmp_path: Path) -> None:
+    """A firm-plane farming report must NOT count personal-plane proposals."""
+    engine = InMemoryEngine()
+    kg = KnowledgeGraph(tmp_path / "kg.db")
+    store = ProposalStore(tmp_path / "proposals.db")
+
+    # Two proposals targeting the same entity, different planes.
+    store.insert(
+        Proposal(
+            proposal_id="firm-prop",
+            target_plane="firm",
+            target_scope="public",
+            target_entity="omega",
+            proposer_agent_id="agent-1",
+            proposer_employee_id="emp-1",
+            facts=[],
+            source_report_path="/tmp/firm-report.md",
+        )
+    )
+    store.insert(
+        Proposal(
+            proposal_id="personal-prop",
+            target_plane="personal",
+            target_employee_id="emp-1",
+            target_scope="public",
+            target_entity="omega",
+            proposer_agent_id="agent-1",
+            proposer_employee_id="emp-1",
+            facts=[],
+            source_report_path="/tmp/personal-report.md",
+        )
+    )
+
+    out = find_missing_page_coverage(
+        engine,
+        kg,
+        store,
+        plane="firm",
+        min_triple_mentions=999,
+        min_proposal_mentions=1,
+    )
+    omega = next(m for m in out if m.entity_name == "omega")
+    assert omega.proposal_mention_count == 1, (
+        "firm-plane query must not pick up personal-plane proposal"
+    )
+    kg.close()
+    store.close()
+
+
+def test_find_missing_page_coverage_scopes_proposals_by_employee(tmp_path: Path) -> None:
+    """Personal-plane query for one employee must NOT count another employee's proposals."""
+    engine = InMemoryEngine()
+    kg = KnowledgeGraph(tmp_path / "kg.db")
+    store = ProposalStore(tmp_path / "proposals.db")
+
+    store.insert(
+        Proposal(
+            proposal_id="emp-1-prop",
+            target_plane="personal",
+            target_employee_id="emp-1",
+            target_scope="public",
+            target_entity="zeta",
+            proposer_agent_id="agent-1",
+            proposer_employee_id="emp-1",
+            facts=[],
+            source_report_path="/tmp/emp-1-report.md",
+        )
+    )
+    store.insert(
+        Proposal(
+            proposal_id="emp-2-prop",
+            target_plane="personal",
+            target_employee_id="emp-2",
+            target_scope="public",
+            target_entity="zeta",
+            proposer_agent_id="agent-2",
+            proposer_employee_id="emp-2",
+            facts=[],
+            source_report_path="/tmp/emp-2-report.md",
+        )
+    )
+
+    out = find_missing_page_coverage(
+        engine,
+        kg,
+        store,
+        plane="personal",
+        employee_id="emp-1",
+        min_triple_mentions=999,
+        min_proposal_mentions=1,
+    )
+    zeta = next(m for m in out if m.entity_name == "zeta")
+    assert zeta.proposal_mention_count == 1, (
+        "employee-scoped query must not pick up another employee's proposal"
+    )
+    kg.close()
+    store.close()
+
+
 # ---------- 4. Source-attribution debt ----------
 
 
