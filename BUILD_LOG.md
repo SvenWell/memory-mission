@@ -3399,3 +3399,120 @@ pip_dependencies:
 - **`sync_turn` still V1 no-op.** Conversational turns flow into MM
   state via explicit `mm_record_*` tool calls. Auto-ingestion remains
   deferred.
+
+## v0.1.2 patch — multi-agent identifier-coordination fix (2026-04-27)
+
+Second real signal-driven release. Hermes verified the v0.1.1 install
+worked end-to-end and surfaced three concrete asks:
+
+1. `memory_mission.__version__ == "0.1.0"` while package metadata
+   said `0.1.1` — internal constant drift during release.
+2. The build session used `user_id="sven"` (25 triples) while the
+   live Hermes Telegram runtime uses `user_id="6052376253"`
+   (7 triples). Two locally-correct decisions, globally-fragmented
+   state.
+3. (Deferred) Brian-bridge config upstream-safe.
+
+This patch ships fixes for #1 + #2 and saves the architectural lesson
+behind #2 to memory (`project_multi_agent_identifier_gap.md`).
+
+### What landed
+
+- **`memory_mission.__version__` reads from `importlib.metadata.version`**
+  (`src/memory_mission/__init__.py`). Single source of truth — pyproject
+  drives both the wheel metadata AND the Python attribute. Stale
+  "wealth management firms" docstring updated to match the current
+  pitch ("governed context engine for AI agents"). New contract test
+  (`test_package_version_matches_pyproject` in
+  `tests/test_provider_contract.py`) asserts the link so the bug
+  can't recur.
+- **`list_personal_user_ids(root)` discovery primitive**
+  (`src/memory_mission/personal_brain/discovery.py`). Scans
+  `<root>/personal/<user_id>/personal_kg.db` and returns the
+  validated user_ids. A new agent / writer can call this BEFORE
+  `initialize(user_id=...)` to detect "wait, there's already a
+  populated KG under a different user_id — am I sure I want a new
+  silo?" Path-unsafe entries filtered out (defense-in-depth).
+- **`migrate_personal_kg(from_user_id, to_user_id, root)` utility +
+  CLI** (`src/memory_mission/integrations/migrate_user_id.py`). Copies
+  triples (subject, predicate, object, valid_from/to, confidence,
+  provenance, tier) from one user's KG to another. Idempotent —
+  re-runs skip already-present triples via `find_current_triple`.
+  Same-from/to and path-unsafe ids rejected. CLI:
+
+  ```bash
+  python -m memory_mission.integrations.migrate_user_id \
+    --from sven --to 6052376253 --root ~/.memory-mission
+  ```
+
+  And a discovery mode:
+  ```bash
+  python -m memory_mission.integrations.migrate_user_id --list \
+    --root ~/.memory-mission
+  ```
+- **Project memory** `project_multi_agent_identifier_gap.md` names
+  the failure pattern + scopes the substrate-level fix space (V1.2
+  ships discovery + migration; full alias mechanism deferred to
+  v0.2.0).
+- **12 new tests:**
+  - 5 covering `list_personal_user_ids` (empty root, missing dir, populated, dirs without db, path-unsafe filtering)
+  - 6 covering `migrate_personal_kg` (copy, idempotency, same-from/to, path-unsafe, missing source, frozen report)
+  - 1 covering version-pyproject link (`test_package_version_matches_pyproject`)
+
+### Architectural lesson saved
+
+The substrate accepted both `sven` and `6052376253` as `user_id`
+because the parameter is a free-form path-safe string. Multiple
+agents (the build session + the live runtime) made locally-correct
+choices about identifier form, and the substrate had no way to
+detect or coordinate the drift. This is a recurring class as
+multi-agent systems get more capable.
+
+V1.2 fix is **discovery + migrate-once** (lightest substrate
+intervention). V0.2.0 candidate is a full identity alias mechanism
+(queries against any alias find triples written under any other
+alias). Hermes is taking the agent-side version of this on its end
+now; the substrate fix follows once the cost / benefit shows up
+in real usage.
+
+### Verification
+
+- `uv run pytest -q` → 1030 passed (was 1018, +12)
+- `uv run mypy src/` → no issues, 91 source files (+2)
+- `uv run ruff check + format --check` → clean
+- New CLI runs cleanly:
+  ```bash
+  python -m memory_mission.integrations.migrate_user_id --list \
+    --root /tmp/test
+  # → "(no personal KGs found under /tmp/test)"
+  ```
+
+### Pin update for Hermes
+
+```yaml
+pip_dependencies:
+  - "git+https://github.com/SvenWell/memory-mission.git@v0.1.2"
+```
+
+After bump + reinstall, `memory_mission.__version__ == "0.1.2"`.
+Sven runs the migration once to consolidate `sven` → `6052376253`:
+
+```bash
+python -m memory_mission.integrations.migrate_user_id \
+  --from sven --to 6052376253 --root ~/.memory-mission
+```
+
+After that, Hermes' boot context surfaces the full union of both
+prior KGs.
+
+### Open
+
+- **Brian-bridge upstream** (`ReadOnlyPalaceAdapter` as a generic
+  primitive) — Hermes' third concrete ask. Deferred to v0.1.3 unless
+  Hermes flags it as urgent. Currently a Hermes-side patch with
+  hardcoded paths; works fine but doesn't survive plugin reinstall.
+- **Identity alias mechanism** (v0.2.0 candidate) — full substrate-
+  level binding so queries against any alias find triples written
+  under any other. Hermes is doing the agent-side version. Substrate
+  follows when usage justifies.
+- **`sync_turn` real ingestion** — still V1 no-op per ADR-0015.

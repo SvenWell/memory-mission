@@ -352,3 +352,22 @@ def test_hermes_provider_module_does_not_leak_private_callables_via_all() -> Non
     """``__all__`` should never include underscore-prefixed names."""
     leaked = [n for n in hermes_provider.__all__ if n.startswith("_")]
     assert not leaked, f"hermes_provider.__all__ leaks private names: {leaked}"
+
+
+# ---------- 9. Package version sync ----------
+
+
+def test_package_version_matches_pyproject() -> None:
+    """``memory_mission.__version__`` must match the installed dist version.
+
+    Hermes flagged 2026-04-27 that the package metadata said 0.1.1
+    while ``memory_mission.__version__`` still reported 0.1.0 — internal
+    constant drift during a release. The fix: read ``__version__`` from
+    ``importlib.metadata`` so it tracks the wheel's metadata
+    automatically. This test pins that wiring so the bug can't recur.
+    """
+    from importlib.metadata import version as _pkg_version
+
+    import memory_mission
+
+    assert memory_mission.__version__ == _pkg_version("memory-mission")
