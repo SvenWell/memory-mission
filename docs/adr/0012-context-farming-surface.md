@@ -93,12 +93,18 @@ proposals.
 
 ### 3. Missing page coverage
 
-`find_missing_page_coverage(engine, store, *, plane, min_proposal_mentions=3) -> list[MissingPageCoverage]`
+`find_missing_page_coverage(engine, kg, store=None, *, plane=None, employee_id=None, min_triple_mentions=3, min_proposal_mentions=0, count_objects=False) -> list[MissingPageCoverage]`
 
-Returns entities that appear in N+ proposals (or N+ KG triples) but
-don't have a doctrine-or-higher page in the firm wiki. The farmer
-sees: "Sarah Chen appears in 12 proposals as the deal sponsor but we
-don't have a person-page for her."
+Returns entities that appear in N+ KG triples (subject position by
+default; objects gated on entity-likeness when ``count_objects=True``)
+or N+ proposals targeting the requested ``plane``/``employee_id``,
+but don't have a doctrine-or-higher page in the firm wiki. The
+farmer sees: "Sarah Chen appears in 12 proposals as the deal sponsor
+but we don't have a person-page for her."
+
+Object-position counts are off by default because raw literals
+(``portfolio``, ``active``, ``$20m``) routinely land in object
+position and would produce false missing-page work.
 
 **Acts on:** create + propose missing pages; promote stub pages to
 doctrine after the first N corroborated facts land.

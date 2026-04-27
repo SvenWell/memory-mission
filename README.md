@@ -28,7 +28,7 @@ cd memory-mission
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
-make check          # ruff + format + mypy --strict + 869 tests
+make check          # ruff + format + mypy --strict + 903 tests
 python -m memory_mission info
 ```
 
@@ -148,7 +148,7 @@ src/memory_mission/
 ├── synthesis/              # compile_agent_context + AgentContext
 └── mcp/                    # FastMCP server — 14 tools over stdio (Step 18)
 
-skills/                     # 7 shipped, markdown + YAML frontmatter
+skills/                     # 18 shipped, markdown + YAML frontmatter
 tests/                      # 903 passing
 docs/                       # VISION + ARCHITECTURE + ABSTRACTIONS + EVALS + AGENTS + adr/ + recipes/
 BUILD_LOG.md                # per-step record

@@ -6,7 +6,7 @@ tools: [knowledge_graph, brain_engine, identity_resolver, compile_agent_context,
 preconditions:
   - "firm_id resolved; running session is a partner / principal authorized to read portfolio state"
   - "venture overlay copied; firm/concepts/venture-constitution.md present and tier=constitution"
-  - "KnowledgeGraph available for this firm with at least one deal currently in `lifecycle_status: portfolio`"
+  - "KnowledgeGraph available for this firm (an empty portfolio set is a valid state and triggers the empty-portfolio forcing question rather than blocking the skill)"
   - "BrainEngine recommended (used for per-company curated page retrieval)"
   - "IdentityResolver recommended (canonical names attached to stable o_<id> entities)"
   - "the host agent is configured to call the firm KG / page MCP tools (Step 18 surface) — MemPalace-direct alone cannot walk portfolio state"
