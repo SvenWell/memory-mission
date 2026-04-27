@@ -85,8 +85,7 @@ def test_constitution_round_trips() -> None:
     p2 = parse_page(rerendered)
     extras2 = p2.frontmatter.model_extra or {}
     assert extras2.keys() == extras.keys(), (
-        f"extras drift: lost {set(extras) - set(extras2)}; "
-        f"gained {set(extras2) - set(extras)}"
+        f"extras drift: lost {set(extras) - set(extras2)}; gained {set(extras2) - set(extras)}"
     )
 
 
@@ -102,9 +101,7 @@ def test_constitution_declares_canonical_lifecycle_stages() -> None:
     p = parse_page(text)
     extras = p.frontmatter.model_extra or {}
     stages = extras.get("lifecycle_stages")
-    assert isinstance(stages, list) and len(stages) > 0, (
-        "lifecycle_stages must be a non-empty list"
-    )
+    assert isinstance(stages, list) and len(stages) > 0, "lifecycle_stages must be a non-empty list"
     for stage in stages:
         assert isinstance(stage, str) and _SAFE_VOCAB_VALUE.match(stage), (
             f"lifecycle_stages value {stage!r} must be a kebab-or-snake-case identifier"
@@ -134,9 +131,7 @@ def test_constitution_declares_parallel_sub_state_vocabularies(
     p = parse_page(text)
     extras = p.frontmatter.model_extra or {}
     vocab = extras.get(extras_key)
-    assert isinstance(vocab, list) and len(vocab) > 0, (
-        f"{extras_key} must be a non-empty list"
-    )
+    assert isinstance(vocab, list) and len(vocab) > 0, f"{extras_key} must be a non-empty list"
     for value in vocab:
         assert isinstance(value, str) and _SAFE_VOCAB_VALUE.match(value), (
             f"{extras_key} value {value!r} must be a kebab-or-snake-case identifier"
@@ -151,9 +146,7 @@ def test_constitution_declares_ic_quorum() -> None:
     p = parse_page(text)
     extras = p.frontmatter.model_extra or {}
     quorum = extras.get("ic_quorum")
-    assert isinstance(quorum, int) and quorum > 0, (
-        "ic_quorum must be a positive int"
-    )
+    assert isinstance(quorum, int) and quorum > 0, "ic_quorum must be a positive int"
 
 
 def test_constitution_declares_decision_rights() -> None:

@@ -4,20 +4,25 @@ Read this file first. Full `SKILL.md` contents load only when a skill's
 triggers match the current task. Machine-readable equivalent:
 `skills/_manifest.jsonl`. Conventions: `skills/_writing-skills.md`.
 
-**17 skills shipped** as of 2026-04-25. Backfill skills (gmail, outlook,
+**18 skills shipped** as of 2026-04-27. Backfill skills (gmail, outlook,
 granola, calendar, drive/firm-artefacts, onedrive, affinity, attio,
 notion, slack) route through P2's envelope path: load `firm/systems.yaml`,
 call the per-app envelope helper, and write via
 `StagingWriter.write_envelope`. Visibility maps to firm scope per the
 manifest — fail-closed by default (ADR-0007).
 
-The three venture-overlay workflow skills (`update-deal-status`,
-`record-ic-decision`, `onboard-venture-firm`) are part of P7-A and
-ride on the venture overlay (`overlays/venture/`). They consume the
-constitution's authoritative vocabulary (`lifecycle_stages`,
-`ic_quorum`, `decision_rights`) and write `UpdateFact` /
-`RelationshipFact` / page proposals through the standard
-review-proposals gate — never auto-promote.
+The four venture-overlay workflow skills (`update-deal-status`,
+`record-ic-decision`, `onboard-venture-firm`, `weekly-portfolio-update`)
+are part of P7-A and ride on the venture overlay (`overlays/venture/`).
+The first three consume the constitution's authoritative vocabulary
+(`lifecycle_stages`, `ic_quorum`, `decision_rights`) and write
+`UpdateFact` / `RelationshipFact` / page proposals through the standard
+review-proposals gate — never auto-promote. The fourth
+(`weekly-portfolio-update`) is read-only by contract: it produces a
+partner-ready portfolio digest from currently-true firm-plane state,
+surfaces stale companies as forcing questions, and routes the operator
+to `update-deal-status` / `record-ic-decision` when state actually
+needs changing.
 
 ## backfill-gmail
 
@@ -369,3 +374,30 @@ venture overlay", "initialize venture firm", "bootstrap venture firm"
 Constraints: administrator-run only, never overwrites existing firm
 config without explicit confirmation, constitution goes through
 review-proposals (no auto-promotion), Drive backfill is optional.
+
+## weekly-portfolio-update
+
+Workflow skill on the venture overlay (P7-A). Compiles a partner-ready
+weekly portfolio digest. Resolves every deal currently in
+`lifecycle_status: portfolio`, gathers per-company snapshots via
+`compile_agent_context` (currently-true triples + recent events + open
+questions + related pages), partitions by `portfolio_status`
+(`active` first; `exited` / `written_off` only when the sub-state
+changed in the last 7 days), computes per-company staleness against
+each page's `quarterly_update_cadence_days` frontmatter, and renders a
+markdown digest organized as Active portfolio / Recent state changes /
+Needs attention / Archive deltas. Hands the render to the host LLM for
+narrative shaping. Never proposes — when the operator confirms a real
+state change during review, the skill routes them to
+`update-deal-status` or `record-ic-decision` with the source artefact.
+
+Triggers: "weekly portfolio update", "portfolio digest", "portfolio
+review", "weekly portfolio brief", "portfolio sync", "portfolio status
+this week"
+
+Constraints: read-only by contract (no `create_proposal`, no KG
+writes, no page mutations), no LLM call inside the skill, must not
+include superseded facts, every fact cites source_closet /
+source_file, tier_floor defaults to `policy`, firm plane only,
+stale-detection threshold reads each company's frontmatter (no
+constitution-level fallback without explicit operator ask).

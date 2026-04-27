@@ -3080,3 +3080,181 @@ B-slice 2 (`weekly-portfolio-update` workflow skill). Both are
 independent of H and can ship in subsequent commits without
 blocking. After Week 2, Weeks 3–4 are E (pilot rehearsal pack)
 followed by Weeks 5–6 D (typed sync-back, P5).
+
+## P7-A Week 2 — Context Farmer surface (C, ADR-0012) (2026-04-27)
+
+Manifesto-native vocabulary made operable. The Context Farmer role
+("humans tend the brain by maintaining context quality, not just
+consuming retrieval") gets a concrete surface: an always-on Bases
+dashboard for daily UX + a Python module for cross-cutting analytics
+the dashboard can't compute natively.
+
+### What landed
+
+- **ADR-0012** — `docs/adr/0012-context-farming-surface.md`. Documents
+  the two-layer split (Bases for native page views, Python for joins
+  across pages + KG + proposals), the 5 named farming primitives +
+  what each detects + the operator intervention each enables, and the
+  explicit relationship to the existing `dashboard.base` (extends,
+  doesn't replace).
+- **`synthesis/coverage.py`** — pure-function module exposing 5 named
+  primitives: `compute_domain_coverage`, `find_decayed_pages`,
+  `find_missing_page_coverage`, `find_attribution_debt`,
+  `find_low_corroboration_clusters`. All take existing substrate
+  handles (`BrainEngine` / `KnowledgeGraph` / `ProposalStore`); all
+  return frozen Pydantic aggregates. Zero new tables, zero new
+  storage.
+- **`dashboard.farming.base`** —
+  `src/memory_mission/memory/templates/dashboard.farming.base`. Five
+  farming-native Bases views: domain coverage (groupBy domain), decay
+  flags (formula `age_days > 90` + tier filter), constitution review
+  queue (oldest reviewed_at first), provenance debt (no-sources
+  filter), stub pages (file.size < 1.5KB at doctrine+).
+  Operator copies into `firm/` alongside `dashboard.base`.
+- **`tests/test_coverage.py`** — 16 tests covering happy path +
+  empty-substrate + threshold-edge cases for each primitive, plus a
+  Pydantic-frozen sanity test on all 5 aggregate models.
+
+### Architectural notes
+
+- **Bases for the daily UX, Python for joins.** Bases reads
+  page-level frontmatter natively — perfect for "domain coverage"
+  and "decay flags." The 3 cross-cutting primitives
+  (`find_missing_page_coverage`, `find_attribution_debt`,
+  `find_low_corroboration_clusters`) need joins across pages + KG +
+  proposals that Bases can't express. The Python module is the
+  programmatic surface a workflow skill or admin script consumes.
+- **5 primitives = 5 operator interventions.** Per ADR-0012, each
+  primitive maps to a specific Context Farmer action: notice
+  under-promoted domains, schedule doctrine reviews, create missing
+  pages, attach post-hoc provenance, trigger targeted re-extraction.
+  Without a named intervention a primitive is decoration; the
+  surface earns its keep by enabling specific moves.
+- **Reuses existing substrate.** No new tables, no new SQLite
+  files. The substrate already has every metadata field the views
+  need (`tier`, `confidence`, `valid_to`, `source_closet`,
+  `reviewed_at`, page domain). The primitives are *readers*, not
+  schema additions.
+- **Manifesto-aligned vocabulary, architecture-coupled semantics.**
+  "Context Farmer" is the manifesto framing; the primitives are
+  defined in our substrate's language. If the term fades the
+  surface still works.
+
+### Verification
+
+- [x] `pytest` — 903/903 passed (+16 new coverage tests)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 82 source files (+1)
+- [x] `dashboard.farming.base` parses as valid YAML
+- [x] All 5 aggregate models are frozen Pydantic
+- [x] Each primitive handles empty substrate cleanly
+- [x] Each primitive's threshold-edge behavior is documented + tested
+
+### Next
+
+Per the prism plan, B-slice 2 (`weekly-portfolio-update` workflow
+skill) is the remaining Week 2 deliverable. Once that lands, Week 2
+is complete and Weeks 3–4 (E pilot rehearsal pack) can begin. Then
+Weeks 5–6 (D typed sync-back) and Weeks 7–8 (B-rest workflow
+skills).
+
+## P7-A Week 2 — B-slice 2 weekly-portfolio-update skill (2026-04-27)
+
+Closes Week 2 of the joyful-prism plan. Read-only portfolio digest
+skill on the venture overlay — the fourth and final workflow skill in
+the P7-A first slice (alongside `update-deal-status`,
+`record-ic-decision`, `onboard-venture-firm`).
+
+### What landed
+
+- **`skills/weekly-portfolio-update/SKILL.md`** — 18th skill. Mirrors
+  `meeting-prep`'s read-only briefing pattern but aggregates per-company
+  snapshots across the firm's portfolio. For each deal currently in
+  `lifecycle_status: portfolio`, calls `compile_agent_context` once
+  (role=`weekly-portfolio-update`, plane=`firm`, tier_floor=`policy`),
+  then aggregates renders into a partner-ready markdown digest organized
+  as Active portfolio / Recent state changes / Needs attention / Archive
+  deltas. Hands the render to the host LLM for narrative shaping.
+  Surfaces stale companies (last quarterly update gap exceeds the
+  page's `quarterly_update_cadence_days`) as forcing questions.
+- **Read-only by contract.** No `create_proposal`, no KG writes, no
+  page mutations. The INVARIANT phrasing from Week 1.5 is restated in
+  the constraints. When the operator confirms a state change during
+  digest review, the skill routes them to `update-deal-status` /
+  `record-ic-decision` with the source artefact — never drafts
+  proposals inline.
+- **`skills/_index.md`** — header bumped to "18 skills shipped"; lead
+  paragraph updated to name 4 venture-overlay workflow skills (was
+  3); added a `## weekly-portfolio-update` section after
+  `## onboard-venture-firm` mirroring the prose shape of the other
+  workflow skill entries.
+- **`skills/_manifest.jsonl`** — appended one JSONL entry. Round-trip
+  validated via `tests/test_skills_registry.py` (manifest fields
+  match SKILL.md frontmatter exactly).
+- **`docs/AGENTS.md`** — shipped-state line bumped to "18 skills
+  shipped"; "Next" pointer pivoted to **E (pilot rehearsal pack)
+  Weeks 3–4** since H (personal KG) and C (Context Farmer surface)
+  both landed earlier this week.
+
+### Architectural notes
+
+- **Fourth workflow skill, same compile-then-LLM-then-DraftEvent
+  pattern.** `compile_agent_context` proves itself as the load-bearing
+  primitive across `meeting-prep`, `update-deal-status`,
+  `record-ic-decision`, and now `weekly-portfolio-update`. Same
+  function, different `role` value per skill, different scope
+  (single attendee → single deal entity → portfolio set).
+- **Read-only ≠ write-only.** This skill demonstrates that the
+  workflow-skills-never-mutate-truth invariant applies to read-only
+  skills too. The constraint isn't about whether the skill writes
+  *anywhere* — it's about whether the skill mutates *firm truth*.
+  Read-only skills emit `DraftEvent`s; they don't propose. When the
+  user wants to act, the skill explicitly hands off to a write-side
+  sibling.
+- **Per-page cadence beats firm-level default.** The skill reads
+  `quarterly_update_cadence_days` from each portfolio company's page
+  frontmatter — different companies have different review cadences
+  (a Series A board meets bimonthly; a late-stage portfolio company
+  may only update quarterly). When the field is missing, the skill
+  surfaces a forcing question rather than falling back to the
+  constitution's `fund_thesis_review_cadence` without explicit
+  operator approval.
+- **Strategic reframe noted in plan file** (`~/.claude/plans/sprightly-cooking-oasis.md`):
+  GBrain comparison + agent+terminal thesis arrived this session.
+  Substrate already aligns (files-first, markdown-with-frontmatter,
+  no LLM SDK in src/). The KG keeps load-bearing status for KGRAG
+  multi-hop + temporal validity + Bayesian corroboration — the query
+  shapes grep+semantic can't cheaply replicate. Scored hybrid
+  retrieval (Cypher-style) explicitly killed; agent+terminal beats
+  it for the queries that don't need structure. ADR-0014 stub
+  (agent+terminal compatibility as a load-bearing constraint) to
+  follow in a separate commit.
+
+### Verification
+
+- [x] `pytest` — 903/903 passed (test count unchanged; this commit
+      is markdown + manifest only)
+- [x] `ruff check` + `ruff format --check` clean
+- [x] `mypy --strict` clean on 82 source files (unchanged)
+- [x] `tests/test_skills_registry.py` — all 18 skills round-trip
+      between SKILL.md frontmatter and `_manifest.jsonl`
+- [x] `_index.md` references all 18 skill names
+- [x] SKILL.md ends with the required `## Self-rewrite hook` section
+
+### Next
+
+Week 2 is complete on `SvenWell/office-hours`. The branch is now ready
+to merge to main as a Week-2-complete unit (C + B-slice 2 together,
+mirroring the Week 1 + Week 1.5 cadence). The merge decision is the
+user's call — recommendation is to bundle.
+
+After Week 2 lands on main:
+- Optional small commit: ADR-0014 stub naming agent+terminal
+  compatibility as a load-bearing constraint (15-30 min).
+- Weeks 3–4: facet **E** (pilot rehearsal pack) — bundles A+B+C
+  artifacts + golden-path corpus + 10-task benchmark harness +
+  one-command spinup.
+- Weeks 5–6: facet **D** (typed sync-back, P5) — Affinity first, then
+  Attio.
+- Weeks 7–8: facet **B-rest** — `deal-memo-draft`,
+  `quarterly-lp-update`, `IC-prep`, `partner-1on1-prep`.

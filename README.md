@@ -149,7 +149,7 @@ src/memory_mission/
 └── mcp/                    # FastMCP server — 14 tools over stdio (Step 18)
 
 skills/                     # 7 shipped, markdown + YAML frontmatter
-tests/                      # 887 passing
+tests/                      # 903 passing
 docs/                       # VISION + ARCHITECTURE + ABSTRACTIONS + EVALS + AGENTS + adr/ + recipes/
 BUILD_LOG.md                # per-step record
 ```
