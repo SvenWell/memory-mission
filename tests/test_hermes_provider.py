@@ -62,16 +62,31 @@ def provider(tmp_path: Path) -> MemoryMissionProvider:
 
 
 def test_name_is_memory_mission() -> None:
-    assert MemoryMissionProvider().name == "memory-mission"
+    """Underscore — matches Hermes plugin directory + config dispatch convention."""
+    assert MemoryMissionProvider().name == "memory_mission"
 
 
-def test_is_available_true_when_env_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_is_available_true_when_mm_user_id_env_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MM_PROFILE", raising=False)
+    monkeypatch.setenv("MM_USER_ID", "sven")
+    monkeypatch.setenv("MM_ROOT", "/tmp/mm")
+    assert MemoryMissionProvider().is_available() is True
+
+
+def test_is_available_true_when_legacy_mm_profile_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MM_PROFILE accepted as legacy alias for MM_USER_ID."""
+    monkeypatch.delenv("MM_USER_ID", raising=False)
     monkeypatch.setenv("MM_PROFILE", "sven")
     monkeypatch.setenv("MM_ROOT", "/tmp/mm")
     assert MemoryMissionProvider().is_available() is True
 
 
 def test_is_available_false_without_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MM_USER_ID", raising=False)
     monkeypatch.delenv("MM_PROFILE", raising=False)
     monkeypatch.delenv("MM_ROOT", raising=False)
     assert MemoryMissionProvider().is_available() is False
@@ -101,7 +116,7 @@ def test_initialize_errors_without_user_or_root(monkeypatch: pytest.MonkeyPatch)
 def test_initialize_with_explicit_kwargs(tmp_path: Path) -> None:
     p = MemoryMissionProvider()
     p.initialize("session-x", user_id="sven", root=tmp_path)
-    assert p.name == "memory-mission"
+    assert p.name == "memory_mission"
     p.shutdown()
 
 

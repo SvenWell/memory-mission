@@ -62,6 +62,14 @@ if TYPE_CHECKING:
     from memory_mission.personal_brain.backend import PersonalMemoryBackend
 
 
+# Token budget used by the ``prefetch()`` hook. Tighter than the
+# default ``mm_boot_context`` budget so per-turn context stays
+# high-signal rather than full-state dump. Hermes' integration
+# feedback: "the win is high-signal operating state before the model
+# reasons, not dump all state every turn."
+PREFETCH_TOKEN_BUDGET = 1500
+
+
 # Tool names — prefixed so they don't collide with other Hermes
 # memory providers' tools at the runtime level.
 TOOL_BOOT_CONTEXT = "mm_boot_context"
@@ -117,16 +125,22 @@ class MemoryMissionProvider:
 
     @property
     def name(self) -> str:
-        """Provider identifier used in Hermes config dispatch."""
-        return "memory-mission"
+        """Provider identifier used in Hermes config dispatch.
+
+        Underscored to match Python identifier conventions and the
+        ``plugins/memory/<name>/`` directory layout — this is the
+        string Hermes config references via ``provider: memory_mission``.
+        """
+        return "memory_mission"
 
     def is_available(self) -> bool:
-        """Cheap, no-network check that this provider can serve."""
-        if os.environ.get("MM_PROFILE") and os.environ.get("MM_ROOT"):
-            return True
-        # Saved-config fallback path is exercised at initialize() time;
-        # is_available() stays env-only so Hermes' startup poll is fast.
-        return False
+        """Cheap, no-network check that this provider can serve.
+
+        Checks ``MM_USER_ID`` (preferred) or ``MM_PROFILE`` (legacy alias)
+        plus ``MM_ROOT``. Saved-config fallback runs in ``initialize()``.
+        """
+        user = os.environ.get("MM_USER_ID") or os.environ.get("MM_PROFILE")
+        return bool(user and os.environ.get("MM_ROOT"))
 
     def initialize(
         self,
@@ -140,26 +154,26 @@ class MemoryMissionProvider:
     ) -> None:
         """Open per-user handles for this session.
 
-        Resolution order: explicit kwargs → ``MM_*`` env vars →
-        ``$HERMES_HOME/memory-mission.json`` (when ``hermes_home`` is
-        passed). Raises if no resolution path supplies a profile + root.
+        Resolution order: explicit kwargs → ``MM_USER_ID`` /
+        ``MM_AGENT_ID`` / ``MM_ROOT`` env vars. ``MM_PROFILE`` is
+        accepted as a legacy alias for ``MM_USER_ID``.
         """
         self._session_id = session_id
-        resolved_user = user_id or os.environ.get("MM_PROFILE")
+        resolved_user = user_id or os.environ.get("MM_USER_ID") or os.environ.get("MM_PROFILE")
         resolved_root = Path(root) if root else None
         if resolved_root is None and "MM_ROOT" in os.environ:
             resolved_root = Path(os.environ["MM_ROOT"])
         if resolved_user is None or resolved_root is None:
             raise ValueError(
                 "MemoryMissionProvider.initialize requires user_id + root "
-                "(via kwargs, MM_PROFILE/MM_ROOT env, or saved config)"
+                "(via kwargs or MM_USER_ID/MM_ROOT env vars)"
             )
         validate_employee_id(resolved_user)
         resolved_root = resolved_root.expanduser()
         resolved_root.mkdir(parents=True, exist_ok=True)
 
         self._user_id = resolved_user
-        self._agent_id = agent_id or "hermes"
+        self._agent_id = agent_id or os.environ.get("MM_AGENT_ID") or "hermes"
         self._root = resolved_root
         self._identity = LocalIdentityResolver(resolved_root / "identity.sqlite3")
         self._kg = PersonalKnowledgeGraph.for_employee(
@@ -177,9 +191,11 @@ class MemoryMissionProvider:
         return [
             {
                 "key": "user_id",
-                "description": "Memory Mission profile / user id (e.g. 'sven')",
+                "description": (
+                    "Memory Mission user id (e.g. 'sven'). MM_PROFILE accepted as legacy alias."
+                ),
                 "required": True,
-                "env_var": "MM_PROFILE",
+                "env_var": "MM_USER_ID",
                 "secret": False,
             },
             {
@@ -220,10 +236,13 @@ class MemoryMissionProvider:
             {
                 "name": TOOL_BOOT_CONTEXT,
                 "description": (
-                    "Compile the agent boot context — active threads, "
+                    "FULL operating-state digest — active threads, "
                     "commitments, preferences, recent decisions, "
-                    "relevant entities, project status. Returns a "
-                    "structured payload plus a markdown render."
+                    "relevant entities, project status. Use this when you "
+                    "need the complete picture (e.g. resuming after a "
+                    "long gap). The provider's prefetch hook already "
+                    "injects a compact slice on every turn; only call "
+                    "this tool when that slice isn't enough."
                 ),
                 "parameters": {
                     "type": "object",
@@ -338,7 +357,15 @@ class MemoryMissionProvider:
             },
             {
                 "name": TOOL_QUERY_ENTITY,
-                "description": "Currently-true triples about an entity on the personal plane.",
+                "description": (
+                    "STATE — currently-true / compiled facts about a "
+                    "person, project, thread, or other entity. Returns "
+                    "structured triples already corroborated and time-"
+                    "valid (the substrate's operating-memory layer). "
+                    "Use when you need to know 'what is true now' about "
+                    "X. Pair with mm_search_recall when you also need "
+                    "the source excerpts that established those facts."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -356,10 +383,16 @@ class MemoryMissionProvider:
             {
                 "name": TOOL_SEARCH_RECALL,
                 "description": (
-                    "Evidence-layer recall via the personal backend "
-                    "(MemPalace). Returns hits with citations, or a "
-                    "structured 'no_recall_backend' marker when no "
-                    "backend is wired up."
+                    "EVIDENCE — source-backed search across past "
+                    "interactions and ingested documents (the personal "
+                    "MemPalace recall index). Returns hits with citations, "
+                    "NOT distilled current state. Use when you need raw "
+                    "source excerpts (emails, transcripts, notes) that "
+                    "support or contradict a claim. Pair with "
+                    "mm_query_entity for the compiled-state version. "
+                    "Returns a structured no_recall_backend marker when "
+                    "no backend is wired up (Memory Mission Individual "
+                    "is usable without MemPalace; recall just isn't)."
                 ),
                 "parameters": {
                     "type": "object",
@@ -416,11 +449,15 @@ class MemoryMissionProvider:
         )
 
     def prefetch(self, query: str) -> str:
-        """Inject the boot-context render before each inference call.
+        """Inject a COMPACT task-relevant boot slice before each inference call.
 
-        This is the boot-substrate insertion point. Hermes calls this
-        with the upcoming user message; we render the IndividualBootContext
-        biased by ``query`` as the task hint.
+        Per Hermes' integration feedback: prefetch is high-signal-per-token
+        operating state, NOT a full boot dump. The task-hint biases what
+        surfaces; the token budget is intentionally tighter than the
+        ``mm_boot_context`` tool (which agents call explicitly when they
+        want the full picture). Active threads + open commitments +
+        preferences win the budget; relevant entities + project status
+        get trimmed first if over.
         """
         if self._kg is None:
             return ""
@@ -431,6 +468,7 @@ class MemoryMissionProvider:
             engine=self._engine,
             identity_resolver=self._identity,
             task_hint=query,
+            token_budget=PREFETCH_TOKEN_BUDGET,
         )
         return boot.render()
 
