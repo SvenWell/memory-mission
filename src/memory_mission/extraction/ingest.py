@@ -51,7 +51,12 @@ from memory_mission.memory.schema import Plane, plane_root, validate_employee_id
 # default.
 _ORGANIZATION_TYPES = frozenset({"organization", "company", "firm", "org"})
 
+# Source labels and our own identifiers — short by design.
 _SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
+
+# External source ids (e.g. Gmail message ids, Google Calendar recurring
+# event instance ids). Mirror of ingestion.staging._SAFE_EXTERNAL_ID (245-char body).
+_SAFE_EXTERNAL_ID = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,245}$")
 
 
 class TierCrossing(BaseModel):
@@ -128,7 +133,7 @@ class ExtractionWriter:
 
     def write(self, report: ExtractionReport) -> Path:
         """Persist a report. Overwrites any prior report for the same source_id."""
-        _validate_segment(report.source_id, name="source_id")
+        _validate_segment(report.source_id, name="source_id", pattern=_SAFE_EXTERNAL_ID)
         if report.source != self._source:
             raise ValueError(
                 f"report.source {report.source!r} does not match writer source {self._source!r}"
@@ -156,7 +161,7 @@ class ExtractionWriter:
 
     def read(self, source_id: str) -> ExtractionReport | None:
         """Return the stored report for ``source_id`` or None if missing."""
-        _validate_segment(source_id, name="source_id")
+        _validate_segment(source_id, name="source_id", pattern=_SAFE_EXTERNAL_ID)
         path = self._facts_dir / f"{source_id}.json"
         if not path.exists():
             return None
@@ -171,7 +176,7 @@ class ExtractionWriter:
 
     def remove(self, source_id: str) -> bool:
         """Delete the stored report. Returns True if anything was removed."""
-        _validate_segment(source_id, name="source_id")
+        _validate_segment(source_id, name="source_id", pattern=_SAFE_EXTERNAL_ID)
         path = self._facts_dir / f"{source_id}.json"
         if path.exists():
             path.unlink()
@@ -308,11 +313,17 @@ def _resolver_entity_kind(entity_type: str) -> EntityKind:
     return "person"
 
 
-def _validate_segment(value: str, *, name: str) -> None:
-    if not value or not _SAFE_PATH_SEGMENT.match(value):
+def _validate_segment(
+    value: str,
+    *,
+    name: str,
+    pattern: re.Pattern[str] = _SAFE_PATH_SEGMENT,
+) -> None:
+    if not value or not pattern.match(value):
+        max_chars = 246 if pattern is _SAFE_EXTERNAL_ID else 128
         raise ValueError(
-            f"{name} {value!r} must match {_SAFE_PATH_SEGMENT.pattern} "
-            "(alphanumerics + ._- only, 1-128 chars, no path separators)"
+            f"{name} {value!r} must match {pattern.pattern} "
+            f"(alphanumerics + ._- only, 1-{max_chars} chars, no path separators)"
         )
 
 
