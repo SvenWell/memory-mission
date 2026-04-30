@@ -293,3 +293,92 @@ def test_resolve_entity_resolves_typed_identifier(installed_ctx) -> None:
 def test_resolve_entity_rejects_empty_name(installed_ctx) -> None:
     with pytest.raises(ValueError, match="non-empty"):
         server.resolve_entity("   ")
+
+
+# ---------- query_entity conflict surfacing ----------
+
+
+def test_query_entity_returns_plain_list_when_no_conflicts(installed_ctx, kg) -> None:
+    """Backwards-compat: triples without conflicts have no conflicts_with key."""
+    kg.add_triple("uniqueco", "founded", "2024", source_closet="conversational", source_file="s")
+    out = server.query_entity("uniqueco")
+    assert len(out) == 1
+    assert "conflicts_with" not in out[0]
+
+
+def test_query_entity_annotates_conflicting_triples(installed_ctx, kg) -> None:
+    """Two currently-true triples with same (subject, predicate) but different object."""
+    kg.add_triple(
+        "sara", "works_at", "acme", confidence=0.95, source_closet="gmail", source_file="msg-1"
+    )
+    kg.add_triple(
+        "sara", "works_at", "beta", confidence=0.7, source_closet="gmail", source_file="msg-2"
+    )
+    out = server.query_entity("sara")
+    assert len(out) == 2
+    # Each triple should carry the OTHER as a conflict peer.
+    for t in out:
+        assert "conflicts_with" in t
+        assert len(t["conflicts_with"]) == 1
+        peer = t["conflicts_with"][0]
+        assert peer["object"] != t["object"]
+        assert "confidence" in peer
+        assert "source_closet" in peer
+        assert "source_file" in peer
+
+
+def test_query_entity_corroboration_is_not_a_conflict(installed_ctx, kg) -> None:
+    """Same (subject, predicate, object) corroborated must NOT surface as conflict."""
+    kg.add_triple("vendor", "sells", "widgets", source_closet="gmail", source_file="msg-a")
+    kg.corroborate(
+        "vendor", "sells", "widgets", confidence=0.9, source_closet="gmail", source_file="msg-b"
+    )
+    out = server.query_entity("vendor")
+    assert len(out) == 1
+    assert "conflicts_with" not in out[0]
+
+
+def test_query_entity_three_way_conflict_lists_all_peers(installed_ctx, kg) -> None:
+    """Three live objects on (s, p) — each lists the other two as peers, conf-desc."""
+    kg.add_triple(
+        "startup",
+        "lead_investor",
+        "fund-a",
+        confidence=0.9,
+        source_closet="gmail",
+        source_file="m1",
+    )
+    kg.add_triple(
+        "startup",
+        "lead_investor",
+        "fund-b",
+        confidence=0.6,
+        source_closet="gmail",
+        source_file="m2",
+    )
+    kg.add_triple(
+        "startup",
+        "lead_investor",
+        "fund-c",
+        confidence=0.8,
+        source_closet="gmail",
+        source_file="m3",
+    )
+    out = server.query_entity("startup")
+    fund_a = next(t for t in out if t["object"] == "fund-a")
+    assert len(fund_a["conflicts_with"]) == 2
+    # Peers ordered by confidence desc.
+    peer_objects = [p["object"] for p in fund_a["conflicts_with"]]
+    assert peer_objects == ["fund-c", "fund-b"]
+
+
+def test_query_entity_filters_invalidated_triples_from_conflicts(installed_ctx, kg) -> None:
+    """Invalidated (valid_to set) triples shouldn't surface as a conflict against the live one."""
+    kg.add_triple("joe", "role", "engineer", source_closet="conversational", source_file="s1")
+    kg.invalidate("joe", "role", "engineer", ended=date(2026, 4, 1))
+    kg.add_triple("joe", "role", "manager", source_closet="conversational", source_file="s2")
+    out = server.query_entity("joe")
+    # Only one currently-true triple → no conflict annotation.
+    assert len(out) == 1
+    assert out[0]["object"] == "manager"
+    assert "conflicts_with" not in out[0]
