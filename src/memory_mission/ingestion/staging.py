@@ -35,7 +35,6 @@ promotion pipeline.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -50,11 +49,7 @@ from memory_mission.memory.schema import (
     staging_source_dir,
     validate_employee_id,
 )
-
-# Same shape as observability's firm-id regex: alnum + ._- with a length
-# bound, no path separators or NUL bytes. Source labels and item ids share
-# this surface because both become path segments.
-_SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
+from memory_mission.memory.validators import SAFE_PATH_SEGMENT_PATTERN as _SAFE_PATH_SEGMENT
 
 
 class StagedItem(BaseModel):

@@ -25,7 +25,6 @@ Layout (mirroring source staging from Step 7):
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -44,14 +43,13 @@ from memory_mission.identity import IdentityResolver
 from memory_mission.identity.base import EntityKind
 from memory_mission.ingestion.mentions import MentionTracker, Tier
 from memory_mission.memory.schema import Plane, plane_root, validate_employee_id
+from memory_mission.memory.validators import SAFE_PATH_SEGMENT_PATTERN as _SAFE_PATH_SEGMENT
 
 # Canonical ``entity_type`` strings treated as organizations by the
 # identity resolver; everything else defaults to ``person``. Keep the
 # set small and explicit so new vocabulary doesn't silently flip the
 # default.
 _ORGANIZATION_TYPES = frozenset({"organization", "company", "firm", "org"})
-
-_SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
 
 
 class TierCrossing(BaseModel):
