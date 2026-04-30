@@ -293,3 +293,36 @@ def test_resolve_entity_resolves_typed_identifier(installed_ctx) -> None:
 def test_resolve_entity_rejects_empty_name(installed_ctx) -> None:
     with pytest.raises(ValueError, match="non-empty"):
         server.resolve_entity("   ")
+
+
+# ---------- record_decision persistence (regression test for InMemoryEngine evaporation) ----------
+
+
+def test_record_decision_persists_across_initialize_cycles(tmp_path: Path) -> None:
+    """A decision logged in one MCP session must be visible in the next.
+
+    Before the wiki_root persistence fix, individual_server constructed an
+    in-memory engine that evaporated when the MCP subprocess exited — so
+    record_decision wrote to RAM and the boot context returned no decisions
+    on the next process. This test guards against that regression.
+    """
+    server.initialize(root=tmp_path, user_id="sven", agent_id="hermes")
+    server.record_decision(
+        slug="pivot-2026",
+        title="Pivot to AI tooling",
+        summary="Reallocating Q2 budget to AI tooling spend.",
+        source_closet="conversational",
+        source_file="session-1",
+        decided_at=date(2026, 4, 15),
+    )
+    # Simulate the subprocess dying.
+    server.reset()
+
+    # Fresh initialize against the SAME root — what would happen on the
+    # next ``python -m memory_mission.mcp.individual_server`` boot.
+    server.initialize(root=tmp_path, user_id="sven", agent_id="hermes")
+    ctx = server._ctx()
+    page = ctx.engine.get_page("pivot-2026", plane="personal", employee_id="sven")
+    assert page is not None
+    assert page.frontmatter.title == "Pivot to AI tooling"
+    server.reset()

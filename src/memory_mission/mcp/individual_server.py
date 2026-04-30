@@ -98,7 +98,12 @@ def initialize(
         employee_id=user_id,
         identity_resolver=identity,
     )
-    engine: BrainEngine = InMemoryEngine()
+    # wiki_root makes put_page / delete_page durable. Without it,
+    # record_decision would write to RAM only and evaporate when the
+    # MCP subprocess exits between Hermes/Codex chat sessions.
+    wiki_root = root / "wiki"
+    wiki_root.mkdir(parents=True, exist_ok=True)
+    engine: BrainEngine = InMemoryEngine(wiki_root=wiki_root)
     engine.connect()
 
     obs_root = root / ".observability"

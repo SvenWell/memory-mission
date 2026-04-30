@@ -36,11 +36,12 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from memory_mission.memory.pages import Page
+from memory_mission.memory.pages import Page, parse_page, render_page
 from memory_mission.memory.schema import (
     Plane,
     validate_domain,
@@ -221,16 +222,24 @@ class InMemoryEngine:
     compiled-truth-boost scaffolding.
     """
 
-    def __init__(self, *, embedder: EmbeddingProvider | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        embedder: EmbeddingProvider | None = None,
+        wiki_root: Path | None = None,
+    ) -> None:
         self._pages: dict[PageKey, Page] = {}
         self._embeddings: dict[PageKey, list[float]] = {}
         self._embedder = embedder
+        self._wiki_root = wiki_root
         self._connected = False
 
     # ---------- Lifecycle ----------
 
     def connect(self) -> None:
         self._connected = True
+        if self._wiki_root is not None:
+            self._rehydrate_from_disk()
 
     def disconnect(self) -> None:
         self._connected = False
@@ -269,6 +278,8 @@ class InMemoryEngine:
         if self._embedder is not None:
             text = f"{page.frontmatter.title}\n{page.compiled_truth}"
             self._embeddings[key] = self._embedder.embed(text)
+        if self._wiki_root is not None:
+            self._write_page_to_disk(page, plane=plane, employee_id=employee_id)
 
     def delete_page(
         self,
@@ -279,8 +290,10 @@ class InMemoryEngine:
     ) -> None:
         _validate_plane_args(plane, employee_id)
         key = PageKey(plane=plane, slug=slug, employee_id=employee_id)
-        self._pages.pop(key, None)
+        page = self._pages.pop(key, None)
         self._embeddings.pop(key, None)
+        if self._wiki_root is not None and page is not None:
+            self._unlink_page_on_disk(page, plane=plane, employee_id=employee_id)
 
     def list_pages(
         self,
@@ -524,6 +537,103 @@ class InMemoryEngine:
             pages_by_domain=dict(by_domain),
             connected=self._connected,
         )
+
+    # ---------- Disk-persistence helpers (active when ``wiki_root`` is set) ----------
+
+    def _path_for(
+        self,
+        page_or_slug: Page | str,
+        *,
+        plane: Plane,
+        employee_id: str | None,
+        domain: str,
+    ) -> Path:
+        """Return the on-disk path for a page in the standard wiki layout.
+
+        Layout mirrors ``_bootstrap_engine_from_wiki`` in the firm-mode
+        server so a single ``wiki_root`` works for both modes:
+
+        - ``firm/<domain>/<slug>.md``
+        - ``personal/<employee_id>/<domain>/<slug>.md``
+        """
+        assert self._wiki_root is not None
+        slug = page_or_slug.slug if isinstance(page_or_slug, Page) else page_or_slug
+        if plane == "personal":
+            assert employee_id is not None
+            validate_employee_id(employee_id)
+            return self._wiki_root / "personal" / employee_id / domain / f"{slug}.md"
+        return self._wiki_root / "firm" / domain / f"{slug}.md"
+
+    def _write_page_to_disk(
+        self,
+        page: Page,
+        *,
+        plane: Plane,
+        employee_id: str | None,
+    ) -> None:
+        path = self._path_for(page, plane=plane, employee_id=employee_id, domain=page.domain)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write: temp file + rename so a crash mid-write can't leave
+        # a half-written page that the next ``connect()`` would mis-parse.
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(render_page(page), encoding="utf-8")
+        tmp.replace(path)
+
+    def _unlink_page_on_disk(
+        self,
+        page: Page,
+        *,
+        plane: Plane,
+        employee_id: str | None,
+    ) -> None:
+        path = self._path_for(page, plane=plane, employee_id=employee_id, domain=page.domain)
+        if path.exists():
+            path.unlink()
+
+    def _rehydrate_from_disk(self) -> None:
+        """Load any pages already on disk into the in-memory cache.
+
+        Mirrors ``_bootstrap_engine_from_wiki`` in ``mcp/server.py`` but
+        scoped to this engine instance. Symlink-safe: each candidate's
+        resolved path must live inside ``wiki_root.resolve()``.
+
+        Anything that doesn't match the expected layout is skipped silently;
+        operator files (READMEs, drafts) shouldn't crash startup.
+        """
+        assert self._wiki_root is not None
+        if not self._wiki_root.exists():
+            return
+        real_root = self._wiki_root.resolve()
+        for md_file in self._wiki_root.rglob("*.md"):
+            try:
+                resolved = md_file.resolve()
+            except OSError:
+                continue
+            if resolved != real_root and real_root not in resolved.parents:
+                continue
+            try:
+                rel = resolved.relative_to(real_root)
+            except ValueError:
+                continue
+            parts = rel.parts
+            try:
+                if parts[0] == "firm" and len(parts) == 3:
+                    plane: Plane = "firm"
+                    employee_id: str | None = None
+                elif parts[0] == "personal" and len(parts) == 4:
+                    plane = "personal"
+                    employee_id = validate_employee_id(parts[1])
+                else:
+                    continue
+                page = parse_page(md_file.read_text(encoding="utf-8"))
+                key = PageKey(plane=plane, slug=page.slug, employee_id=employee_id)
+                self._pages[key] = page
+                if self._embedder is not None:
+                    text = f"{page.frontmatter.title}\n{page.compiled_truth}"
+                    self._embeddings[key] = self._embedder.embed(text)
+            except Exception:
+                # Best-effort load — never crash on one bad file.
+                continue
 
     # ---------- Internals ----------
 

@@ -995,3 +995,112 @@ def test_permission_filter_viewer_without_policy_is_fail_closed() -> None:
     # policy alone (viewer_id=None): no enforcement, as before — internal callers
     # (tests, extraction) don't carry a viewer identity.
     assert engine.get_page("secret", plane="firm", policy=policy) is not None
+
+
+# ---------- InMemoryEngine wiki_root persistence ----------
+
+
+def test_engine_without_wiki_root_remains_in_memory(tmp_path: Path) -> None:
+    """Backwards-compat: no wiki_root → put_page touches no disk."""
+    from memory_mission.memory.engine import InMemoryEngine
+    from memory_mission.memory.pages import new_page
+
+    engine = InMemoryEngine()
+    engine.connect()
+    engine.put_page(
+        new_page(slug="foo", title="Foo", domain="people", compiled_truth="bar"),
+        plane="firm",
+    )
+    # No files anywhere — engine is RAM only.
+    assert list(tmp_path.iterdir()) == []
+    assert engine.get_page("foo", plane="firm") is not None
+
+
+def test_engine_with_wiki_root_persists_put_page_to_disk(tmp_path: Path) -> None:
+    from memory_mission.memory.engine import InMemoryEngine
+    from memory_mission.memory.pages import new_page
+
+    wiki_root = tmp_path / "wiki"
+    engine = InMemoryEngine(wiki_root=wiki_root)
+    engine.connect()
+    engine.put_page(
+        new_page(slug="acme-corp", title="Acme", domain="companies", compiled_truth="x"),
+        plane="firm",
+    )
+    written = wiki_root / "firm" / "companies" / "acme-corp.md"
+    assert written.exists()
+    assert "title: Acme" in written.read_text()
+
+
+def test_engine_with_wiki_root_persists_personal_pages_under_employee_id(tmp_path: Path) -> None:
+    from memory_mission.memory.engine import InMemoryEngine
+    from memory_mission.memory.pages import new_page
+
+    wiki_root = tmp_path / "wiki"
+    engine = InMemoryEngine(wiki_root=wiki_root)
+    engine.connect()
+    engine.put_page(
+        new_page(slug="my-decision", title="Pivot", domain="concepts", compiled_truth="..."),
+        plane="personal",
+        employee_id="alice",
+    )
+    written = wiki_root / "personal" / "alice" / "concepts" / "my-decision.md"
+    assert written.exists()
+
+
+def test_engine_rehydrates_pages_on_connect(tmp_path: Path) -> None:
+    """A fresh engine pointed at the same wiki_root sees pages written by a prior process."""
+    from memory_mission.memory.engine import InMemoryEngine
+    from memory_mission.memory.pages import new_page
+
+    wiki_root = tmp_path / "wiki"
+    engine_a = InMemoryEngine(wiki_root=wiki_root)
+    engine_a.connect()
+    engine_a.put_page(
+        new_page(slug="durable-fact", title="Durable", domain="people", compiled_truth="."),
+        plane="personal",
+        employee_id="bob",
+    )
+    engine_a.disconnect()
+
+    # Simulate a process restart — fresh engine instance, same wiki_root.
+    engine_b = InMemoryEngine(wiki_root=wiki_root)
+    engine_b.connect()
+    page = engine_b.get_page("durable-fact", plane="personal", employee_id="bob")
+    assert page is not None
+    assert page.frontmatter.title == "Durable"
+
+
+def test_engine_delete_page_unlinks_file_when_wiki_root_set(tmp_path: Path) -> None:
+    from memory_mission.memory.engine import InMemoryEngine
+    from memory_mission.memory.pages import new_page
+
+    wiki_root = tmp_path / "wiki"
+    engine = InMemoryEngine(wiki_root=wiki_root)
+    engine.connect()
+    engine.put_page(
+        new_page(slug="ephemeral", title="Tmp", domain="inbox", compiled_truth="."),
+        plane="firm",
+    )
+    written = wiki_root / "firm" / "inbox" / "ephemeral.md"
+    assert written.exists()
+
+    engine.delete_page("ephemeral", plane="firm")
+    assert not written.exists()
+    assert engine.get_page("ephemeral", plane="firm") is None
+
+
+def test_engine_rehydrate_skips_unknown_layout(tmp_path: Path) -> None:
+    """Operator files that don't match the layout are skipped, not crashing connect()."""
+    from memory_mission.memory.engine import InMemoryEngine
+
+    wiki_root = tmp_path / "wiki"
+    wiki_root.mkdir()
+    (wiki_root / "README.md").write_text("# operator notes")
+    (wiki_root / "firm").mkdir()
+    (wiki_root / "firm" / "stray.md").write_text("# not in a domain dir")
+
+    engine = InMemoryEngine(wiki_root=wiki_root)
+    engine.connect()  # Must not raise
+    # Nothing got loaded into the cache.
+    assert engine.list_pages() == []
