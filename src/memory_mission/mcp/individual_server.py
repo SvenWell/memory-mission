@@ -41,8 +41,10 @@ from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.mcp.individual_context import IndividualMcpContext
 from memory_mission.memory.engine import BrainEngine, InMemoryEngine
 from memory_mission.memory.schema import validate_employee_id
+from memory_mission.memory.tiers import Tier
 from memory_mission.personal_brain.personal_kg import PersonalKnowledgeGraph
 from memory_mission.personal_brain.working_pages import new_decision_page
+from memory_mission.synthesis.compile import compile_agent_context as _compile_synthesis
 from memory_mission.synthesis.individual_boot import (
     COMMITMENT_DESCRIPTION_PREDICATE,
     COMMITMENT_DUE_PREDICATE,
@@ -407,6 +409,99 @@ def query_entity(
     if as_of is None:
         triples = [t for t in triples if t.valid_to is None]
     return [t.model_dump(mode="json") for t in triples]
+
+
+# ---------- Agent-context compile / render (parity with firm-mode tools) ----------
+
+
+@mcp.tool()
+def compile_agent_context(
+    role: Annotated[
+        str,
+        "What the context is for — e.g. 'meeting-prep', 'email-draft'. "
+        "Stored on the output and threaded into the rendered header.",
+    ],
+    task: Annotated[
+        str,
+        "Free-form description of the specific task. Shown to the host-agent "
+        "LLM verbatim in the rendered context.",
+    ],
+    attendees: Annotated[
+        list[str],
+        "Stable entity IDs (``p_<token>`` / ``o_<token>``) or raw entity names "
+        "for the people / orgs the workflow is scoped to.",
+    ],
+    tier_floor: Annotated[
+        Tier | None,
+        "Restrict doctrine pages to this tier or higher (``decision`` / "
+        "``policy`` / ``doctrine`` / ``constitution``). ``None`` = no doctrine "
+        "section — most callers want at least ``policy``.",
+    ] = None,
+    as_of: Annotated[
+        date | None,
+        "Time-travel date. When supplied, KG triples are filtered to those "
+        "valid on that date. ``None`` = currently-true only.",
+    ] = None,
+) -> dict[str, Any]:
+    """Compile the distilled context package for a workflow task.
+
+    Parity-tool with the firm-mode ``compile_agent_context``: same
+    primitive (``synthesis.compile_agent_context``), scoped to the
+    individual user's personal plane. Returns the structured
+    ``AgentContext`` as JSON. For the rendered markdown form, call
+    ``render_agent_context`` with the same args.
+
+    Personal-mode specifics:
+    - ``plane="personal"`` and ``employee_id`` = this server's user_id
+      are baked in — individual mode is single-employee by definition.
+    - No ``viewer_id`` / ``policy`` filtering — the user IS the viewer
+      and the only one with access to their personal plane.
+    - The personal KG is read directly; doctrine pages come from the
+      same per-user wiki the engine is rooted at.
+    """
+    ctx = _ctx()
+    packet = _compile_synthesis(
+        role=role,
+        task=task,
+        attendees=attendees,
+        kg=ctx.kg._kg,  # noqa: SLF001 — PersonalKnowledgeGraph wraps an unscoped KG
+        engine=ctx.engine,
+        plane="personal",
+        employee_id=ctx.user_id,
+        tier_floor=tier_floor,
+        as_of=as_of,
+        identity_resolver=ctx.identity,
+    )
+    return packet.model_dump(mode="json")
+
+
+@mcp.tool()
+def render_agent_context(
+    role: Annotated[str, "Same as compile_agent_context."],
+    task: Annotated[str, "Same as compile_agent_context."],
+    attendees: Annotated[list[str], "Same as compile_agent_context."],
+    tier_floor: Tier | None = None,
+    as_of: date | None = None,
+) -> str:
+    """Compile and render the distilled context package as markdown.
+
+    Shortcut for ``compile_agent_context`` followed by ``.render()``.
+    Returns the markdown string ready to drop into a host-agent prompt.
+    """
+    ctx = _ctx()
+    packet = _compile_synthesis(
+        role=role,
+        task=task,
+        attendees=attendees,
+        kg=ctx.kg._kg,  # noqa: SLF001 — see compile_agent_context note above
+        engine=ctx.engine,
+        plane="personal",
+        employee_id=ctx.user_id,
+        tier_floor=tier_floor,
+        as_of=as_of,
+        identity_resolver=ctx.identity,
+    )
+    return packet.render()
 
 
 # ---------- Recall (evidence layer) ----------
