@@ -23,11 +23,21 @@ from memory_mission.eval.captures import (
     is_capture_enabled,
     record_eval_capture,
 )
+from memory_mission.eval.replay import (
+    REPLAYABLE_TOOLS,
+    ReplayCase,
+    ReplayResult,
+    replay_captures,
+)
 
 __all__ = [
     "CONTRIBUTOR_MODE_ENV",
     "EvalCapture",
     "EvalCapturesStore",
+    "REPLAYABLE_TOOLS",
+    "ReplayCase",
+    "ReplayResult",
     "is_capture_enabled",
     "record_eval_capture",
+    "replay_captures",
 ]

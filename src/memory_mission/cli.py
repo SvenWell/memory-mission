@@ -6,6 +6,7 @@ import typer
 
 from memory_mission import __version__
 from memory_mission.cli_log import log_app
+from memory_mission.eval.cli import eval_app
 
 app = typer.Typer(
     name="memory-mission",
@@ -14,6 +15,7 @@ app = typer.Typer(
 )
 
 app.add_typer(log_app, name="log", help="Inspect the observability audit trail.")
+app.add_typer(eval_app, name="eval", help="Capture + replay mm_* tool calls.")
 
 
 @app.command()

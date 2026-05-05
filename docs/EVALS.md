@@ -224,6 +224,62 @@ Recipe is section 2.1. Target: 30 labeled cases, precision ≥ 0.85, recall ≥ 
 
 ---
 
+## 5. Capture + replay (BrainBench-Real-style)
+
+Synthetic test corpora are easy to write but miss the queries agents actually make against the production palace. Memory Mission ships a capture-and-replay instrument modeled on GBrain's BrainBench-Real (v0.25.0) so we can detect retrieval-quality regressions on real-distribution queries instead of synthetic ones.
+
+### What's captured
+
+When `MM_CONTRIBUTOR_MODE=1` is set on an individual-mode MCP server, two read tools record their args + result signature + latency to a per-employee SQLite store at `<root>/personal/<user_id>/eval_captures.sqlite3`:
+
+- `mm_boot_context(task_hint, token_budget)` — captured for status / list reporting; **replay deferred** because `task_hint` is redacted on capture (free-text PII).
+- `mm_query_entity(name, direction, as_of)` — captured **and replayed faithfully**. All three args pass through PII scrubbing unchanged because they are the queries.
+
+Capture writes are wrapped in `try/except` so they can never break the tool path. The DB file is not created when capture is disabled.
+
+### Privacy posture
+
+Captures live in the same per-employee fence as `personal_kg.db` — read access to one means read access to the other (consistent with how observability JSONL events are scoped today). Free-text user content (`task_hint`, `query`, `summary`, `description`) is redacted to `{_redacted: True, length: N, hash: <16-char sha256>}`. Entity names, IDs, statuses, and dates pass through because they are the queries themselves; replay needs them and they already exist in the production KG.
+
+`MM_CONTRIBUTOR_MODE` is off by default. Operators opt in explicitly per session.
+
+### Usage
+
+```bash
+# Start an MCP session with capture on:
+MM_CONTRIBUTOR_MODE=1 python -m memory_mission.mcp.individual_server \
+    --root ~/.memory-mission --user-id sven
+
+# Inspect what's been captured:
+python -m memory_mission eval status --root ~/.memory-mission --user-id sven
+python -m memory_mission eval list   --root ~/.memory-mission --user-id sven --limit 20
+
+# Replay captured mm_query_entity calls at HEAD and diff signatures:
+python -m memory_mission eval replay --root ~/.memory-mission --user-id sven --limit 50
+
+# Show which captures differ from stored signatures:
+python -m memory_mission eval replay --root ~/.memory-mission --user-id sven --show-diffs
+```
+
+The `replay` command reports total / matches / differs / skipped, match rate when at least one capture replayed, mean latency delta when timings are present, and skip reasons grouped by cause (`tool_not_replayable:<name>`, `args_json_invalid`, `name_missing`, `direction_invalid`, `as_of_invalid`).
+
+### What this answers
+
+- **Did the substrate get better, worse, or stay the same after Keagan's last 5 commits?** Run `mm eval replay` before and after; compare match rate + latency delta.
+- **Which `mm_*` tools is the agent actually using, at what frequency?** `mm eval status` per-tool counts.
+- **What's the live distribution of `direction=` and `as_of=` across real queries?** Iterate `mm eval list` output.
+
+### What this does NOT answer
+
+- **Is the substrate semantically correct?** Match-rate detects regressions against a previous version; it does not say either version is "right." Combine with the per-component evals in section 2.
+- **Should `mm_boot_context` results have changed?** Replay is deferred for boot context until we resolve the `task_hint` privacy story (store unscrubbed in contributor mode? replay with `task_hint=None`? hash-bucketed comparison?). Captures still happen for visibility into call patterns.
+
+### When to actually use it
+
+Defer running replay routinely until either (a) substrate-change cadence stays high enough that silent regressions become a real risk, or (b) Hermes reports a quality complaint we can't trace. Until then this is a safety net, not a daily tool.
+
+---
+
 ## Sources
 
 1. Paul Iusztin, "Integrating AI Evals Into Your AI App" (AI Evals & Observability series, Part 1), DecodingAI. https://www.decodingai.com/p/integrating-ai-evals-into-your-ai-app
