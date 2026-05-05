@@ -46,6 +46,10 @@ Three places where external services plug in, all via the same pattern (Protocol
 
 Workflows live as `skills/<name>/SKILL.md` with YAML frontmatter (`name`, `version`, `triggers`, `tools`, `preconditions`, `constraints`, `category`) and a destinations-and-fences body. Registered in `skills/_index.md` (human-readable) + `skills/_manifest.jsonl` (machine-readable). The host-agent runtime loads them.
 
+### 11. Rereadability
+
+Evidence is preserved at the substrate level so the system can reread its own past under a newer ontology. The staging layer (`src/memory_mission/ingestion/staging.py`) keeps `<wiki_root>/staging/<plane>/.../<source>/.raw/<item_id>.json` — the connector response verbatim — alongside the extracted markdown. The MemPalace evidence layer (ADR-0004) keeps the same raw chunks indexed by drawer. Every triple in the KG carries `source_closet` + `source_file`; `triple_sources` is append-only and never overwrites. None of this is incidental: when the ontology evolves (a new predicate lands in `docs/OPERATING_STATE.md`, a fact bucket changes shape, a status enum gains a value), the substrate is structurally capable of replaying extraction over preserved evidence to produce facts under the new schema. The orchestration primitive (`re_extract_staged_item`, etc.) is signal-gated; the substrate itself is not.
+
 ---
 
 ## System diagram
@@ -344,7 +348,7 @@ Every layer logs to the same observability scope; every write to memory carries 
 | Models | Pydantic v2 | Typed, frozen, JSON round-trippable |
 | Validation | mypy --strict | On every source file |
 | Lint / format | ruff + ruff format | Fast, canonical |
-| Tests | pytest | 903 tests, every public surface |
+| Tests | pytest | 1045 tests, every public surface |
 | Runtime | Hermes Agent (primary), Ironclaw / OpenClaw (others) | Skills are markdown; any host that reads frontmatter can load them |
 
 ---
@@ -356,7 +360,7 @@ Every layer logs to the same observability scope; every write to memory carries 
 - **UI.** Vault is Obsidian-compatible; review surface is the host agent's chat. A dedicated web UI is a later layer.
 - **Automatic conflict resolution.** Coherence warnings are advisory or blocking — never auto-resolving. The reviewer decides.
 - **Vendor-specific product.** Concrete apps (Notion, Monday, Salesforce, Attio, Affinity, ...) are interchangeable connector bindings via `firm/systems.yaml`. Never hardcoded.
-- **Consumer / personal-memory product.** Tolaria, MemPalace, Rowboat, Supermemory serve that market. Memory Mission is the governed firm-memory substrate; personal-layer optimization is a substrate decision (ADR-0004 pending), not our product identity.
+- **Consumer / personal-memory product.** Tolaria, MemPalace, Rowboat, Supermemory serve that market. Memory Mission is the governed firm-memory substrate; personal-layer optimization is handled behind `PersonalMemoryBackend` (ADR-0004 active), not our product identity.
 
 ---
 

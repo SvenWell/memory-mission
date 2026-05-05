@@ -1,6 +1,28 @@
 # Memory Mission — Vision
 
-*A governed context engine for agents. Working synthesis, 2026-04-22. Update as the vision evolves.*
+*Operational memory for agents. Working synthesis, 2026-04-22; reframed 2026-05-05. Update as the vision evolves.*
+
+---
+
+## What this is
+
+Memory Mission is the layer that turns communication residue — meetings, messages, calls, emails, transcripts — into the **operating state** an agent acts from. Not "what was said," but "what's owed, what's blocked, what's at risk, what's unresolved, who's affected, what changed."
+
+Two principles do most of the work:
+
+**Ontology is the product surface.** The same sentence in a meeting can be a decision, a dependency, a customer commitment, a risk, an unresolved assumption — depending on who's looking and what changed later. The valuable work is not storing the sentence; it is deciding what kind of thing the sentence became in the world. The schema *is* the product. See [OPERATING_STATE.md](OPERATING_STATE.md) for the canonical predicate vocabulary.
+
+**Rereadability is load-bearing.** Evidence stays raw on disk so old interactions can be reinterpreted under a newer ontology. "That was just a complaint" can later become "this is the third churn signal." "Ship Friday if legal signs off" can be a legal dependency, a customer promise, a launch risk, and an unowned action item — simultaneously. See [ARCHITECTURE.md § Rereadability](ARCHITECTURE.md#11-rereadability) for the substrate that makes this possible.
+
+---
+
+## What this is not
+
+- **Not notes.** Tolaria, Obsidian, Notion serve the personal-vault use case.
+- **Not search.** Vector-store retrofits return passages; Memory Mission returns state.
+- **Not "AI remembers things about you."** Mem0, Honcho, SuperMemory's personal API serve that frame; Memory Mission sits one layer up.
+- **Not a meeting recorder.** Granola, Otter, Fireflies handle capture; Memory Mission is the substrate underneath that turns capture into operating state.
+- **Not a retrieval layer.** Files-first storage is converging across the field (SuperMemory SMFS, Tolaria, Rowboat, GBrain, MemPalace); the differentiator is governance + ontology, not the storage metaphor.
 
 ---
 
@@ -8,7 +30,7 @@
 
 The last two years produced broad agent capability — coding agents, chat agents, voice agents — and a brutal gap on the data layer beneath them. Firms running knowledge work (VCs, wealth managers, law firms, consultancies, corporate strategy teams) now watch their agents repeat questions across meetings, contradict what the firm decided last quarter, and misattribute facts across people who share a first name. The bottleneck is not raw intelligence. It is **governed institutional memory** that agents can read, write, and build on without corrupting what the firm actually believes.
 
-The personal-memory layer (Tolaria, Obsidian, second-brain vaults) is a solved-enough problem for individuals. The enterprise layer — shared truth, review gates, coherence across multiple knowledge workers — is not. Memory Mission is the **context engine for agents** at that layer: not a chat wrapper, not a vector-store retrofit, but a governed substrate that turns scattered firm knowledge into the trusted context an agent needs to be useful.
+The personal-memory layer (Tolaria, Obsidian, second-brain vaults) is a solved-enough problem for individuals. The enterprise layer — shared truth, review gates, coherence across multiple knowledge workers — is not. Memory Mission is **operational memory for agents** at that layer: not a chat wrapper, not a vector-store retrofit, but a governed substrate that turns scattered firm knowledge into the operating state an agent needs to be useful.
 
 ---
 
