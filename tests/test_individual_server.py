@@ -15,6 +15,7 @@ import pytest
 from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.mcp import individual_server as server
 from memory_mission.memory.engine import InMemoryEngine
+from memory_mission.observability import ObservabilityLogger, PersonalFactWriteEvent
 from memory_mission.personal_brain.personal_kg import PersonalKnowledgeGraph
 
 
@@ -293,6 +294,311 @@ def test_resolve_entity_resolves_typed_identifier(installed_ctx) -> None:
 def test_resolve_entity_rejects_empty_name(installed_ctx) -> None:
     with pytest.raises(ValueError, match="non-empty"):
         server.resolve_entity("   ")
+
+
+# ---------- record_facts / invalidate_fact ----------
+
+
+def test_record_facts_single_inserts_triple_with_provenance(installed_ctx, kg) -> None:
+    out = server.record_facts(
+        entity_name="Acme Corp",
+        entity_type="organization",
+        facts=[
+            {"predicate": "founded", "object": "2024", "confidence": 0.95},
+        ],
+        source_closet="conversational",
+        source_file="session-abc",
+    )
+    assert out["entity_id"] == "acme-corp"
+    assert out["created_entity"] is True
+    assert out["inserted_count"] == 1
+    assert out["corroborated_count"] == 0
+    assert out["facts"][0]["status"] == "inserted"
+
+    triples = kg.query_entity("acme-corp", direction="outgoing")
+    assert any(
+        t.predicate == "founded" and t.object == "2024" and t.source_closet == "conversational"
+        for t in triples
+    )
+
+
+def test_record_facts_upsert_re_run_corroborates_not_duplicates(installed_ctx, kg) -> None:
+    args = dict(
+        entity_name="Beta Fund",
+        entity_type="organization",
+        facts=[{"predicate": "located_in", "object": "London"}],
+        source_closet="conversational",
+        source_file="session-xyz",
+    )
+    out_a = server.record_facts(**args)
+    out_b = server.record_facts(**args)
+
+    assert out_a["facts"][0]["status"] == "inserted"
+    assert out_b["facts"][0]["status"] == "corroborated"
+
+    triples = [
+        t for t in kg.query_entity("beta-fund", direction="outgoing") if t.predicate == "located_in"
+    ]
+    # Corroboration → confidence bumps on the same triple, not a new row.
+    assert len(triples) == 1
+
+
+def test_record_facts_supersede_invalidates_prior(installed_ctx, kg) -> None:
+    server.record_facts(
+        entity_name="Carol",
+        entity_type="person",
+        facts=[{"predicate": "role", "object": "engineer"}],
+        source_closet="conversational",
+        source_file="s1",
+    )
+    out = server.record_facts(
+        entity_name="Carol",
+        entity_type="person",
+        facts=[{"predicate": "role", "object": "manager", "write_mode": "supersede"}],
+        source_closet="conversational",
+        source_file="s2",
+    )
+    assert out["facts"][0]["status"] == "superseded"
+    assert out["superseded_count"] == 1
+
+    triples = kg.query_entity("carol", direction="outgoing")
+    role_triples = [t for t in triples if t.predicate == "role"]
+    # One currently-true ('manager'), one invalidated ('engineer').
+    current = [t for t in role_triples if t.valid_to is None]
+    invalidated = [t for t in role_triples if t.valid_to is not None]
+    assert len(current) == 1 and current[0].object == "manager"
+    assert len(invalidated) == 1 and invalidated[0].object == "engineer"
+
+
+def test_record_facts_dry_run_does_not_write(installed_ctx, kg) -> None:
+    out = server.record_facts(
+        entity_name="Delta Co",
+        entity_type="organization",
+        facts=[{"predicate": "uses", "object": "rust"}],
+        source_closet="conversational",
+        source_file="s",
+        dry_run=True,
+    )
+    assert out["dry_run"] is True
+    assert out["facts"][0]["status"] == "would_insert"
+    # KG must remain empty for this entity.
+    assert kg.query_entity("delta-co", direction="outgoing") == []
+
+
+def test_record_facts_dry_run_with_identifiers_does_not_mutate_identity(
+    installed_ctx,
+    kg,
+) -> None:
+    out = server.record_facts(
+        entity_name="Delta Contact",
+        entity_type="person",
+        identifiers=["email:delta@example.com"],
+        facts=[{"predicate": "works_at", "object": "Delta Co"}],
+        source_closet="conversational",
+        source_file="s",
+        dry_run=True,
+    )
+    assert out["dry_run"] is True
+    assert out["created_entity"] is True
+    assert installed_ctx.identity.lookup("email:delta@example.com") is None
+    assert kg.query_entity("delta-contact", direction="both") == []
+
+
+def test_record_facts_create_if_missing_false_rejects_missing_entity(
+    installed_ctx,
+    kg,
+) -> None:
+    with pytest.raises(ValueError, match="create_if_missing"):
+        server.record_facts(
+            entity_name="Missing Co",
+            entity_type="organization",
+            facts=[{"predicate": "uses_tool", "object": "Linear"}],
+            source_closet="conversational",
+            source_file="s",
+            create_if_missing=False,
+        )
+    assert kg.query_entity("missing-co", direction="both") == []
+
+
+def test_record_facts_invalid_date_raises_before_mutating(installed_ctx, kg) -> None:
+    with pytest.raises(ValueError, match="valid_from"):
+        server.record_facts(
+            entity_name="Invalid Date Co",
+            entity_type="organization",
+            facts=[{"predicate": "founded", "object": "2024", "valid_from": "not-a-date"}],
+            source_closet="conversational",
+            source_file="s",
+        )
+    assert kg.query_entity("invalid-date-co", direction="both") == []
+
+
+def test_record_facts_object_typed_as_entity_registers_object_entity(installed_ctx, kg) -> None:
+    out = server.record_facts(
+        entity_name="Echo",
+        entity_type="person",
+        facts=[
+            {
+                "predicate": "works_at",
+                "object": {"value": "Foxtrot Inc", "type": "entity", "entity_type": "company"},
+            }
+        ],
+        source_closet="conversational",
+        source_file="s",
+    )
+    # Object should be slugified and registered.
+    assert out["facts"][0]["object"] == "foxtrot-inc"
+    assert out["facts"][0]["object_type"] == "entity"
+
+    # Verify the object entity exists in the entities table by querying.
+    # Easiest path: outgoing triples on "echo" should reference "foxtrot-inc".
+    triples = kg.query_entity("echo", direction="outgoing")
+    assert any(t.predicate == "works_at" and t.object == "foxtrot-inc" for t in triples)
+
+
+def test_record_facts_batched_writes_independently_track_outcomes(installed_ctx, kg) -> None:
+    out = server.record_facts(
+        entity_name="Gamma",
+        entity_type="person",
+        facts=[
+            {"predicate": "role", "object": "founder"},
+            {"predicate": "lives_in", "object": "Cape Town"},
+            {"predicate": "uses_tool", "object": "Linear"},
+        ],
+        source_closet="conversational",
+        source_file="s",
+    )
+    assert out["inserted_count"] == 3
+    assert len(out["facts"]) == 3
+    triples = kg.query_entity("gamma", direction="outgoing")
+    assert {(t.predicate, t.object) for t in triples} >= {
+        ("role", "founder"),
+        ("lives_in", "Cape Town"),
+        ("uses_tool", "Linear"),
+    }
+
+
+def test_record_facts_skips_fact_missing_predicate(installed_ctx) -> None:
+    out = server.record_facts(
+        entity_name="Hotel",
+        facts=[
+            {"object": "no predicate here"},
+            {"predicate": "valid", "object": "yes"},
+        ],
+        source_closet="conversational",
+        source_file="s",
+    )
+    statuses = [f["status"] for f in out["facts"]]
+    assert "skipped" in statuses
+    assert "inserted" in statuses
+    assert out["skipped_count"] == 1
+    assert out["inserted_count"] == 1
+
+
+def test_record_facts_clamps_out_of_range_confidence(installed_ctx) -> None:
+    out = server.record_facts(
+        entity_name="India",
+        facts=[{"predicate": "weird_metric", "object": "x", "confidence": 5.0}],
+        source_closet="conversational",
+        source_file="s",
+    )
+    assert out["facts"][0]["confidence"] == 1.0
+    assert any("clamped" in w for w in out["warnings"])
+
+
+def test_record_facts_requires_at_least_one_fact(installed_ctx) -> None:
+    with pytest.raises(ValueError, match="at least one fact"):
+        server.record_facts(
+            entity_name="Juliet",
+            facts=[],
+            source_closet="conversational",
+            source_file="s",
+        )
+
+
+def test_record_facts_requires_source(installed_ctx) -> None:
+    with pytest.raises(ValueError, match="source_closet"):
+        server.record_facts(
+            entity_name="Kilo",
+            facts=[{"predicate": "x", "object": "y"}],
+            source_closet="",
+            source_file="s",
+        )
+
+
+def test_invalidate_fact_marks_triple_ended(installed_ctx, kg) -> None:
+    kg.add_triple(
+        "lima",
+        "role",
+        "intern",
+        valid_from=date(2026, 1, 1),
+        source_closet="conversational",
+        source_file="s",
+    )
+    out = server.invalidate_fact(
+        subject="lima",
+        predicate="role",
+        object="intern",
+        rationale="user corrected: lima is now a full-time hire",
+        ended=date(2026, 4, 1),
+    )
+    assert out["invalidated_count"] == 1
+    triples = [t for t in kg.query_entity("lima", direction="outgoing") if t.predicate == "role"]
+    assert all(t.valid_to is not None for t in triples)
+    events = list(ObservabilityLogger(installed_ctx.observability_root, "sven").read_all())
+    event = next(e for e in events if e.event_type == "personal_fact_write")
+    assert isinstance(event, PersonalFactWriteEvent)
+    assert event.action == "invalidate_fact"
+    assert event.rationale == "user corrected: lima is now a full-time hire"
+
+
+def test_invalidate_fact_requires_rationale(installed_ctx) -> None:
+    with pytest.raises(ValueError, match="rationale"):
+        server.invalidate_fact(
+            subject="mike",
+            predicate="role",
+            object="x",
+            rationale="",
+        )
+
+
+def test_record_facts_event_time_falls_back_to_valid_from(installed_ctx, kg) -> None:
+    server.record_facts(
+        entity_name="November",
+        entity_type="person",
+        facts=[
+            {
+                "predicate": "met_with",
+                "object": "Oscar",
+                "event_time": "2026-03-15T14:30:00+00:00",
+            }
+        ],
+        source_closet="conversational",
+        source_file="s",
+    )
+    triples = [
+        t for t in kg.query_entity("november", direction="outgoing") if t.predicate == "met_with"
+    ]
+    assert len(triples) == 1
+    # event_time → valid_from when valid_from not explicit
+    assert triples[0].valid_from == date(2026, 3, 15)
+
+
+def test_record_facts_writes_source_quote_to_audit_log(installed_ctx) -> None:
+    server.record_facts(
+        entity_name="Quote Co",
+        entity_type="organization",
+        facts=[{"predicate": "uses_tool", "object": "Notion"}],
+        source_closet="conversational",
+        source_file="session-quote",
+        source_quote="Quote Co uses Notion for investment memos.",
+    )
+    events = list(ObservabilityLogger(installed_ctx.observability_root, "sven").read_all())
+    event = next(e for e in events if e.event_type == "personal_fact_write")
+    assert isinstance(event, PersonalFactWriteEvent)
+    assert event.action == "record_facts"
+    assert event.subject == "quote-co"
+    assert event.source_quote == "Quote Co uses Notion for investment memos."
+    assert event.source_file == "session-quote"
 
 
 # ---------- record_decision persistence ----------

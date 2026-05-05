@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import structlog
 import typer
@@ -42,6 +42,7 @@ from memory_mission.mcp.individual_context import IndividualMcpContext
 from memory_mission.memory.engine import BrainEngine, FileSystemEngine
 from memory_mission.memory.schema import validate_employee_id
 from memory_mission.memory.tiers import Tier
+from memory_mission.observability import ObservabilityLogger, PersonalFactWriteEvent
 from memory_mission.personal_brain.personal_kg import PersonalKnowledgeGraph
 from memory_mission.personal_brain.working_pages import new_decision_page
 from memory_mission.synthesis.compile import compile_agent_context as _compile_synthesis
@@ -164,6 +165,35 @@ def _validate_source(source_closet: str, source_file: str) -> None:
         raise ValueError("source_closet is required (use 'conversational' if no document)")
     if not source_file or not source_file.strip():
         raise ValueError("source_file is required (use the session id if conversational)")
+
+
+def _audit_personal_fact_write(
+    ctx: IndividualMcpContext,
+    *,
+    action: Literal["record_facts", "invalidate_fact"],
+    subject: str,
+    facts: list[dict[str, object]],
+    outcome: dict[str, object],
+    source_closet: str | None = None,
+    source_file: str | None = None,
+    source_quote: str | None = None,
+    rationale: str | None = None,
+) -> None:
+    logger = ObservabilityLogger(ctx.observability_root, firm_id=ctx.user_id)
+    logger.write(
+        PersonalFactWriteEvent(
+            firm_id=ctx.user_id,
+            employee_id=ctx.user_id,
+            action=action,
+            subject=subject,
+            source_closet=source_closet,
+            source_file=source_file,
+            source_quote=source_quote,
+            rationale=rationale,
+            facts=facts,
+            outcome=outcome,
+        )
+    )
 
 
 # ---------- Boot context ----------
@@ -382,6 +412,414 @@ def record_decision(
         "title": title,
         "decided_at": decided_at.isoformat() if decided_at else None,
     }
+
+
+# ---------- Structured fact write surface ----------
+
+
+_OBJECT_TYPE_TO_ENTITY_KIND: dict[str, str] = {
+    "person": "person",
+    "organization": "organization",
+    "company": "organization",
+    "firm": "organization",
+    "fund": "organization",
+    "team": "organization",
+    "project": "project",
+    "product": "product",
+    "tool": "tool",
+    "topic": "topic",
+    "deal": "deal",
+}
+
+
+def _slugify(s: str) -> str:
+    """Kebab-case a free-text name. Conservative — only alnum + hyphen."""
+    import re as _re
+
+    s = (s or "").strip().lower()
+    s = _re.sub(r"[^\w\s-]", "", s, flags=_re.UNICODE)
+    s = _re.sub(r"[\s_]+", "-", s)
+    s = _re.sub(r"-+", "-", s).strip("-")
+    return s or "unnamed"
+
+
+def _entity_exists(ctx: IndividualMcpContext, entity_id: str) -> bool:
+    """Best-effort entity existence check without creating anything."""
+    raw_kg = getattr(ctx.kg, "_kg", None)
+    get_entity = getattr(raw_kg, "get_entity", None)
+    if callable(get_entity) and get_entity(entity_id) is not None:
+        return True
+    return bool(ctx.kg.query_entity(entity_id, direction="both"))
+
+
+def _resolve_subject(
+    *,
+    entity_name: str,
+    entity_type: str,
+    identifiers: list[str],
+    properties: dict[str, str] | None,
+    ctx: IndividualMcpContext,
+    create_if_missing: bool,
+    dry_run: bool,
+) -> tuple[str, bool]:
+    """Resolve an entity to its canonical id.
+
+    Returns ``(canonical_id, created)``. When identifiers are supplied,
+    routes through ``IdentityResolver.resolve`` so the same person reached
+    via different channels collapses to one stable id. When no identifiers,
+    falls back to a slug derived from ``entity_name``.
+    """
+    if identifiers:
+        kind = _OBJECT_TYPE_TO_ENTITY_KIND.get(entity_type, "person")
+        resolver_kind = "organization" if kind == "organization" else "person"
+        existing_ids: set[str] = set()
+        for ident in identifiers:
+            existing = ctx.identity.lookup(ident)
+            if existing is not None:
+                existing_ids.add(existing)
+        if len(existing_ids) > 1:
+            raise ValueError("identifiers resolve to multiple existing identities")
+        existing = next(iter(existing_ids), None)
+        if existing is None:
+            if not create_if_missing:
+                raise ValueError("entity not found and create_if_missing is false")
+            if dry_run:
+                return (_slugify(entity_name), True)
+        elif dry_run:
+            return existing, False
+        canonical_id = ctx.identity.resolve(
+            set(identifiers),
+            entity_type=resolver_kind,  # type: ignore[arg-type]
+            canonical_name=_slugify(entity_name),
+        )
+        created = existing is None
+    else:
+        canonical_id = _slugify(entity_name)
+        existing_entity = _entity_exists(ctx, canonical_id)
+        if not existing_entity and not create_if_missing:
+            raise ValueError("entity not found and create_if_missing is false")
+        created = not existing_entity
+
+    if not dry_run:
+        ctx.kg.add_entity(
+            canonical_id,
+            entity_type=entity_type or "unknown",
+            properties=properties or {},
+        )
+    return canonical_id, created
+
+
+def _normalise_object(
+    raw: Any,
+    *,
+    ctx: IndividualMcpContext,
+    dry_run: bool,
+) -> tuple[str, str]:
+    """Normalise a fact's ``object`` to ``(slug_or_literal, object_type)``.
+
+    The wire shape accepts either a bare string (treated as ``literal``) or
+    a dict with ``value`` + ``type`` + optional ``entity_type``. When
+    ``type == "entity"``, ensures ``add_entity`` is called for the object
+    side so subsequent queries against it return rows from the entities table.
+    """
+    if isinstance(raw, str):
+        return raw, "literal"
+    if not isinstance(raw, dict):
+        raise ValueError(f"object must be string or dict, got {type(raw).__name__}")
+    value = str(raw.get("value", "")).strip()
+    if not value:
+        raise ValueError("object.value is required")
+    obj_type = str(raw.get("type", "literal")).lower()
+    if obj_type == "entity":
+        slug = _slugify(value)
+        if not dry_run:
+            ctx.kg.add_entity(
+                slug,
+                entity_type=raw.get("entity_type", "unknown"),
+                properties=raw.get("properties") or {},
+            )
+        return slug, obj_type
+    return value, obj_type
+
+
+def _parse_iso_date(value: Any, *, field_name: str) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    s = str(value).strip()
+    try:
+        return date.fromisoformat(s.split("T", 1)[0])
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO date or datetime") from exc
+
+
+@mcp.tool()
+def record_facts(
+    entity_name: Annotated[
+        str,
+        "Free-text entity name. Will be canonicalised via IdentityResolver "
+        "when ``identifiers`` is provided; otherwise stored as a slug.",
+    ],
+    facts: Annotated[
+        list[dict[str, Any]],
+        "List of fact dicts. Each must have ``predicate`` and ``object``. "
+        "Optional: ``confidence`` (0-1, default 0.85), ``valid_from``/``valid_to`` "
+        "(ISO dates), ``event_time`` (ISO datetime — used as ``valid_from`` if "
+        "``valid_from`` not given), ``write_mode`` (``upsert`` (default) or "
+        "``supersede``). ``object`` may be a bare string or "
+        "``{value, type, entity_type?}`` — when ``type=='entity'`` the object "
+        "side is registered in the entities table too.",
+    ],
+    source_closet: Annotated[
+        str,
+        "Provenance closet — e.g. 'granola', 'gmail', 'conversational', 'whatsapp'.",
+    ],
+    source_file: Annotated[
+        str,
+        "Provenance file id — meeting/message id, or session id when source_closet is "
+        "'conversational'.",
+    ],
+    entity_type: Annotated[str, "Entity kind: person, organization, project, etc."] = "unknown",
+    identifiers: Annotated[
+        list[str] | None,
+        "Typed identifiers (``email:foo@bar.com``, ``linkedin:...``) — bind the "
+        "entity to one canonical id across channels.",
+    ] = None,
+    properties: Annotated[
+        dict[str, str] | None,
+        "Extra entity properties to register (role, location, founded date, etc.).",
+    ] = None,
+    create_if_missing: bool = True,
+    source_quote: Annotated[
+        str | None,
+        "Optional verbatim excerpt that supports the facts; recorded for audit.",
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        "When true, return what would be written without touching the KG.",
+    ] = False,
+) -> dict[str, Any]:
+    """Record structured facts about an entity on the personal plane.
+
+    The single agent-callable entry point for "the user told me X about Y".
+    Walks the framework's existing primitives (IdentityResolver,
+    add_entity, corroborate / add_triple, invalidate) so callers get
+    canonicalisation, idempotency, and provenance for free.
+
+    For each fact:
+
+    - ``upsert`` (default) — if the same ``(subject, predicate, object)`` is
+      currently true, ``corroborate`` (Noisy-OR confidence bump + appended
+      provenance). Otherwise ``add_triple``.
+    - ``supersede`` — invalidate any currently-true triple with the same
+      ``(subject, predicate)`` and a different object, then ``add_triple`` the
+      new value. For mutable facts like ``role`` or ``works_at``.
+
+    Returns a per-fact outcome list plus aggregate counts. With ``dry_run``,
+    no writes happen — useful for previewing what an agent would change.
+    """
+    ctx = _ctx()
+    _validate_source(source_closet, source_file)
+    if not facts:
+        raise ValueError("at least one fact required")
+    for raw_fact in facts:
+        if isinstance(raw_fact, dict):
+            _parse_iso_date(raw_fact.get("valid_from"), field_name="valid_from")
+            _parse_iso_date(raw_fact.get("valid_to"), field_name="valid_to")
+            _parse_iso_date(raw_fact.get("event_time"), field_name="event_time")
+
+    subject, created_entity = _resolve_subject(
+        entity_name=entity_name,
+        entity_type=entity_type,
+        identifiers=list(identifiers or []),
+        properties=properties,
+        ctx=ctx,
+        create_if_missing=create_if_missing,
+        dry_run=dry_run,
+    )
+
+    outcomes: list[dict[str, Any]] = []
+    inserted = corroborated = superseded = skipped = 0
+    warnings: list[str] = []
+
+    for raw_fact in facts:
+        if not isinstance(raw_fact, dict):
+            outcomes.append({"status": "skipped", "reason": "fact must be a dict"})
+            skipped += 1
+            continue
+
+        predicate = str(raw_fact.get("predicate", "")).strip()
+        if not predicate:
+            outcomes.append({"status": "skipped", "reason": "missing predicate"})
+            skipped += 1
+            continue
+
+        try:
+            obj_value, obj_type = _normalise_object(
+                raw_fact.get("object"),
+                ctx=ctx,
+                dry_run=dry_run,
+            )
+        except ValueError as exc:
+            outcomes.append({"predicate": predicate, "status": "skipped", "reason": str(exc)})
+            skipped += 1
+            continue
+
+        confidence = float(raw_fact.get("confidence", 0.85))
+        if not 0.0 <= confidence <= 1.0:
+            warnings.append(f"clamped confidence {confidence!r} to [0,1]")
+            confidence = max(0.0, min(1.0, confidence))
+
+        valid_from = _parse_iso_date(raw_fact.get("valid_from"), field_name="valid_from")
+        if valid_from is None and raw_fact.get("event_time"):
+            valid_from = _parse_iso_date(raw_fact.get("event_time"), field_name="event_time")
+        valid_to = _parse_iso_date(raw_fact.get("valid_to"), field_name="valid_to")
+        write_mode = str(raw_fact.get("write_mode", "upsert")).lower()
+
+        outcome: dict[str, Any] = {
+            "predicate": predicate,
+            "object": obj_value,
+            "object_type": obj_type,
+            "confidence": confidence,
+        }
+
+        if dry_run:
+            existing = ctx.kg.find_current_triple(subject, predicate, obj_value)
+            outcome["status"] = "would_corroborate" if existing else "would_insert"
+            outcomes.append(outcome)
+            continue
+
+        if write_mode == "supersede":
+            invalidated = 0
+            for prior in ctx.kg.query_entity(subject, direction="outgoing"):
+                if (
+                    prior.predicate == predicate
+                    and prior.object != obj_value
+                    and prior.valid_to is None
+                ):
+                    invalidated += ctx.kg.invalidate(
+                        prior.subject, prior.predicate, prior.object, ended=valid_from
+                    )
+            ctx.kg.add_triple(
+                subject,
+                predicate,
+                obj_value,
+                valid_from=valid_from,
+                valid_to=valid_to,
+                confidence=confidence,
+                source_closet=source_closet,
+                source_file=source_file,
+            )
+            outcome["status"] = "superseded" if invalidated else "inserted"
+            outcome["invalidated_priors"] = invalidated
+            if invalidated:
+                superseded += 1
+            else:
+                inserted += 1
+        else:
+            existing = ctx.kg.corroborate(
+                subject,
+                predicate,
+                obj_value,
+                confidence=confidence,
+                source_closet=source_closet,
+                source_file=source_file,
+            )
+            if existing is not None:
+                outcome["status"] = "corroborated"
+                corroborated += 1
+            else:
+                ctx.kg.add_triple(
+                    subject,
+                    predicate,
+                    obj_value,
+                    valid_from=valid_from,
+                    valid_to=valid_to,
+                    confidence=confidence,
+                    source_closet=source_closet,
+                    source_file=source_file,
+                )
+                outcome["status"] = "inserted"
+                inserted += 1
+
+        outcomes.append(outcome)
+
+    result = {
+        "entity_id": subject,
+        "created_entity": created_entity,
+        "facts": outcomes,
+        "inserted_count": inserted,
+        "corroborated_count": corroborated,
+        "superseded_count": superseded,
+        "skipped_count": skipped,
+        "warnings": warnings,
+        "dry_run": dry_run,
+    }
+    if not dry_run:
+        _audit_personal_fact_write(
+            ctx,
+            action="record_facts",
+            subject=subject,
+            source_closet=source_closet,
+            source_file=source_file,
+            source_quote=source_quote,
+            facts=outcomes,
+            outcome={
+                "inserted_count": inserted,
+                "corroborated_count": corroborated,
+                "superseded_count": superseded,
+                "skipped_count": skipped,
+                "warnings": warnings,
+            },
+        )
+    return result
+
+
+@mcp.tool()
+def invalidate_fact(
+    subject: Annotated[str, "Entity name / canonical id whose triple is being invalidated."],
+    predicate: Annotated[str, "Predicate of the triple to invalidate."],
+    object: Annotated[str, "Object of the triple to invalidate (must match exactly)."],
+    rationale: Annotated[
+        str,
+        "Why this fact is being invalidated. Required — recorded for audit.",
+    ],
+    ended: date | None = None,
+) -> dict[str, Any]:
+    """Invalidate a currently-true triple. For corrections.
+
+    Sets ``valid_to`` on the triple so it stops appearing in
+    ``query_entity`` and friends, but keeps the row + provenance for the
+    audit trail. ``rationale`` is required and surfaced in observability.
+    """
+    ctx = _ctx()
+    if not rationale or not rationale.strip():
+        raise ValueError("rationale is required for invalidate_fact")
+    n = ctx.kg.invalidate(subject, predicate, object, ended=ended)
+    result = {
+        "subject": subject,
+        "predicate": predicate,
+        "object": object,
+        "invalidated_count": n,
+        "rationale": rationale,
+        "ended": ended.isoformat() if ended else None,
+    }
+    _audit_personal_fact_write(
+        ctx,
+        action="invalidate_fact",
+        subject=subject,
+        rationale=rationale,
+        facts=[
+            {
+                "predicate": predicate,
+                "object": object,
+                "ended": ended.isoformat() if ended else None,
+            }
+        ],
+        outcome={"invalidated_count": n},
+    )
+    return result
 
 
 # ---------- Entity queries ----------
