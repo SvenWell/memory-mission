@@ -853,6 +853,68 @@ def test_ingest_organization_inferred_from_company_type(
     assert saved.facts[0].entity_name.startswith("o_")  # type: ignore[union-attr]
 
 
+# ---------- EXTRACTION_PROMPT contract tests ----------
+
+
+def test_extraction_prompt_disallows_mention_only_identity() -> None:
+    """The prompt must explicitly forbid mention-only identity facts.
+
+    The framework saw real-world noise floors of ~46% identity facts
+    in personal-source extractions, of which ~72% were empty-properties
+    mention-only ('Verascient is a company' derived from a sender
+    domain or subject line). The prompt now forbids this shape — keep
+    that contract enforced so a regression to the loose pattern fails
+    here rather than at the customer.
+    """
+    from memory_mission.extraction import EXTRACTION_PROMPT
+
+    # The anti-patterns section must exist.
+    assert "Anti-patterns" in EXTRACTION_PROMPT, (
+        "EXTRACTION_PROMPT must include an Anti-patterns section"
+    )
+    # Specific anti-patterns we care about.
+    for forbidden_pattern in (
+        "Identity-by-mention",
+        "Identity-by-domain",
+        "Identity-by-meeting-title",
+    ):
+        assert forbidden_pattern in EXTRACTION_PROMPT, (
+            f"EXTRACTION_PROMPT must call out the {forbidden_pattern!r} anti-pattern"
+        )
+
+
+def test_extraction_prompt_worked_example_has_no_bare_identity_facts() -> None:
+    """The worked example trains the LLM by demonstration.
+
+    A worked example with empty-properties identity facts teaches the
+    model that mention-only identity is acceptable — the same loose
+    behaviour we tightened in the rules. Keep the worked example
+    consistent with the rules: every identity fact in the example must
+    carry either non-empty properties or non-empty identifiers (or
+    not appear at all).
+    """
+    import re
+
+    from memory_mission.extraction import EXTRACTION_PROMPT
+
+    # Find every \"kind\": \"identity\" block in the prompt's example JSON
+    # and check the surrounding properties dict isn't empty.
+    pattern = re.compile(
+        r'"kind":\s*"identity".*?"properties":\s*(\{[^{}]*\})',
+        re.DOTALL,
+    )
+    matches = pattern.findall(EXTRACTION_PROMPT)
+    for properties_block in matches:
+        # An empty properties dict is exactly what we want to forbid in
+        # demonstrations. Allow whitespace but not zero-key dicts.
+        stripped = properties_block.strip().replace(" ", "").replace("\\n", "")
+        assert stripped != "{}", (
+            "Worked example contains an identity fact with empty properties — "
+            "this teaches the model that mention-only identity facts are valid. "
+            "Either remove the bare identity fact or give it real properties."
+        )
+
+
 # ---------- External-source-id length boundary ----------
 
 
