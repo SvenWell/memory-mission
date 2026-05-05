@@ -356,6 +356,30 @@ class KnowledgeGraph:
 
     # ---------- Entity ops ----------
 
+    def _ensure_entity_exists(self, name: str, *, cursor: Any) -> None:
+        """Insert ``name`` into the entities table if absent — idempotent.
+
+        Used by ``add_triple`` to guarantee every triple's subject + object
+        appears as a row in ``entities``, so ``get_entity(name)`` returns
+        a real row rather than ``None`` for any name reachable through a
+        triple. ``INSERT OR IGNORE`` so existing rows (which may carry
+        proper ``entity_type``/``properties`` from a prior ``add_entity``
+        call) are NOT overwritten.
+
+        Empty / whitespace-only names are skipped — the caller is
+        passing a literal value (e.g. a date string or free-form quote)
+        rather than a real entity reference.
+        """
+        if not name or not name.strip():
+            return
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO entities (name, entity_type, properties, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (name, "unknown", "{}", _utcnow_iso()),
+        )
+
     def add_entity(
         self,
         name: str,
@@ -449,6 +473,22 @@ class KnowledgeGraph:
         )
         now = _utcnow_iso()
         with self._tx() as cur:
+            # Auto-register the SUBJECT so ``get_entity(subject)`` returns
+            # a real row rather than ``None`` for any subject reachable
+            # through a triple. Idempotent — a prior ``add_entity`` call's
+            # richer ``entity_type``/``properties`` are preserved (see
+            # ``_ensure_entity_exists``).
+            #
+            # The OBJECT is intentionally NOT auto-registered: triple objects
+            # routinely carry literal values (status enums, dates, free-text
+            # quotes) that aren't entities. The framework's convention is
+            # that an entity is a name that appears as a subject at least
+            # once; auto-registering objects would pollute the entities
+            # table with literals (e.g. ``portfolio`` from
+            # ``(deal-1, lifecycle_status, portfolio)``). Real entity
+            # references that ALSO have facts about them get registered
+            # the moment they appear as a subject in any triple.
+            self._ensure_entity_exists(subject, cursor=cur)
             cur.execute(
                 """
                 INSERT INTO triples

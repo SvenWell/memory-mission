@@ -394,7 +394,22 @@ def query_entity(
     """Currently-true triples about ``name`` on the personal plane.
 
     ``direction``: ``outgoing`` / ``incoming`` / ``both``.
+
+    When two or more currently-true triples share the same
+    ``(subject, predicate)`` but disagree on ``object`` (e.g. two
+    ``works_at`` triples with different employers), each conflicting
+    triple is annotated with a ``conflicts_with`` field listing the
+    other live objects + their confidences + provenance. This lets
+    the agent reason about contradictions on read instead of treating
+    equal-rank triples as independent answers.
+
+    The annotation is additive — existing callers iterating the returned
+    list see the same triple shape they always have, plus an optional
+    ``conflicts_with`` key when relevant. ADR-0001 corroboration is
+    NOT a conflict (same subject + predicate + object) and never surfaces.
     """
+    from collections import defaultdict
+
     ctx = _ctx()
     if direction not in {"outgoing", "incoming", "both"}:
         raise ValueError("direction must be one of: outgoing, incoming, both")
@@ -408,7 +423,28 @@ def query_entity(
     # full history.
     if as_of is None:
         triples = [t for t in triples if t.valid_to is None]
-    return [t.model_dump(mode="json") for t in triples]
+
+    # Group by (subject, predicate) to detect intra-result contradictions.
+    groups: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    for t in triples:
+        groups[(t.subject, t.predicate)].append(t)
+
+    out: list[dict[str, Any]] = []
+    for t in triples:
+        payload = t.model_dump(mode="json")
+        peers = [other for other in groups[(t.subject, t.predicate)] if other.object != t.object]
+        if peers:
+            payload["conflicts_with"] = [
+                {
+                    "object": other.object,
+                    "confidence": other.confidence,
+                    "source_closet": other.source_closet,
+                    "source_file": other.source_file,
+                }
+                for other in sorted(peers, key=lambda x: -x.confidence)
+            ]
+        out.append(payload)
+    return out
 
 
 # ---------- Agent-context compile / render (parity with firm-mode tools) ----------
@@ -608,12 +644,32 @@ def serve(
     mcp.run()
 
 
+def _configure_stdio_safe_logging() -> None:  # pragma: no cover - CLI bootstrap
+    """Pin structlog to stderr.
+
+    MCP stdio reserves stdout for JSON-RPC framing. The default
+    PrintLoggerFactory writes to stdout, which would poison the
+    protocol on the very first emitted log line and cause strict MCP
+    clients to refuse the connection. Reconfigure before any structlog
+    call could land.
+    """
+    import sys
+
+    import structlog
+
+    structlog.configure(
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+
+
 def app() -> None:  # pragma: no cover - CLI entrypoint
+    _configure_stdio_safe_logging()
     cli()
 
 
 __all__ = [
     "IndividualMcpContext",
+    "_configure_stdio_safe_logging",
     "app",
     "initialize",
     "initialize_from_handles",
@@ -621,3 +677,7 @@ __all__ = [
     "mcp",
     "reset",
 ]
+
+
+if __name__ == "__main__":
+    app()
