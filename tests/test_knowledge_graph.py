@@ -1125,3 +1125,67 @@ def test_corroborate_accepts_matching_scope(kg: KnowledgeGraph) -> None:
     assert updated is not None
     assert updated.scope == "partner-only"
     assert updated.corroboration_count == 1
+
+
+# ---------- Auto-register entities on add_triple ----------
+
+
+def test_add_triple_auto_registers_subject(kg: KnowledgeGraph) -> None:
+    """Subject must appear in the entities table after add_triple."""
+    kg.add_triple("alice", "knows", "bob")
+    alice = kg.get_entity("alice")
+    assert alice is not None
+    assert alice.entity_type == "unknown"
+    assert alice.properties == {}
+
+
+def test_add_triple_does_not_auto_register_object(kg: KnowledgeGraph) -> None:
+    """Triple objects can be literals (status enums, dates) — not auto-registered.
+
+    The framework's convention is that an entity is a name that appears
+    as a subject at least once. Object-only references (e.g. portfolio
+    in (deal, lifecycle_status, portfolio)) stay out of the entities
+    table to avoid polluting it with literal values.
+    """
+    kg.add_triple("alice", "knows", "bob")
+    # Subject auto-registers; object does NOT.
+    assert kg.get_entity("bob") is None
+    # If bob ever becomes a subject, that's when it lands in entities.
+    kg.add_triple("bob", "role", "engineer")
+    assert kg.get_entity("bob") is not None
+
+
+def test_add_triple_does_not_overwrite_existing_entity_metadata(kg: KnowledgeGraph) -> None:
+    """INSERT OR IGNORE — a prior add_entity call's richer metadata is preserved."""
+    kg.add_entity("acme", entity_type="company", properties={"industry": "fintech"})
+    kg.add_triple("acme", "founded", "2024")
+
+    acme = kg.get_entity("acme")
+    assert acme is not None
+    assert acme.entity_type == "company"
+    assert acme.properties == {"industry": "fintech"}
+
+
+def test_add_triple_subject_auto_register_handles_normal_names(kg: KnowledgeGraph) -> None:
+    """Subject-side auto-register works for normal names; objects are literals."""
+    kg.add_triple("charlie", "noted", "some free-text observation")
+    assert kg.get_entity("charlie") is not None
+    # The object is a literal sentence; it must NOT pollute the entities table.
+    assert kg.get_entity("some free-text observation") is None
+
+
+def test_add_triple_repeat_is_idempotent_on_subject_entity(kg: KnowledgeGraph) -> None:
+    """Calling add_triple twice with the same subject does not duplicate the entity row."""
+    kg.add_triple("dana", "reports_to", "eli")
+    kg.add_triple("dana", "mentors", "frank")  # different predicate + object, same subject
+    # Subject registered exactly once via INSERT OR IGNORE.
+    n_dana = kg._conn.execute("SELECT COUNT(*) FROM entities WHERE name=?", ("dana",)).fetchone()[0]
+    assert n_dana == 1
+    # Object-side names are NOT auto-registered (literals stay out of entities).
+    assert (
+        kg._conn.execute("SELECT COUNT(*) FROM entities WHERE name=?", ("eli",)).fetchone()[0] == 0
+    )
+    assert (
+        kg._conn.execute("SELECT COUNT(*) FROM entities WHERE name=?", ("frank",)).fetchone()[0]
+        == 0
+    )

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import structlog
 import typer
@@ -39,10 +39,13 @@ from mcp.server.fastmcp import FastMCP
 
 from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.mcp.individual_context import IndividualMcpContext
-from memory_mission.memory.engine import BrainEngine, InMemoryEngine
+from memory_mission.memory.engine import BrainEngine, FileSystemEngine
 from memory_mission.memory.schema import validate_employee_id
+from memory_mission.memory.tiers import Tier
+from memory_mission.observability import ObservabilityLogger, PersonalFactWriteEvent
 from memory_mission.personal_brain.personal_kg import PersonalKnowledgeGraph
 from memory_mission.personal_brain.working_pages import new_decision_page
+from memory_mission.synthesis.compile import compile_agent_context as _compile_synthesis
 from memory_mission.synthesis.individual_boot import (
     COMMITMENT_DESCRIPTION_PREDICATE,
     COMMITMENT_DUE_PREDICATE,
@@ -98,7 +101,9 @@ def initialize(
         employee_id=user_id,
         identity_resolver=identity,
     )
-    engine: BrainEngine = InMemoryEngine()
+    # FileSystemEngine makes record_decision durable across short-lived
+    # Hermes/Codex MCP subprocesses while keeping the BrainEngine Protocol.
+    engine: BrainEngine = FileSystemEngine(root)
     engine.connect()
 
     obs_root = root / ".observability"
@@ -160,6 +165,35 @@ def _validate_source(source_closet: str, source_file: str) -> None:
         raise ValueError("source_closet is required (use 'conversational' if no document)")
     if not source_file or not source_file.strip():
         raise ValueError("source_file is required (use the session id if conversational)")
+
+
+def _audit_personal_fact_write(
+    ctx: IndividualMcpContext,
+    *,
+    action: Literal["record_facts", "invalidate_fact"],
+    subject: str,
+    facts: list[dict[str, object]],
+    outcome: dict[str, object],
+    source_closet: str | None = None,
+    source_file: str | None = None,
+    source_quote: str | None = None,
+    rationale: str | None = None,
+) -> None:
+    logger = ObservabilityLogger(ctx.observability_root, firm_id=ctx.user_id)
+    logger.write(
+        PersonalFactWriteEvent(
+            firm_id=ctx.user_id,
+            employee_id=ctx.user_id,
+            action=action,
+            subject=subject,
+            source_closet=source_closet,
+            source_file=source_file,
+            source_quote=source_quote,
+            rationale=rationale,
+            facts=facts,
+            outcome=outcome,
+        )
+    )
 
 
 # ---------- Boot context ----------
@@ -409,6 +443,15 @@ def _slugify(s: str) -> str:
     return s or "unnamed"
 
 
+def _entity_exists(ctx: IndividualMcpContext, entity_id: str) -> bool:
+    """Best-effort entity existence check without creating anything."""
+    raw_kg = getattr(ctx.kg, "_kg", None)
+    get_entity = getattr(raw_kg, "get_entity", None)
+    if callable(get_entity) and get_entity(entity_id) is not None:
+        return True
+    return bool(ctx.kg.query_entity(entity_id, direction="both"))
+
+
 def _resolve_subject(
     *,
     entity_name: str,
@@ -429,16 +472,21 @@ def _resolve_subject(
     if identifiers:
         kind = _OBJECT_TYPE_TO_ENTITY_KIND.get(entity_type, "person")
         resolver_kind = "organization" if kind == "organization" else "person"
-        existing = None
+        existing_ids: set[str] = set()
         for ident in identifiers:
-            try:
-                existing = ctx.identity.lookup(ident)
-            except Exception:
-                existing = None
+            existing = ctx.identity.lookup(ident)
             if existing is not None:
-                break
-        if existing is None and not create_if_missing:
-            return (_slugify(entity_name), False)
+                existing_ids.add(existing)
+        if len(existing_ids) > 1:
+            raise ValueError("identifiers resolve to multiple existing identities")
+        existing = next(iter(existing_ids), None)
+        if existing is None:
+            if not create_if_missing:
+                raise ValueError("entity not found and create_if_missing is false")
+            if dry_run:
+                return (_slugify(entity_name), True)
+        elif dry_run:
+            return existing, False
         canonical_id = ctx.identity.resolve(
             set(identifiers),
             entity_type=resolver_kind,  # type: ignore[arg-type]
@@ -447,12 +495,9 @@ def _resolve_subject(
         created = existing is None
     else:
         canonical_id = _slugify(entity_name)
-        existing_entity = False
-        try:
-            triples = ctx.kg.query_entity(canonical_id, direction="outgoing")
-            existing_entity = bool(triples)
-        except Exception:
-            existing_entity = False
+        existing_entity = _entity_exists(ctx, canonical_id)
+        if not existing_entity and not create_if_missing:
+            raise ValueError("entity not found and create_if_missing is false")
         created = not existing_entity
 
     if not dry_run:
@@ -497,7 +542,7 @@ def _normalise_object(
     return value, obj_type
 
 
-def _parse_iso_date(value: Any) -> date | None:
+def _parse_iso_date(value: Any, *, field_name: str) -> date | None:
     if value is None or value == "":
         return None
     if isinstance(value, date):
@@ -505,8 +550,8 @@ def _parse_iso_date(value: Any) -> date | None:
     s = str(value).strip()
     try:
         return date.fromisoformat(s.split("T", 1)[0])
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an ISO date or datetime") from exc
 
 
 @mcp.tool()
@@ -578,6 +623,11 @@ def record_facts(
     _validate_source(source_closet, source_file)
     if not facts:
         raise ValueError("at least one fact required")
+    for raw_fact in facts:
+        if isinstance(raw_fact, dict):
+            _parse_iso_date(raw_fact.get("valid_from"), field_name="valid_from")
+            _parse_iso_date(raw_fact.get("valid_to"), field_name="valid_to")
+            _parse_iso_date(raw_fact.get("event_time"), field_name="event_time")
 
     subject, created_entity = _resolve_subject(
         entity_name=entity_name,
@@ -621,10 +671,10 @@ def record_facts(
             warnings.append(f"clamped confidence {confidence!r} to [0,1]")
             confidence = max(0.0, min(1.0, confidence))
 
-        valid_from = _parse_iso_date(raw_fact.get("valid_from"))
+        valid_from = _parse_iso_date(raw_fact.get("valid_from"), field_name="valid_from")
         if valid_from is None and raw_fact.get("event_time"):
-            valid_from = _parse_iso_date(raw_fact.get("event_time"))
-        valid_to = _parse_iso_date(raw_fact.get("valid_to"))
+            valid_from = _parse_iso_date(raw_fact.get("event_time"), field_name="event_time")
+        valid_to = _parse_iso_date(raw_fact.get("valid_to"), field_name="valid_to")
         write_mode = str(raw_fact.get("write_mode", "upsert")).lower()
 
         outcome: dict[str, Any] = {
@@ -695,7 +745,7 @@ def record_facts(
 
         outcomes.append(outcome)
 
-    return {
+    result = {
         "entity_id": subject,
         "created_entity": created_entity,
         "facts": outcomes,
@@ -706,6 +756,24 @@ def record_facts(
         "warnings": warnings,
         "dry_run": dry_run,
     }
+    if not dry_run:
+        _audit_personal_fact_write(
+            ctx,
+            action="record_facts",
+            subject=subject,
+            source_closet=source_closet,
+            source_file=source_file,
+            source_quote=source_quote,
+            facts=outcomes,
+            outcome={
+                "inserted_count": inserted,
+                "corroborated_count": corroborated,
+                "superseded_count": superseded,
+                "skipped_count": skipped,
+                "warnings": warnings,
+            },
+        )
+    return result
 
 
 @mcp.tool()
@@ -729,7 +797,7 @@ def invalidate_fact(
     if not rationale or not rationale.strip():
         raise ValueError("rationale is required for invalidate_fact")
     n = ctx.kg.invalidate(subject, predicate, object, ended=ended)
-    return {
+    result = {
         "subject": subject,
         "predicate": predicate,
         "object": object,
@@ -737,6 +805,21 @@ def invalidate_fact(
         "rationale": rationale,
         "ended": ended.isoformat() if ended else None,
     }
+    _audit_personal_fact_write(
+        ctx,
+        action="invalidate_fact",
+        subject=subject,
+        rationale=rationale,
+        facts=[
+            {
+                "predicate": predicate,
+                "object": object,
+                "ended": ended.isoformat() if ended else None,
+            }
+        ],
+        outcome={"invalidated_count": n},
+    )
+    return result
 
 
 # ---------- Entity queries ----------
@@ -751,7 +834,22 @@ def query_entity(
     """Currently-true triples about ``name`` on the personal plane.
 
     ``direction``: ``outgoing`` / ``incoming`` / ``both``.
+
+    When two or more currently-true triples share the same
+    ``(subject, predicate)`` but disagree on ``object`` (e.g. two
+    ``works_at`` triples with different employers), each conflicting
+    triple is annotated with a ``conflicts_with`` field listing the
+    other live objects + their confidences + provenance. This lets
+    the agent reason about contradictions on read instead of treating
+    equal-rank triples as independent answers.
+
+    The annotation is additive — existing callers iterating the returned
+    list see the same triple shape they always have, plus an optional
+    ``conflicts_with`` key when relevant. ADR-0001 corroboration is
+    NOT a conflict (same subject + predicate + object) and never surfaces.
     """
+    from collections import defaultdict
+
     ctx = _ctx()
     if direction not in {"outgoing", "incoming", "both"}:
         raise ValueError("direction must be one of: outgoing, incoming, both")
@@ -765,7 +863,121 @@ def query_entity(
     # full history.
     if as_of is None:
         triples = [t for t in triples if t.valid_to is None]
-    return [t.model_dump(mode="json") for t in triples]
+
+    # Group by (subject, predicate) to detect intra-result contradictions.
+    groups: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    for t in triples:
+        groups[(t.subject, t.predicate)].append(t)
+
+    out: list[dict[str, Any]] = []
+    for t in triples:
+        payload = t.model_dump(mode="json")
+        peers = [other for other in groups[(t.subject, t.predicate)] if other.object != t.object]
+        if peers:
+            payload["conflicts_with"] = [
+                {
+                    "object": other.object,
+                    "confidence": other.confidence,
+                    "source_closet": other.source_closet,
+                    "source_file": other.source_file,
+                }
+                for other in sorted(peers, key=lambda x: -x.confidence)
+            ]
+        out.append(payload)
+    return out
+
+
+# ---------- Agent-context compile / render (parity with firm-mode tools) ----------
+
+
+@mcp.tool()
+def compile_agent_context(
+    role: Annotated[
+        str,
+        "What the context is for — e.g. 'meeting-prep', 'email-draft'. "
+        "Stored on the output and threaded into the rendered header.",
+    ],
+    task: Annotated[
+        str,
+        "Free-form description of the specific task. Shown to the host-agent "
+        "LLM verbatim in the rendered context.",
+    ],
+    attendees: Annotated[
+        list[str],
+        "Stable entity IDs (``p_<token>`` / ``o_<token>``) or raw entity names "
+        "for the people / orgs the workflow is scoped to.",
+    ],
+    tier_floor: Annotated[
+        Tier | None,
+        "Restrict doctrine pages to this tier or higher (``decision`` / "
+        "``policy`` / ``doctrine`` / ``constitution``). ``None`` = no doctrine "
+        "section — most callers want at least ``policy``.",
+    ] = None,
+    as_of: Annotated[
+        date | None,
+        "Time-travel date. When supplied, KG triples are filtered to those "
+        "valid on that date. ``None`` = currently-true only.",
+    ] = None,
+) -> dict[str, Any]:
+    """Compile the distilled context package for a workflow task.
+
+    Parity-tool with the firm-mode ``compile_agent_context``: same
+    primitive (``synthesis.compile_agent_context``), scoped to the
+    individual user's personal plane. Returns the structured
+    ``AgentContext`` as JSON. For the rendered markdown form, call
+    ``render_agent_context`` with the same args.
+
+    Personal-mode specifics:
+    - ``plane="personal"`` and ``employee_id`` = this server's user_id
+      are baked in — individual mode is single-employee by definition.
+    - No ``viewer_id`` / ``policy`` filtering — the user IS the viewer
+      and the only one with access to their personal plane.
+    - The personal KG is read directly; doctrine pages come from the
+      same per-user wiki the engine is rooted at.
+    """
+    ctx = _ctx()
+    packet = _compile_synthesis(
+        role=role,
+        task=task,
+        attendees=attendees,
+        kg=ctx.kg._kg,  # noqa: SLF001 — PersonalKnowledgeGraph wraps an unscoped KG
+        engine=ctx.engine,
+        plane="personal",
+        employee_id=ctx.user_id,
+        tier_floor=tier_floor,
+        as_of=as_of,
+        identity_resolver=ctx.identity,
+    )
+    return packet.model_dump(mode="json")
+
+
+@mcp.tool()
+def render_agent_context(
+    role: Annotated[str, "Same as compile_agent_context."],
+    task: Annotated[str, "Same as compile_agent_context."],
+    attendees: Annotated[list[str], "Same as compile_agent_context."],
+    tier_floor: Tier | None = None,
+    as_of: date | None = None,
+) -> str:
+    """Compile and render the distilled context package as markdown.
+
+    Shortcut for ``compile_agent_context`` followed by ``.render()``.
+    Returns the markdown string ready to drop into a host-agent prompt.
+    """
+    ctx = _ctx()
+    packet = _compile_synthesis(
+        role=role,
+        task=task,
+        attendees=attendees,
+        kg=ctx.kg._kg,  # noqa: SLF001 — see compile_agent_context note above
+        engine=ctx.engine,
+        plane="personal",
+        employee_id=ctx.user_id,
+        tier_floor=tier_floor,
+        as_of=as_of,
+        identity_resolver=ctx.identity,
+    )
+    return packet.render()
 
 
 # ---------- Recall (evidence layer) ----------
@@ -872,12 +1084,32 @@ def serve(
     mcp.run()
 
 
+def _configure_stdio_safe_logging() -> None:  # pragma: no cover - CLI bootstrap
+    """Pin structlog to stderr.
+
+    MCP stdio reserves stdout for JSON-RPC framing. The default
+    PrintLoggerFactory writes to stdout, which would poison the
+    protocol on the very first emitted log line and cause strict MCP
+    clients to refuse the connection. Reconfigure before any structlog
+    call could land.
+    """
+    import sys
+
+    import structlog
+
+    structlog.configure(
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+
+
 def app() -> None:  # pragma: no cover - CLI entrypoint
+    _configure_stdio_safe_logging()
     cli()
 
 
 __all__ = [
     "IndividualMcpContext",
+    "_configure_stdio_safe_logging",
     "app",
     "initialize",
     "initialize_from_handles",
@@ -885,3 +1117,7 @@ __all__ = [
     "mcp",
     "reset",
 ]
+
+
+if __name__ == "__main__":
+    app()

@@ -24,8 +24,15 @@ source that supports the claim. No quote, no fact.
 
 Classify each fact as one of the six kinds below.
 
-- **identity** — A person, company, or other entity is named or
-  described. Maps to `KnowledgeGraph.add_entity`.
+- **identity** — A NEW *property* about a person, company, or other
+  entity (role, location, founded date, identifier such as email/url/
+  handle, organization affiliation when textually stated, status). The
+  entity's *existence alone* — being mentioned by name in a subject
+  line, header, signature, or sender domain — is **not** an identity
+  fact. If you have nothing to add beyond the name, skip; the entity
+  will be implied by any relationship/event/preference fact you emit
+  about it. Maps to `KnowledgeGraph.add_entity` with non-empty
+  `properties` or `identifiers`.
 - **relationship** — Two entities are connected (works_at,
   invested_in, reports_to, advises, etc.). Maps to
   `KnowledgeGraph.add_triple`.
@@ -105,22 +112,6 @@ Correct output:
   "employee_id": "alice",
   "facts": [
     {
-      "kind": "identity",
-      "confidence": 0.95,
-      "support_quote": "Sarah Chen from Acme Corp",
-      "entity_name": "sarah-chen",
-      "entity_type": "person",
-      "properties": {}
-    },
-    {
-      "kind": "identity",
-      "confidence": 0.95,
-      "support_quote": "Acme Corp",
-      "entity_name": "acme-corp",
-      "entity_type": "company",
-      "properties": {}
-    },
-    {
       "kind": "relationship",
       "confidence": 0.95,
       "support_quote": "Sarah Chen from Acme Corp",
@@ -163,6 +154,27 @@ Correct output:
   ]
 }
 ```
+
+## Anti-patterns — do NOT emit these
+
+- **Identity-by-mention.** "Acme Corp" appearing in a subject line or
+  header alone is not an identity fact. The entity exists if you emit
+  any relationship, event, or preference about it; you don't need a
+  redundant `identity` claim.
+- **Identity-by-domain.** A sender having `@acme.com` does not by
+  itself produce a `sarah-chen works_at acme-corp` relationship — the
+  affiliation needs textual support in the body. The email address is
+  fine as an `identifiers` entry on `sarah-chen` if you're emitting
+  any other identity property; it is NOT a standalone identity fact.
+- **Identity-by-meeting-title.** "WPC & Acme Meeting" tells you a
+  meeting happened (event, attaches to one of the entities), not that
+  Acme is a company (identity).
+- **Empty `properties` AND empty `identifiers` on identity facts.**
+  If both are empty, you are emitting mention-only — drop it.
+- **Same event from multiple emails.** A meeting, decision, or deal
+  referenced across an invite + reminder + follow-up is one event.
+  Within a single source item, emit it once. (Cross-source dedup
+  happens at write time via corroboration.)
 
 ## Rules
 

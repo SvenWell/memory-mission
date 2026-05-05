@@ -190,6 +190,26 @@ class CoherenceWarningEvent(_EventBase):
     blocked: bool
 
 
+class PersonalFactWriteEvent(_EventBase):
+    """Individual-mode structured fact write or invalidation.
+
+    Logged by ``mcp.individual_server`` for direct personal-plane writes
+    that do not pass through the firm proposal pipeline. This keeps the
+    agent-write surface auditable without forcing personal facts through
+    human review.
+    """
+
+    event_type: Literal["personal_fact_write"] = "personal_fact_write"
+    action: Literal["record_facts", "invalidate_fact"]
+    subject: str
+    source_closet: str | None = None
+    source_file: str | None = None
+    source_quote: str | None = None
+    rationale: str | None = None
+    facts: list[dict[str, object]] = Field(default_factory=list)
+    outcome: dict[str, object] = Field(default_factory=dict)
+
+
 # Pydantic discriminated union — lets us serialize/parse any event type.
 Event = Annotated[
     ExtractionEvent
@@ -199,6 +219,7 @@ Event = Annotated[
     | ConnectorInvocationEvent
     | ProposalCreatedEvent
     | ProposalDecidedEvent
-    | CoherenceWarningEvent,
+    | CoherenceWarningEvent
+    | PersonalFactWriteEvent,
     Field(discriminator="event_type"),
 ]

@@ -36,13 +36,15 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from memory_mission.memory.pages import Page
+from memory_mission.memory.pages import Page, parse_page, render_page
 from memory_mission.memory.schema import (
     Plane,
+    page_path,
     validate_domain,
     validate_employee_id,
 )
@@ -221,7 +223,11 @@ class InMemoryEngine:
     compiled-truth-boost scaffolding.
     """
 
-    def __init__(self, *, embedder: EmbeddingProvider | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        embedder: EmbeddingProvider | None = None,
+    ) -> None:
         self._pages: dict[PageKey, Page] = {}
         self._embeddings: dict[PageKey, list[float]] = {}
         self._embedder = embedder
@@ -544,6 +550,113 @@ class InMemoryEngine:
             latency_ms=latency_ms,
         )
         return hits
+
+
+class FileSystemEngine(InMemoryEngine):
+    """Markdown-file backed engine using canonical vault paths.
+
+    ``InMemoryEngine`` remains process-local and side-effect free. This
+    implementation keeps the same in-memory search/index behavior, but
+    persists page writes to disk and reloads pages on ``connect()``.
+    """
+
+    def __init__(
+        self,
+        root: Path | str,
+        *,
+        embedder: EmbeddingProvider | None = None,
+    ) -> None:
+        super().__init__(embedder=embedder)
+        self._root = Path(root).expanduser()
+
+    def connect(self) -> None:
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._load_from_disk()
+        super().connect()
+
+    def put_page(
+        self,
+        page: Page,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> None:
+        super().put_page(page, plane=plane, employee_id=employee_id)
+        path = self._page_file(page, plane=plane, employee_id=employee_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(render_page(page), encoding="utf-8")
+        tmp.replace(path)
+
+    def delete_page(
+        self,
+        slug: str,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> None:
+        page = self.get_page(slug, plane=plane, employee_id=employee_id)
+        super().delete_page(slug, plane=plane, employee_id=employee_id)
+        if page is None:
+            return
+        try:
+            self._page_file(page, plane=plane, employee_id=employee_id).unlink()
+        except FileNotFoundError:
+            pass
+
+    def _load_from_disk(self) -> None:
+        self._pages.clear()
+        self._embeddings.clear()
+        if not self._root.exists():
+            return
+        real_root = self._root.resolve()
+        for md_file in self._root.rglob("*.md"):
+            try:
+                real_file = md_file.resolve()
+            except OSError:
+                continue
+            if not real_file.is_relative_to(real_root):
+                continue
+            plane, employee_id = _plane_from_page_file(md_file, self._root)
+            if plane is None:
+                continue
+            try:
+                page = parse_page(real_file.read_text(encoding="utf-8"))
+                super().put_page(page, plane=plane, employee_id=employee_id)
+            except (OSError, ValueError):
+                continue
+
+    def _page_file(
+        self,
+        page: Page,
+        *,
+        plane: Plane,
+        employee_id: str | None,
+    ) -> Path:
+        rel = page_path(
+            plane,
+            page.frontmatter.domain,
+            page.frontmatter.slug,
+            employee_id=employee_id,
+        )
+        return self._root / Path(rel)
+
+
+def _plane_from_page_file(md_file: Path, root: Path) -> tuple[Plane | None, str | None]:
+    try:
+        rel = md_file.relative_to(root)
+    except ValueError:
+        return None, None
+    parts = rel.parts
+    if len(parts) == 3 and parts[0] == "firm":
+        return "firm", None
+    if len(parts) == 5 and parts[0] == "personal" and parts[2] == "semantic":
+        try:
+            employee_id = validate_employee_id(parts[1])
+        except ValueError:
+            return None, None
+        return "personal", employee_id
+    return None, None
 
 
 def _validate_scope_filter(plane: Plane | None, employee_id: str | None) -> None:
