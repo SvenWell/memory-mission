@@ -382,3 +382,30 @@ def test_query_entity_filters_invalidated_triples_from_conflicts(installed_ctx, 
     assert len(out) == 1
     assert out[0]["object"] == "manager"
     assert "conflicts_with" not in out[0]
+
+
+# ---------- CLI bootstrap: stdio-safe logging ----------
+
+
+def test_configure_stdio_safe_logging_pins_factory_to_stderr() -> None:
+    """MCP stdio servers must keep stdout reserved for JSON-RPC frames.
+
+    The default structlog.PrintLoggerFactory writes to stdout — any log
+    line emitted before / during mcp.run() would mix with the protocol
+    stream and cause strict MCP clients to refuse the connection. This
+    bootstrap helper must re-pin the factory so the very next log line
+    lands on stderr, not stdout.
+    """
+    import sys
+
+    import structlog
+
+    server._configure_stdio_safe_logging()
+
+    cfg = structlog.get_config()
+    factory = cfg["logger_factory"]
+    assert isinstance(factory, structlog.PrintLoggerFactory)
+    # PrintLoggerFactory stashes the file as a private attr; allow the
+    # public-vs-private rename without breaking by checking both shapes.
+    file_attr = getattr(factory, "_file", None) or getattr(factory, "file", None)
+    assert file_attr is sys.stderr, f"expected logger factory to write to stderr; got {file_attr!r}"

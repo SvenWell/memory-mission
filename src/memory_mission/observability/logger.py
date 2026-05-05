@@ -17,7 +17,6 @@ Read contract:
 from __future__ import annotations
 
 import os
-import re
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -26,15 +25,10 @@ from typing import Any
 from pydantic import TypeAdapter
 
 from memory_mission.observability.events import Event
+from memory_mission.path_safety import SAFE_PATH_SEGMENT_PATTERN as _SAFE_FIRM_ID
 
 _EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
 EVENTS_FILENAME = "events.jsonl"
-
-# Safe firm_id: alphanumeric + hyphen + underscore + dot, 1-128 chars, not
-# "." or ".." and not starting with a dot. This is strict on purpose — firm
-# ids are internal identifiers, not user-supplied display names. Stricter
-# than needed is safer than loose.
-_SAFE_FIRM_ID = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
 
 
 def _validate_firm_id(firm_id: str) -> None:

@@ -47,9 +47,10 @@ sidecar preserves provenance for audit and re-enrichment.
 
 from __future__ import annotations
 
-import re
 from pathlib import PurePosixPath
 from typing import Literal
+
+from memory_mission.path_safety import SAFE_PATH_SEGMENT_PATTERN as _SAFE_EMPLOYEE_ID
 
 CORE_DOMAINS: tuple[str, ...] = (
     "people",
@@ -65,10 +66,6 @@ CORE_DOMAINS: tuple[str, ...] = (
 _DOMAIN_SET = frozenset(CORE_DOMAINS)
 
 Plane = Literal["personal", "firm"]
-
-# Same shape as observability's firm-id regex: alnum + ._- with a length
-# bound, no path separators, no NUL. Employee IDs become path segments.
-_SAFE_EMPLOYEE_ID = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
 
 
 def is_valid_domain(domain: str) -> bool:

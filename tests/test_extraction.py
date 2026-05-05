@@ -851,3 +851,102 @@ def test_ingest_organization_inferred_from_company_type(
     result = ingest_facts(report=report, wiki_root=tmp_path, identity_resolver=resolver)
     saved = ExtractionReport.model_validate_json(result.report_path.read_text())
     assert saved.facts[0].entity_name.startswith("o_")  # type: ignore[union-attr]
+
+
+# ---------- EXTRACTION_PROMPT contract tests ----------
+
+
+def test_extraction_prompt_disallows_mention_only_identity() -> None:
+    """The prompt must explicitly forbid mention-only identity facts.
+
+    The framework saw real-world noise floors of ~46% identity facts
+    in personal-source extractions, of which ~72% were empty-properties
+    mention-only ('Verascient is a company' derived from a sender
+    domain or subject line). The prompt now forbids this shape — keep
+    that contract enforced so a regression to the loose pattern fails
+    here rather than at the customer.
+    """
+    from memory_mission.extraction import EXTRACTION_PROMPT
+
+    # The anti-patterns section must exist.
+    assert "Anti-patterns" in EXTRACTION_PROMPT, (
+        "EXTRACTION_PROMPT must include an Anti-patterns section"
+    )
+    # Specific anti-patterns we care about.
+    for forbidden_pattern in (
+        "Identity-by-mention",
+        "Identity-by-domain",
+        "Identity-by-meeting-title",
+    ):
+        assert forbidden_pattern in EXTRACTION_PROMPT, (
+            f"EXTRACTION_PROMPT must call out the {forbidden_pattern!r} anti-pattern"
+        )
+
+
+def test_extraction_prompt_worked_example_has_no_bare_identity_facts() -> None:
+    """The worked example trains the LLM by demonstration.
+
+    A worked example with empty-properties identity facts teaches the
+    model that mention-only identity is acceptable — the same loose
+    behaviour we tightened in the rules. Keep the worked example
+    consistent with the rules: every identity fact in the example must
+    carry either non-empty properties or non-empty identifiers (or
+    not appear at all).
+    """
+    import re
+
+    from memory_mission.extraction import EXTRACTION_PROMPT
+
+    # Find every \"kind\": \"identity\" block in the prompt's example JSON
+    # and check the surrounding properties dict isn't empty.
+    pattern = re.compile(
+        r'"kind":\s*"identity".*?"properties":\s*(\{[^{}]*\})',
+        re.DOTALL,
+    )
+    matches = pattern.findall(EXTRACTION_PROMPT)
+    for properties_block in matches:
+        # An empty properties dict is exactly what we want to forbid in
+        # demonstrations. Allow whitespace but not zero-key dicts.
+        stripped = properties_block.strip().replace(" ", "").replace("\\n", "")
+        assert stripped != "{}", (
+            "Worked example contains an identity fact with empty properties — "
+            "this teaches the model that mention-only identity facts are valid. "
+            "Either remove the bare identity fact or give it real properties."
+        )
+
+
+# ---------- External-source-id length boundary ----------
+
+
+def test_writer_accepts_long_external_source_id(tmp_path: Path) -> None:
+    """Google Calendar recurring-event instance ids routinely exceed 128 chars."""
+    writer = ExtractionWriter(
+        wiki_root=tmp_path,
+        source="gcal",
+        target_plane="personal",
+        employee_id="alice",
+    )
+    long_id = (
+        "_60q30c1g60o30e1i60o4ac1g60rj8gpl88rj2c1h84s34h9g60s30c1g60o30c1g"
+        "8oo32g9j8l2k2gpp6csk8ghg64o30c1g60o30c1g60o30c1g60o32c1g60o30c1g"
+        "6t1j2cq66gsk8gpi64sjgchk88sk8h2270o34ca68d136hho6l0g_20260414T090000Z"
+    )
+    assert len(long_id) > 128
+    report = _sample_report(source="gcal", source_id=long_id)
+    path = writer.write(report)
+    assert path.exists()
+    assert path.name == f"{long_id}.json"
+
+
+def test_writer_rejects_overlong_source_id(tmp_path: Path) -> None:
+    """Past the 246-char ceiling — would exceed ext4 filename limit."""
+    writer = ExtractionWriter(
+        wiki_root=tmp_path,
+        source="gmail",
+        target_plane="personal",
+        employee_id="alice",
+    )
+    too_long = "a" * 247
+    report = _sample_report(source_id="msg-1")  # construct then patch via model_copy
+    with pytest.raises(ValueError, match="source_id"):
+        writer.write(report.model_copy(update={"source_id": too_long}))
