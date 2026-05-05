@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from memory_mission.memory import (
     CORE_DOMAINS,
     BrainEngine,
+    FileSystemEngine,
     InMemoryEngine,
     Page,
     PageFrontmatter,
@@ -995,3 +996,91 @@ def test_permission_filter_viewer_without_policy_is_fail_closed() -> None:
     # policy alone (viewer_id=None): no enforcement, as before — internal callers
     # (tests, extraction) don't carry a viewer identity.
     assert engine.get_page("secret", plane="firm", policy=policy) is not None
+
+
+# ---------- FileSystemEngine persistence ----------
+
+
+def test_engine_without_wiki_root_remains_in_memory(tmp_path: Path) -> None:
+    """Backwards-compat: InMemoryEngine put_page touches no disk."""
+
+    engine = InMemoryEngine()
+    engine.connect()
+    engine.put_page(
+        new_page(slug="foo", title="Foo", domain="people", compiled_truth="bar"),
+        plane="firm",
+    )
+    assert list(tmp_path.iterdir()) == []
+    assert engine.get_page("foo", plane="firm") is not None
+
+
+def test_file_system_engine_persists_put_page_to_disk(tmp_path: Path) -> None:
+    engine = FileSystemEngine(tmp_path)
+    engine.connect()
+    engine.put_page(
+        new_page(slug="acme-corp", title="Acme", domain="companies", compiled_truth="x"),
+        plane="firm",
+    )
+    written = tmp_path / "firm" / "companies" / "acme-corp.md"
+    assert written.exists()
+    assert "title: Acme" in written.read_text()
+
+
+def test_file_system_engine_persists_personal_pages_under_semantic_layer(
+    tmp_path: Path,
+) -> None:
+    engine = FileSystemEngine(tmp_path)
+    engine.connect()
+    engine.put_page(
+        new_page(slug="my-decision", title="Pivot", domain="concepts", compiled_truth="..."),
+        plane="personal",
+        employee_id="alice",
+    )
+    written = tmp_path / "personal" / "alice" / "semantic" / "concepts" / "my-decision.md"
+    assert written.exists()
+
+
+def test_engine_rehydrates_pages_on_connect(tmp_path: Path) -> None:
+    """A fresh engine pointed at the same root sees pages written by a prior process."""
+
+    engine_a = FileSystemEngine(tmp_path)
+    engine_a.connect()
+    engine_a.put_page(
+        new_page(slug="durable-fact", title="Durable", domain="people", compiled_truth="."),
+        plane="personal",
+        employee_id="bob",
+    )
+    engine_a.disconnect()
+
+    # Simulate a process restart — fresh engine instance, same root.
+    engine_b = FileSystemEngine(tmp_path)
+    engine_b.connect()
+    page = engine_b.get_page("durable-fact", plane="personal", employee_id="bob")
+    assert page is not None
+    assert page.frontmatter.title == "Durable"
+
+
+def test_file_system_engine_delete_page_unlinks_file(tmp_path: Path) -> None:
+    engine = FileSystemEngine(tmp_path)
+    engine.connect()
+    engine.put_page(
+        new_page(slug="ephemeral", title="Tmp", domain="inbox", compiled_truth="."),
+        plane="firm",
+    )
+    written = tmp_path / "firm" / "inbox" / "ephemeral.md"
+    assert written.exists()
+
+    engine.delete_page("ephemeral", plane="firm")
+    assert not written.exists()
+    assert engine.get_page("ephemeral", plane="firm") is None
+
+
+def test_engine_rehydrate_skips_unknown_layout(tmp_path: Path) -> None:
+    """Operator files that don't match the layout are skipped, not crashing connect()."""
+    (tmp_path / "README.md").write_text("# operator notes")
+    (tmp_path / "firm").mkdir()
+    (tmp_path / "firm" / "stray.md").write_text("# not in a domain dir")
+
+    engine = FileSystemEngine(tmp_path)
+    engine.connect()  # Must not raise
+    assert engine.list_pages() == []

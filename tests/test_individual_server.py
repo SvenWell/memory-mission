@@ -295,6 +295,51 @@ def test_resolve_entity_rejects_empty_name(installed_ctx) -> None:
         server.resolve_entity("   ")
 
 
+# ---------- record_decision persistence ----------
+
+
+def test_record_decision_persists_across_initialize_cycles(tmp_path: Path) -> None:
+    """A decision logged in one MCP session must be visible in the next.
+
+    Before the filesystem engine fix, individual_server constructed an
+    in-memory engine that evaporated when the MCP subprocess exited — so
+    record_decision wrote to RAM and the boot context returned no decisions
+    on the next process. This test guards against that regression.
+    """
+    first = server.initialize(root=tmp_path, user_id="sven", agent_id="hermes")
+    try:
+        server.record_decision(
+            slug="pivot-2026",
+            title="Pivot to AI tooling",
+            summary="Reallocating Q2 budget to AI tooling spend.",
+            source_closet="conversational",
+            source_file="session-1",
+            decided_at=date(2026, 4, 15),
+        )
+        written = tmp_path / "personal" / "sven" / "semantic" / "concepts" / "pivot-2026.md"
+        assert written.exists()
+    finally:
+        first.kg.close()
+        first.engine.disconnect()
+        close_identity = getattr(first.identity, "close", None)
+        if callable(close_identity):
+            close_identity()
+        server.reset()
+
+    second = server.initialize(root=tmp_path, user_id="sven", agent_id="hermes")
+    try:
+        page = second.engine.get_page("pivot-2026", plane="personal", employee_id="sven")
+        assert page is not None
+        assert page.frontmatter.title == "Pivot to AI tooling"
+    finally:
+        second.kg.close()
+        second.engine.disconnect()
+        close_identity = getattr(second.identity, "close", None)
+        if callable(close_identity):
+            close_identity()
+        server.reset()
+
+
 # ---------- compile_agent_context / render_agent_context (parity with firm-mode) ----------
 
 

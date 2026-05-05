@@ -39,7 +39,7 @@ from mcp.server.fastmcp import FastMCP
 
 from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.mcp.individual_context import IndividualMcpContext
-from memory_mission.memory.engine import BrainEngine, InMemoryEngine
+from memory_mission.memory.engine import BrainEngine, FileSystemEngine
 from memory_mission.memory.schema import validate_employee_id
 from memory_mission.memory.tiers import Tier
 from memory_mission.personal_brain.personal_kg import PersonalKnowledgeGraph
@@ -100,7 +100,9 @@ def initialize(
         employee_id=user_id,
         identity_resolver=identity,
     )
-    engine: BrainEngine = InMemoryEngine()
+    # FileSystemEngine makes record_decision durable across short-lived
+    # Hermes/Codex MCP subprocesses while keeping the BrainEngine Protocol.
+    engine: BrainEngine = FileSystemEngine(root)
     engine.connect()
 
     obs_root = root / ".observability"

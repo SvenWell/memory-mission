@@ -20,6 +20,7 @@ Ports MemPalace's temporal knowledge graph for entity-relationship triples
 from memory_mission.memory.engine import (
     BrainEngine,
     EngineStats,
+    FileSystemEngine,
     InMemoryEngine,
     PageKey,
     SearchHit,
@@ -101,6 +102,7 @@ __all__ = [
     "EmbeddingProvider",
     "EngineStats",
     "Entity",
+    "FileSystemEngine",
     "GraphStats",
     "HashEmbedder",
     "InMemoryEngine",
