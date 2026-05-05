@@ -29,6 +29,7 @@ Launch CLI:
 
 from __future__ import annotations
 
+import time
 from datetime import date
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -37,6 +38,8 @@ import structlog
 import typer
 from mcp.server.fastmcp import FastMCP
 
+from memory_mission import __version__
+from memory_mission.eval.captures import captures_path_for, record_eval_capture
 from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.mcp.individual_context import IndividualMcpContext
 from memory_mission.memory.engine import BrainEngine, FileSystemEngine
@@ -116,6 +119,7 @@ def initialize(
         engine=engine,
         identity=identity,
         observability_root=obs_root,
+        eval_captures_path=captures_path_for(root=root, user_id=user_id),
     )
     install(ctx)
     return ctx
@@ -130,6 +134,7 @@ def initialize_from_handles(
     identity: LocalIdentityResolver,
     observability_root: Path,
     backend: Any | None = None,
+    eval_captures_path: Path | None = None,
 ) -> IndividualMcpContext:
     """Install a context from pre-built handles. Used by tests + embedding hosts."""
     ctx = IndividualMcpContext(
@@ -140,6 +145,7 @@ def initialize_from_handles(
         identity=identity,
         observability_root=observability_root,
         backend=backend,
+        eval_captures_path=eval_captures_path,
     )
     install(ctx)
     return ctx
@@ -210,6 +216,7 @@ def get_boot_context(
     markdown ``render`` key suitable for system-prompt injection.
     """
     ctx = _ctx()
+    started = time.perf_counter()
     boot = compile_individual_boot_context(
         user_id=ctx.user_id,
         agent_id=ctx.agent_id,
@@ -222,6 +229,15 @@ def get_boot_context(
     payload = boot.model_dump(mode="json")
     payload["render"] = boot.render()
     payload["aspect_counts"] = boot.aspect_counts
+    record_eval_capture(
+        captures_path=ctx.eval_captures_path,
+        user_id=ctx.user_id,
+        tool_name="mm_boot_context",
+        args={"task_hint": task_hint, "token_budget": token_budget},
+        result=payload,
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        mm_version=__version__,
+    )
     return payload
 
 
@@ -853,6 +869,7 @@ def query_entity(
     ctx = _ctx()
     if direction not in {"outgoing", "incoming", "both"}:
         raise ValueError("direction must be one of: outgoing, incoming, both")
+    started = time.perf_counter()
     triples = ctx.kg.query_entity(
         name,
         as_of=as_of,
@@ -884,6 +901,19 @@ def query_entity(
                 for other in sorted(peers, key=lambda x: -x.confidence)
             ]
         out.append(payload)
+    record_eval_capture(
+        captures_path=ctx.eval_captures_path,
+        user_id=ctx.user_id,
+        tool_name="mm_query_entity",
+        args={
+            "name": name,
+            "direction": direction,
+            "as_of": as_of.isoformat() if as_of else None,
+        },
+        result=out,
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        mm_version=__version__,
+    )
     return out
 
 

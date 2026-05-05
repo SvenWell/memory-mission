@@ -38,3 +38,9 @@ class IndividualMcpContext:
     # ``search_recall`` tool returns a structured error rather than
     # crashing — Individual mode is usable without MemPalace wired up.
     backend: PersonalMemoryBackend | None = None
+    # Optional eval-capture sqlite path. Set when ``initialize`` resolves
+    # ``<root>/personal/<user_id>/eval_captures.sqlite3``. Tools that
+    # produce retrieval-quality-relevant results pass this to
+    # ``record_eval_capture``; capture is gated by
+    # ``MM_CONTRIBUTOR_MODE=1`` and is a no-op otherwise.
+    eval_captures_path: Path | None = None
