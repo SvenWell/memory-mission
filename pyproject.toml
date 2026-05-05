@@ -25,7 +25,10 @@ dependencies = [
     # MCP server surface — exposes memory-mission as tools to host agents
     "mcp>=1.0",
     # MemPalace — adopted personal-layer substrate behind PersonalMemoryBackend.
-    "mempalace>=3.3,<4.0",
+    # >=3.3.4: PR #1289 / SHA 9dd56ec fixes get_or_create_collection crash on palace
+    # reopen — the exact path MemPalaceAdapter hits when Hermes re-attaches. Same
+    # release fixes a 75x storage-bloat regression from earlier 3.x.
+    "mempalace>=3.3.4,<4.0",
     # LLM providers (used by extraction + workflow agents)
     "anthropic>=0.39",
     "openai>=1.54",
@@ -40,7 +43,7 @@ db = [
 
 # MemPalace for importable temporal knowledge graph (component 0.2)
 memory = [
-    "mempalace>=3.2",
+    "mempalace>=3.3.4,<4.0",
 ]
 
 # External integrations (component 1.3)
