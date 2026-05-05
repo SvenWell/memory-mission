@@ -1,21 +1,23 @@
 # Memory Mission
 
-**A governed context engine for agents: turn a firm's scattered knowledge into one queryable, auditable layer that AI agents can act on safely.**
+**Operational memory for agents.** Compile a firm's communication residue into current operating state — facts, commitments, people, decisions, unresolved loops, triggers, and action rules — so agents can participate without constantly rediscovering how the human and team work.
 
-Python infrastructure for pulling data from external sources (email + calendar + transcripts + documents + venture CRMs + Slack), distilling it into git-versioned markdown the firm owns, and surfacing it through a hybrid-search retrieval interface — with every extraction, promotion, and retrieval logged for compliance audit.
+Python infrastructure organized as three layers ([factual](docs/VISION.md) / [interaction](docs/VISION.md) / [action](docs/ACTION_MEMORY.md)), with two planes (personal and firm) separated by a PR-model review gate. Every fact traces to a source, a reviewer, and a rationale. Nothing lands on firm-plane memory without an explicit human decision. **Doing nothing is a first-class action** — the system acts because the context says it should, and stays still when it should not.
 
-Two planes (personal and firm) separated by a PR-model review gate. Every fact traces to a source, a reviewer, and a rationale. Nothing lands on firm-plane memory without an explicit human decision.
+See [`docs/VISION.md`](docs/VISION.md) for the full framing, [`docs/OPERATING_STATE.md`](docs/OPERATING_STATE.md) for the canonical predicate vocabulary, [`docs/ACTION_MEMORY.md`](docs/ACTION_MEMORY.md) for the forward-looking action layer.
 
 ## Where to start
 
 | For | Read |
 |---|---|
-| The thesis and who it's for | [`docs/VISION.md`](docs/VISION.md) |
+| The thesis, three-layer framing, who it's for | [`docs/VISION.md`](docs/VISION.md) |
 | The shipped architecture + module walkthrough | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
+| Canonical predicate vocabulary (objection, blocker, dependency, risk, owner, …) | [`docs/OPERATING_STATE.md`](docs/OPERATING_STATE.md) |
+| Forward-looking action layer (procedural / trigger / execution / outcome) | [`docs/ACTION_MEMORY.md`](docs/ACTION_MEMORY.md) |
 | Every Pydantic model, predicate, tier in one place | [`docs/ABSTRACTIONS.md`](docs/ABSTRACTIONS.md) |
 | How we measure whether the system is right | [`docs/EVALS.md`](docs/EVALS.md) |
 | Load-bearing decisions with rationale | [`docs/adr/`](docs/adr/) |
-| Operator recipes (hot-cache hooks, Bases dashboard) | [`docs/recipes/`](docs/recipes/) |
+| Operator recipes (hot-cache hooks, Bases dashboard, Hermes integration) | [`docs/recipes/`](docs/recipes/) |
 | How agents should navigate this repo | [`docs/AGENTS.md`](docs/AGENTS.md) |
 | Per-step chronology | [`BUILD_LOG.md`](BUILD_LOG.md) |
 
@@ -28,7 +30,7 @@ cd memory-mission
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
 
-make check          # ruff + format + mypy --strict + 903 tests
+make check          # ruff + format + mypy --strict + 1091 tests
 python -m memory_mission info
 ```
 
@@ -74,22 +76,24 @@ briefing = context.render()       # markdown for the host-agent LLM
 
 ## What shipped
 
-V1 complete + Step 18 MCP surface shipped + MemPalace personal substrate adopted + P2 capability-based connector manifest + venture-pack (Calendar + Affinity + Outlook + OneDrive/SharePoint + Attio + Notion + Slack) + **P7-A venture overlay** (constitution + page templates + lifecycle predicate vocabulary + 3 workflow skills). 18 build steps + six-move polish pass + a three-reviewer security-response pass (21 fixes across B1-B28). **837 tests passing**, `mypy --strict` clean on 80 source files. P0–P2 merged to `main` at `3749034`.
+V1 complete + MCP surface (firm-mode + individual-mode) + MemPalace personal substrate (ADR-0004) + P2 capability-based connector manifest + venture pack (10 connectors across 6 capability roles) + **P7-A venture overlay** (constitution + lifecycle predicate vocabulary + 4 workflow skills) + **Hermes integration** (`MemoryMissionProvider` + 19 markdown skills + `granola-extraction-pilot` validated end-to-end against real data: 35 meetings → 423 candidates → 18 promoted facts). Released `v0.1.0` → `v0.1.3` (Hermes-ready substrate, SQLite cross-thread fix, multi-agent identifier-coordination, `mm_resolve_entity` tool). Three-layer operational substrate per [`docs/VISION.md`](docs/VISION.md). **1,091 tests passing**, `mypy --strict` clean on 92 source files.
 
 | Layer | What you can do today |
 |---|---|
 | **Foundations** | Append-only observability log per firm; checkpointed durable execution with resume-on-crash; PII-redacted middleware around every LLM call |
 | **Connectors** | `Connector` Protocol + `invoke()` harness. Composio-backed adapters (SDK stub; host wires the client) for **Gmail, Outlook, Google Calendar, Granola, Google Drive, OneDrive/SharePoint, Affinity, Attio, Notion, Slack** — 10 apps across 6 capability roles (`email` / `calendar` / `transcript` / `document` / `workspace` / `chat`). Per-firm `firm/systems.yaml` binds roles → apps; envelope helpers normalize each app's raw payload to `NormalizedSourceItem` with fail-closed visibility mapping (ADR-0007 + ADR-0011) |
-| **Memory** | Compiled-truth + timeline page format (Obsidian-compatible); SQLite temporal knowledge graph with Bayesian corroboration (Noisy-OR, 0.99 cap); hybrid search (RRF + cosine + compiled-truth boost); tier-aware authority hierarchy; read-only SQL surface for ad-hoc queries |
+| **Memory (factual layer)** | Compiled-truth + timeline page format (Obsidian-compatible); SQLite temporal knowledge graph with `valid_from` / `valid_to` validity windows and Bayesian corroboration (Noisy-OR, 0.99 cap); auto-registered entities on triple write; hybrid search (RRF + cosine + compiled-truth boost); tier-aware authority hierarchy (`constitution` / `doctrine` / `policy` / `decision`); durable `FileSystemEngine` for markdown-backed page persistence; rereadability via preserved `.raw/` sidecars + MemPalace evidence (ARCHITECTURE.md principle 11) |
+| **Evidence (interaction layer)** | MemPalace evidence layer indexed by drawer key (ADR-0004); `OpenQuestion` fact bucket with mandatory `support_quote`; `triple_sources` append-only provenance per corroboration; `PersonalMemoryBackend` Protocol for swappable evidence backends |
 | **Identity** | `IdentityResolver` Protocol + SQLite-backed local resolver; stable `p_<id>` / `o_<id>` across email / LinkedIn / Twitter / phone; `merge_entities` with reviewer gate |
-| **Extraction** | Six-bucket `ExtractedFact` Pydantic union with mandatory support-quote; `EXTRACTION_PROMPT` markdown template; ingest-time canonicalization to stable IDs; zero LLM-SDK imports in-repo |
+| **Extraction** | Six-bucket `ExtractedFact` Pydantic union (`identity` / `relationship` / `preference` / `event` / `update` / `open_question`) with mandatory support-quote; `EXTRACTION_PROMPT` template tightened against mention-only identity facts; ingest-time canonicalization to stable IDs; zero LLM-SDK imports in-repo |
 | **Permissions** | Per-firm `Policy` with scopes + employees; `can_read` + `can_propose` with no-escalation; read-path enforcement inside `BrainEngine` |
 | **Promotion** | `Proposal` + `ProposalStore`; `create_proposal` / `promote` / `reject` / `reopen` with required rationale; coherence check emits structured warnings; opt-in constitutional mode blocks on contradictions |
 | **Federated** | Cross-employee pattern detector with distinct-source-file independence check; stages firm-plane proposals from N≥3 employees' personal planes |
-| **Synthesis** | `compile_agent_context(role, task, attendees, ...)` returns a structured `AgentContext` package; Tolaria Neighborhood-mode shape; Obsidian `[!contradiction]` callouts on rendered pages |
-| **MCP surface** | FastMCP server (`memory-mission/v1`, 14 tools: 8 read + 6 write). One process per employee. Per-firm `mcp_clients.yaml` manifest with NFKC + dup-key + symlink rejection. Every mutating tool opens an `observability_scope` — audit trail coverage complete over MCP, not just over Python API |
+| **Synthesis** | `compile_agent_context(role, task, attendees, ...)` returns a structured `AgentContext` package — both firm-mode and individual-mode shipped; `compile_individual_boot_context` returns active threads + commitments + preferences + recent decisions + relevant entities + project status; Obsidian `[!contradiction]` callouts on rendered pages |
+| **MCP surface** | Two FastMCP servers — **firm-mode (14 tools)** + **individual-mode (13 tools)**. Lifecycle-transition primitives `record_facts` + `invalidate_fact` match `OPERATING_STATE.md`'s `open → investigating → resolved/closed` convention. `query_entity` annotates `conflicts_with` on currently-true triples sharing subject + predicate (partial visibility into contested operating state). `compile_agent_context` shipped both modes. Per-firm `mcp_clients.yaml` manifest with NFKC + dup-key + symlink rejection. Every mutating tool opens an `observability_scope` |
 | **Scope enforcement** | Fail-closed when no policy configured. `viewer_scopes` filter on KG triples. `can_propose` no-escalation on `create_proposal`. Scope column on every triple; pre-flight scope scan in `_apply_facts` so scope mismatches never leave partial KG writes. WAL + busy_timeout on all per-firm SQLite DBs |
-| **Skills** | 14 shipped. **Personal-source backfills** (employee plane): `backfill-gmail`, `backfill-outlook`, `backfill-granola`, `backfill-calendar`. **Firm-source backfills** (firm plane, admin-run): `backfill-firm-artefacts` (Drive), `backfill-onedrive` (OneDrive + SharePoint), `backfill-affinity`, `backfill-attio`, `backfill-notion`. **Mixed-plane** (per-message split via helper override): `backfill-slack`. **Workflow**: `extract-from-staging`, `review-proposals`, `detect-firm-candidates`, `meeting-prep` |
+| **Hermes integration** | `MemoryMissionProvider` plugin mirrors Hermes' `MemoryProvider` ABC (`src/memory_mission/integrations/hermes_provider.py`). Seed migration adapter (`hermes_seed_migrate`) ports an existing Hermes session into the personal substrate. Contract test suite (`tests/test_provider_contract.py`) pins the public API shape against drift |
+| **Skills** | 19 shipped. **Personal-source backfills** (employee plane): `backfill-gmail`, `backfill-outlook`, `backfill-granola`, `backfill-calendar`. **Firm-source backfills** (firm plane, admin-run): `backfill-firm-artefacts` (Drive), `backfill-onedrive` (OneDrive + SharePoint), `backfill-affinity`, `backfill-attio`, `backfill-notion`. **Mixed-plane**: `backfill-slack`. **Workflow**: `extract-from-staging`, `review-proposals`, `detect-firm-candidates`, `meeting-prep`. **Venture overlay (P7-A)**: `update-deal-status`, `record-ic-decision`, `onboard-venture-firm`, `weekly-portfolio-update`. **Pilot**: `granola-extraction-pilot` (Hermes-validated, 18 promoted facts) |
 
 Full per-step chronology in [`BUILD_LOG.md`](BUILD_LOG.md).
 
@@ -145,12 +149,14 @@ src/memory_mission/
 ├── permissions/            # Policy + can_read / can_propose
 ├── promotion/              # Proposal + PR-model review gate
 ├── federated/              # cross-employee pattern detector
-├── synthesis/              # compile_agent_context + AgentContext
-└── mcp/                    # FastMCP server — 14 tools over stdio (Step 18)
+├── synthesis/              # compile_agent_context + compile_individual_boot_context
+├── integrations/           # MemoryMissionProvider (Hermes plugin) + hermes_seed_migrate
+└── mcp/                    # FastMCP servers — firm-mode (14 tools) + individual-mode (13 tools)
 
-skills/                     # 18 shipped, markdown + YAML frontmatter
-tests/                      # 903 passing
-docs/                       # VISION + ARCHITECTURE + ABSTRACTIONS + EVALS + AGENTS + adr/ + recipes/
+skills/                     # 19 shipped, markdown + YAML frontmatter (10 backfill + 4 workflow + 4 venture overlay + 1 pilot)
+tests/                      # 1091 passing
+docs/                       # VISION + ARCHITECTURE + ABSTRACTIONS + OPERATING_STATE + ACTION_MEMORY + EVALS + AGENTS + adr/ + recipes/
+overlays/venture/           # P7-A constitution + page templates + lifecycle vocabulary
 BUILD_LOG.md                # per-step record
 ```
 
@@ -176,23 +182,36 @@ make lint-fix        # auto-apply ruff fixes
 pytest -k <pattern>  # run a subset
 ```
 
-## Next chapter — venture-first pilot
+## Next chapter — signal-driven, post-Hermes-validation
 
-See `/Users/svenwellmann/.claude/plans/we-ve-built-this-and-curious-unicorn.md` for the full plan. Summary:
+Substrate is at signal-driven stance: the `granola-extraction-pilot` ran end-to-end against real data (35 meetings → 423 candidates → 18 promoted facts) with zero substrate blockers, and Hermes is in production on `memory-mission==0.1.x`. Next moves are signal-gated, not speculative.
 
-- **P0 — DONE.** MemPalace is the adopted personal-layer substrate behind `PersonalMemoryBackend` (ADR-0004).
-- **P2 — DONE.** Capability-based connector manifest + fail-closed visibility mapping. `firm/systems.yaml` binds logical roles (`email`, `calendar`, `transcript`, `document`, `workspace`) to concrete apps; `NormalizedSourceItem` envelope + per-app helpers + `StagingWriter.write_envelope` are the single staging entry path (ADR-0007).
-- **P3 — Personal-source ingestion.** Wire Gmail + Granola + Calendar through the envelope helpers into the personal substrate. Pilot-task acceptance scenarios run against real-shape data.
-- **P4 — Firm-source ingestion + bridge.** Notion / Attio / Drive as `document_system` / `workspace_system`. Promotion review preserves source-side scope.
-- **P5 — Typed sync-back for approved facts.** Reviewed-mode default; per-app `allowed_mutation_kinds` (ADR-0008 when landed).
-- **P6 — Evidence-pack retrieval + firm auto-wiring at promote time** (ADRs 0006 + 0009).
-- **P7 — Venture reference overlay.** PE + wealth as thinner overlays on the same core.
-- **P8 — Pilot rehearsal + benchmarks.** Employee-memory-on-firm-tasks primary; LongMemEval secondary.
+Active plan: [`~/.claude/plans/okay-lets-envision-a-joyful-prism.md`](file:///Users/svenwellmann/.claude/plans/okay-lets-envision-a-joyful-prism.md). Status across the pilot phases:
+
+- **P0 — DONE.** MemPalace adopted as personal-layer substrate behind `PersonalMemoryBackend` (ADR-0004).
+- **P1 — DONE.** Tight adapter boundary; only `MemPalaceAdapter` imports `mempalace.*`.
+- **P2 — DONE.** Capability-based connector manifest + fail-closed visibility mapping (ADR-0007 + ADR-0011).
+- **P3 — DONE.** Personal-source ingestion validated via `granola-extraction-pilot` end-to-end against real Granola data.
+- **P7-A — DONE.** Venture overlay: constitution + page templates + lifecycle vocabulary + 4 workflow skills.
+- **P4 — DEFERRED.** Firm-source ingestion bridge (Notion / Attio / Drive). Wait for pilot signal.
+- **P5 — DEFERRED.** Typed sync-back for approved facts. Wait for pilot signal.
+- **P6 — DEFERRED.** Evidence-pack retrieval + firm auto-wiring at promote time.
+- **P8 — DEFERRED.** Pilot rehearsal + benchmarks.
+
+**Signal-driven triage triggers** (build on real data, not speculation):
+
+- A bug Hermes hits agent-side that requires substrate change → patch + tag (`v0.1.x`).
+- A primitive Hermes explicitly requests → add + pin in `tests/test_provider_contract.py`.
+- A tool description Hermes consistently misuses → fix description, possibly split tool.
+- Three-employee pattern (federated detector) producing real candidates → tighten promotion gate.
 
 ## Post-V1 roadmap (parked)
 
 Deferred items, each with a real-data trigger. See `project_post_v1_roadmap.md` for triggers.
 
+- **Action-memory primitives** (`docs/ACTION_MEMORY.md`): trigger memory, threshold rules, "ask first" gates, outcome-feedback loops. Build only when a pilot needs them or Hermes asks.
+- **Mid-session operating-state read tools**: `mm_list_open_commitments`, `mm_list_blockers`, `mm_list_unresolved_questions`. Bulk reads for the predicates in `OPERATING_STATE.md`. Substrate already supports via `query_entity` + parsing; convenience tools are signal-gated.
+- **Rereadability primitive**: `re_extract_staged_item(item_path, *, schema_version)` + `extraction_schema_version` field on `ExtractedFact`. Build when ontology evolves and we need to migrate prior batches.
 - **Step 19:** Legislative amendment cycle (batched promotions triggered by evidence pressure).
 - **Step 20:** Constitution bootstrap skill (cold-start firm truth from existing strategy docs).
 - **Step 21:** Relationship-strength view + Graph One adapter (needs real interaction volume).
@@ -200,6 +219,7 @@ Deferred items, each with a real-data trigger. See `project_post_v1_roadmap.md` 
 - 50-scenario federated eval harness (per EVALS § 2.6).
 - Distillation coherence eval (per EVALS § 2.7).
 - `CoherenceResolvedEvent` so the contradiction callout hides acknowledged conflicts.
+- BrainBench-Real-style eval pattern (capture real `mm_*` queries → PII-scrub → replay against retrieval changes; portable from GBrain v0.25.0).
 - `/save` (conversation → personal-plane note) + `/autoresearch` (WebSearch + WebFetch loop) as optional skills.
 - ML-powered query rewriting on hybrid search.
 
