@@ -913,3 +913,40 @@ def test_extraction_prompt_worked_example_has_no_bare_identity_facts() -> None:
             "this teaches the model that mention-only identity facts are valid. "
             "Either remove the bare identity fact or give it real properties."
         )
+
+
+# ---------- External-source-id length boundary ----------
+
+
+def test_writer_accepts_long_external_source_id(tmp_path: Path) -> None:
+    """Google Calendar recurring-event instance ids routinely exceed 128 chars."""
+    writer = ExtractionWriter(
+        wiki_root=tmp_path,
+        source="gcal",
+        target_plane="personal",
+        employee_id="alice",
+    )
+    long_id = (
+        "_60q30c1g60o30e1i60o4ac1g60rj8gpl88rj2c1h84s34h9g60s30c1g60o30c1g"
+        "8oo32g9j8l2k2gpp6csk8ghg64o30c1g60o30c1g60o30c1g60o32c1g60o30c1g"
+        "6t1j2cq66gsk8gpi64sjgchk88sk8h2270o34ca68d136hho6l0g_20260414T090000Z"
+    )
+    assert len(long_id) > 128
+    report = _sample_report(source="gcal", source_id=long_id)
+    path = writer.write(report)
+    assert path.exists()
+    assert path.name == f"{long_id}.json"
+
+
+def test_writer_rejects_overlong_source_id(tmp_path: Path) -> None:
+    """Past the 246-char ceiling — would exceed ext4 filename limit."""
+    writer = ExtractionWriter(
+        wiki_root=tmp_path,
+        source="gmail",
+        target_plane="personal",
+        employee_id="alice",
+    )
+    too_long = "a" * 247
+    report = _sample_report(source_id="msg-1")  # construct then patch via model_copy
+    with pytest.raises(ValueError, match="source_id"):
+        writer.write(report.model_copy(update={"source_id": too_long}))
