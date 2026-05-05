@@ -26,6 +26,20 @@ Two principles do most of the work:
 
 ---
 
+## Three layers of operational memory
+
+Memory Mission compiles communication residue into current operating state — facts, commitments, people, decisions, unresolved loops, triggers, and action rules — so agents can participate without constantly rediscovering how the human and team work. Three layers do this (Sentra's framing, parts 1–3, preserved at `.context/attachments/pasted_text_2026-05-05_*.txt`):
+
+1. **Factual memory** — what exists, what happened, where it lives, who owns it, how it connects. Substrate: per-firm SQLite KG with `valid_from` / `valid_to` validity windows + Bayesian corroboration; on-disk markdown pages with YAML frontmatter; auto-registered entities on triple write. Tools: `mm_query_entity` (with `conflicts_with` annotations on currently-true triples), `mm_record_facts`, `mm_invalidate_fact`, `mm_compile_agent_context`, `mm_record_decision`. Vocabulary: see [OPERATING_STATE.md](OPERATING_STATE.md).
+
+2. **Interaction memory** — why something happened, what people meant, what they debated, what they left unresolved. Substrate: MemPalace evidence layer (raw drawers indexed by drawer key); `OpenQuestion` fact bucket; extraction `support_quote` mandatory on every fact; `triple_sources` append-only provenance per corroboration. Tools: extraction skills, `meeting-prep`, `mm_search_recall`.
+
+3. **Action memory** — when a condition changes, who should care, what guardrails apply, whether to act, ask, wait, escalate, or deliberately do nothing. **Doing nothing is a first-class action.** Action memory is partly agentic — it participates by noticing condition changes, deciding to act, choosing the path, respecting guardrails. Forward work; substrate is being built. Sketch: [ACTION_MEMORY.md](ACTION_MEMORY.md).
+
+Each layer is incomplete without the others. Factual memory alone tells an agent what exists; interaction memory tells it why work matters; action memory tells it when to wake up, when to act, and when to deliberately stay still. The combination is what separates an agent that has tools from an agent that can operate inside a company without creating more cleanup work than it saves.
+
+---
+
 ## Why this, why now
 
 The last two years produced broad agent capability — coding agents, chat agents, voice agents — and a brutal gap on the data layer beneath them. Firms running knowledge work (VCs, wealth managers, law firms, consultancies, corporate strategy teams) now watch their agents repeat questions across meetings, contradict what the firm decided last quarter, and misattribute facts across people who share a first name. The bottleneck is not raw intelligence. It is **governed institutional memory** that agents can read, write, and build on without corrupting what the firm actually believes.

@@ -130,15 +130,31 @@ Synonyms ("worry," "concern," "risk factor," "blocker") all canonicalize to the 
 
 ---
 
-## How the read surface reaches for these
+## Tool surface (as of 2026-05-05)
 
-The data is in the KG via the predicates above. Mid-session read tools that surface operating state to agents are signal-gated (Move 3 of `the-real-insight-i-floofy-pumpkin.md`):
+13 individual-mode MCP tools (`src/memory_mission/mcp/individual_server.py`) and 14 firm-mode tools (`src/memory_mission/mcp/server.py`) currently expose operating state. Grouped by what they do for the predicates above:
 
-- `mm_list_open_commitments(to: str | None = None, status: str | None = None)` — Hermes-gated
-- `mm_list_blockers(entity: str | None = None)` — Hermes-gated
-- `mm_list_unresolved_questions()` — Hermes-gated
+**Lifecycle-transition primitives (writes):**
 
-Until then, agents query via `mm_query_entity(name)` and parse predicate/object pairs against this vocabulary. `compile_individual_boot_context()` already returns commitments + threads + decisions at boot; the new predicates surface the same way once extraction starts producing them.
+- `record_facts(facts: list[dict], ...)` — write multiple facts atomically with append-only audit events for source quotes (commit `09e4e0d`).
+- `invalidate_fact(...)` — append `valid_to` to a currently-true triple with required rationale; this is the lifecycle-transition primitive for `open → resolved`, `open → closed`, and `open → investigating` shifts on the predicates above (commit `09e4e0d`).
+- `record_commitment`, `record_preference`, `record_decision` — typed convenience wrappers.
+- `upsert_thread_status` — `ActiveThread` lifecycle moves.
+
+**Read surface (operating-state queries):**
+
+- `get_boot_context(task_hint, token_budget)` — startup snapshot returning active_threads, commitments, preferences, recent_decisions, relevant_entities, project_status.
+- `query_entity(name, direction, as_of)` — outgoing/incoming triples; **now annotates `conflicts_with`** for currently-true triples sharing a subject + predicate but a different object (commit `574bb5c`). This is partial visibility into "what state is contested right now" without a separate read tool.
+- `compile_agent_context(role, task, attendees, …)` and `render_agent_context(...)` — individual-mode versions shipped (commit `80f647f`); produce operating-state-shaped output for a specific task.
+- `search_recall(query, limit)` — evidence-layer search across the MemPalace/recall backend.
+
+**Not yet shipped (signal-gated; Move 3 of `the-real-insight-i-floofy-pumpkin.md`):**
+
+- `mm_list_open_commitments(to, status)` — bulk read for commitments by recipient/status.
+- `mm_list_blockers(entity)` — what's blocking a given entity.
+- `mm_list_unresolved_questions()` — unresolved-question lifecycle view.
+
+Mid-session agents currently use `query_entity` + parse predicate/object pairs against the vocabulary above. `compile_agent_context` returns task-relevant operating state for workflow agents (`meeting-prep`, etc.). New predicates surface the same way once extraction starts producing them.
 
 ---
 
