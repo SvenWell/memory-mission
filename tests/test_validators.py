@@ -1,10 +1,10 @@
-"""Tests for the consolidated path-segment validator (memory.validators)."""
+"""Tests for the consolidated path-segment validator."""
 
 from __future__ import annotations
 
 import pytest
 
-from memory_mission.memory.validators import (
+from memory_mission.path_safety import (
     SAFE_PATH_SEGMENT_PATTERN,
     validate_path_segment,
 )

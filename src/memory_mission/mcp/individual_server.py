@@ -513,12 +513,32 @@ def serve(
     mcp.run()
 
 
+def _configure_stdio_safe_logging() -> None:  # pragma: no cover - CLI bootstrap
+    """Pin structlog to stderr.
+
+    MCP stdio reserves stdout for JSON-RPC framing. The default
+    PrintLoggerFactory writes to stdout, which would poison the
+    protocol on the very first emitted log line and cause strict MCP
+    clients to refuse the connection. Reconfigure before any structlog
+    call could land.
+    """
+    import sys
+
+    import structlog
+
+    structlog.configure(
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+    )
+
+
 def app() -> None:  # pragma: no cover - CLI entrypoint
+    _configure_stdio_safe_logging()
     cli()
 
 
 __all__ = [
     "IndividualMcpContext",
+    "_configure_stdio_safe_logging",
     "app",
     "initialize",
     "initialize_from_handles",
@@ -526,3 +546,7 @@ __all__ = [
     "mcp",
     "reset",
 ]
+
+
+if __name__ == "__main__":
+    app()

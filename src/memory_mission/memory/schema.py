@@ -50,7 +50,7 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 from typing import Literal
 
-from memory_mission.memory.validators import SAFE_PATH_SEGMENT_PATTERN as _SAFE_EMPLOYEE_ID
+from memory_mission.path_safety import SAFE_PATH_SEGMENT_PATTERN as _SAFE_EMPLOYEE_ID
 
 CORE_DOMAINS: tuple[str, ...] = (
     "people",

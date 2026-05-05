@@ -24,8 +24,8 @@ from typing import Any
 
 from pydantic import TypeAdapter
 
-from memory_mission.memory.validators import SAFE_PATH_SEGMENT_PATTERN as _SAFE_FIRM_ID
 from memory_mission.observability.events import Event
+from memory_mission.path_safety import SAFE_PATH_SEGMENT_PATTERN as _SAFE_FIRM_ID
 
 _EVENT_ADAPTER: TypeAdapter[Event] = TypeAdapter(Event)
 EVENTS_FILENAME = "events.jsonl"

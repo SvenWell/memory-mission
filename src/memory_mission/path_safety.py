@@ -1,16 +1,9 @@
 """Shared path-safety validators.
 
-Four files in this codebase had independently-defined copies of the same
-``r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$"`` regex (``_SAFE_PATH_SEGMENT``
-in ``ingestion/staging.py`` and ``extraction/ingest.py``;
-``_SAFE_EMPLOYEE_ID`` in ``memory/schema.py``; ``_SAFE_FIRM_ID`` in
-``observability/logger.py``). Whenever the constraint changed (e.g.
-the 128 → 246 char ceiling needed for Google Calendar recurring-event
-ids), all four copies had to be hunted down and patched in lock-step.
-
-This module centralises the pattern + a small validator helper. The
-old per-file constants stay as thin aliases for backward compatibility
-within their modules; new code should import from here.
+Several modules need the same single-path-segment constraint for
+operator-controlled ids that become directory or file path components.
+Keep the regex in one import-light module so low-level packages such as
+observability can use it without importing the memory engine package.
 """
 
 from __future__ import annotations
@@ -31,9 +24,6 @@ def validate_path_segment(value: str, *, name: str = "value") -> str:
 
     Returns ``value`` unchanged on success so the helper composes into
     fluent-style code (``foo = validate_path_segment(raw, name="foo")``).
-
-    Raises ``ValueError`` with a descriptive message on failure — the
-    same shape the four pre-existing inline validators produced.
     """
     if not value or not SAFE_PATH_SEGMENT_PATTERN.match(value):
         raise ValueError(

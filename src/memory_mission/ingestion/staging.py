@@ -35,6 +35,7 @@ promotion pipeline.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,7 +50,14 @@ from memory_mission.memory.schema import (
     staging_source_dir,
     validate_employee_id,
 )
-from memory_mission.memory.validators import SAFE_PATH_SEGMENT_PATTERN as _SAFE_PATH_SEGMENT
+from memory_mission.path_safety import SAFE_PATH_SEGMENT_PATTERN as _SAFE_PATH_SEGMENT
+
+# External system identifiers (Gmail message ids, Google Calendar event
+# ids, including recurring-event instance suffixes that append
+# _<UTC datetime>Z) routinely run 200+ chars. Bound at 246 — sized
+# for ext4's 255-byte filename limit minus our 9-byte .json.tmp
+# suffix — tight enough to guard against pathological inputs.
+_SAFE_EXTERNAL_ID = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,245}$")
 
 
 class StagedItem(BaseModel):
@@ -65,11 +73,17 @@ class StagedItem(BaseModel):
     markdown_path: Path
 
 
-def _validate_segment(value: str, *, name: str) -> None:
-    if not value or not _SAFE_PATH_SEGMENT.match(value):
+def _validate_segment(
+    value: str,
+    *,
+    name: str,
+    pattern: re.Pattern[str] = _SAFE_PATH_SEGMENT,
+) -> None:
+    if not value or not pattern.match(value):
+        max_chars = 246 if pattern is _SAFE_EXTERNAL_ID else 128
         raise ValueError(
-            f"{name} {value!r} must match {_SAFE_PATH_SEGMENT.pattern} "
-            "(alphanumerics + ._- only, 1-128 chars, no path separators)"
+            f"{name} {value!r} must match {pattern.pattern} "
+            f"(alphanumerics + ._- only, 1-{max_chars} chars, no path separators)"
         )
 
 
@@ -141,7 +155,7 @@ class StagingWriter:
         written atomically (temp file + rename) so a crash mid-write can't
         leave a half-written sidecar that future reads would parse.
         """
-        _validate_segment(item_id, name="item_id")
+        _validate_segment(item_id, name="item_id", pattern=_SAFE_EXTERNAL_ID)
         self._raw_dir.mkdir(parents=True, exist_ok=True)
         self._source_dir.mkdir(parents=True, exist_ok=True)
 
@@ -197,7 +211,7 @@ class StagingWriter:
 
     def get(self, item_id: str) -> StagedItem | None:
         """Return a pointer to the staged item if both files exist."""
-        _validate_segment(item_id, name="item_id")
+        _validate_segment(item_id, name="item_id", pattern=_SAFE_EXTERNAL_ID)
         raw_path = self._raw_dir / f"{item_id}.json"
         md_path = self._source_dir / f"{item_id}.md"
         if not raw_path.exists() or not md_path.exists():
@@ -218,7 +232,7 @@ class StagingWriter:
 
     def remove(self, item_id: str) -> bool:
         """Drop a staged item. Returns True if anything was removed."""
-        _validate_segment(item_id, name="item_id")
+        _validate_segment(item_id, name="item_id", pattern=_SAFE_EXTERNAL_ID)
         raw_path = self._raw_dir / f"{item_id}.json"
         md_path = self._source_dir / f"{item_id}.md"
         removed = False
