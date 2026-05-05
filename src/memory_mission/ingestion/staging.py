@@ -50,10 +50,7 @@ from memory_mission.memory.schema import (
     staging_source_dir,
     validate_employee_id,
 )
-
-# Path-safe component for our own identifiers (source labels). Tight by
-# design — these are operator-controlled config strings.
-_SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
+from memory_mission.path_safety import SAFE_PATH_SEGMENT_PATTERN as _SAFE_PATH_SEGMENT
 
 # External system identifiers (Gmail message ids, Google Calendar event
 # ids, including recurring-event instance suffixes that append

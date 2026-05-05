@@ -44,15 +44,13 @@ from memory_mission.identity import IdentityResolver
 from memory_mission.identity.base import EntityKind
 from memory_mission.ingestion.mentions import MentionTracker, Tier
 from memory_mission.memory.schema import Plane, plane_root, validate_employee_id
+from memory_mission.path_safety import SAFE_PATH_SEGMENT_PATTERN as _SAFE_PATH_SEGMENT
 
 # Canonical ``entity_type`` strings treated as organizations by the
 # identity resolver; everything else defaults to ``person``. Keep the
 # set small and explicit so new vocabulary doesn't silently flip the
 # default.
 _ORGANIZATION_TYPES = frozenset({"organization", "company", "firm", "org"})
-
-# Source labels and our own identifiers — short by design.
-_SAFE_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,127}$")
 
 # External source ids (e.g. Gmail message ids, Google Calendar recurring
 # event instance ids). Mirror of ingestion.staging._SAFE_EXTERNAL_ID (245-char body).
