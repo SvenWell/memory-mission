@@ -497,6 +497,17 @@ class MemoryMissionProvider:
         )
         return boot.render()
 
+    def queue_prefetch(self, query: str) -> None:
+        """Pre-warm hook called by Hermes after a turn. V1 no-op.
+
+        We're duck-typing the Hermes ABC (no inheritance), so an absent
+        method would surface as AttributeError if Hermes calls it. The
+        compile is fast enough today that the synchronous ``prefetch``
+        path doesn't need pre-warming. Wire this up if profiling shows
+        prefetch latency dominating per-turn cost.
+        """
+        del query
+
     def sync_turn(self, user_content: str, assistant_content: str) -> None:
         """Record the turn for later evidence-layer ingestion. NON-BLOCKING.
 
