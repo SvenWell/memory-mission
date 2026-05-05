@@ -295,6 +295,70 @@ def test_resolve_entity_rejects_empty_name(installed_ctx) -> None:
         server.resolve_entity("   ")
 
 
+# ---------- compile_agent_context / render_agent_context (parity with firm-mode) ----------
+
+
+def test_compile_agent_context_returns_packet_for_personal_plane(installed_ctx, kg) -> None:
+    """Smoke test: structured packet contains role + task + attendee context."""
+    kg.add_triple("alice", "works_at", "acme", source_closet="gmail", source_file="m1")
+    kg.add_triple("alice", "role", "CEO", source_closet="gmail", source_file="m1")
+
+    out = server.compile_agent_context(
+        role="meeting-prep",
+        task="Discovery call with Alice from Acme",
+        attendees=["alice"],
+    )
+    assert out["role"] == "meeting-prep"
+    assert "Alice" in out["task"] or "alice" in out["task"]
+    assert len(out["attendees"]) == 1
+    alice_ctx = out["attendees"][0]
+    # Triples about alice should surface in the per-attendee context.
+    outgoing_predicates = {t["predicate"] for t in alice_ctx.get("outgoing_triples", [])}
+    assert "works_at" in outgoing_predicates
+    assert "role" in outgoing_predicates
+
+
+def test_render_agent_context_returns_markdown(installed_ctx, kg) -> None:
+    """render_agent_context returns the same data as compile, formatted as markdown."""
+    kg.add_triple("bob", "lives_in", "cape-town", source_closet="conversational", source_file="s1")
+
+    rendered = server.render_agent_context(
+        role="email-draft",
+        task="Reply to Bob",
+        attendees=["bob"],
+    )
+    assert isinstance(rendered, str)
+    assert "email-draft" in rendered
+    assert "bob" in rendered.lower()
+    # Triples should appear in the rendered form.
+    assert "lives_in" in rendered or "cape-town" in rendered
+
+
+def test_compile_agent_context_respects_tier_floor(installed_ctx) -> None:
+    """tier_floor=None ⇒ no doctrine section. We just verify the packet is well-formed."""
+    out = server.compile_agent_context(
+        role="meeting-prep",
+        task="Cold outreach",
+        attendees=["unknown-prospect"],
+        tier_floor=None,
+    )
+    # Doctrine should be empty when no engine pages + no tier_floor.
+    assert out["doctrine"]["pages"] == []
+
+
+def test_compile_agent_context_with_unknown_attendee_returns_empty_context(installed_ctx) -> None:
+    """An attendee we know nothing about returns empty triple lists, not an error."""
+    out = server.compile_agent_context(
+        role="meeting-prep",
+        task="Intro",
+        attendees=["ghost-of-future-past"],
+    )
+    assert len(out["attendees"]) == 1
+    ghost = out["attendees"][0]
+    assert ghost["outgoing_triples"] == []
+    assert ghost["incoming_triples"] == []
+
+
 # ---------- query_entity conflict surfacing ----------
 
 
