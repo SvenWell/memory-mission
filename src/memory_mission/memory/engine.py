@@ -44,6 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from memory_mission.memory.pages import Page, parse_page, render_page
 from memory_mission.memory.schema import (
     Plane,
+    page_path,
     validate_domain,
     validate_employee_id,
 )
@@ -226,20 +227,16 @@ class InMemoryEngine:
         self,
         *,
         embedder: EmbeddingProvider | None = None,
-        wiki_root: Path | None = None,
     ) -> None:
         self._pages: dict[PageKey, Page] = {}
         self._embeddings: dict[PageKey, list[float]] = {}
         self._embedder = embedder
-        self._wiki_root = wiki_root
         self._connected = False
 
     # ---------- Lifecycle ----------
 
     def connect(self) -> None:
         self._connected = True
-        if self._wiki_root is not None:
-            self._rehydrate_from_disk()
 
     def disconnect(self) -> None:
         self._connected = False
@@ -278,8 +275,6 @@ class InMemoryEngine:
         if self._embedder is not None:
             text = f"{page.frontmatter.title}\n{page.compiled_truth}"
             self._embeddings[key] = self._embedder.embed(text)
-        if self._wiki_root is not None:
-            self._write_page_to_disk(page, plane=plane, employee_id=employee_id)
 
     def delete_page(
         self,
@@ -290,10 +285,8 @@ class InMemoryEngine:
     ) -> None:
         _validate_plane_args(plane, employee_id)
         key = PageKey(plane=plane, slug=slug, employee_id=employee_id)
-        page = self._pages.pop(key, None)
+        self._pages.pop(key, None)
         self._embeddings.pop(key, None)
-        if self._wiki_root is not None and page is not None:
-            self._unlink_page_on_disk(page, plane=plane, employee_id=employee_id)
 
     def list_pages(
         self,
@@ -538,103 +531,6 @@ class InMemoryEngine:
             connected=self._connected,
         )
 
-    # ---------- Disk-persistence helpers (active when ``wiki_root`` is set) ----------
-
-    def _path_for(
-        self,
-        page_or_slug: Page | str,
-        *,
-        plane: Plane,
-        employee_id: str | None,
-        domain: str,
-    ) -> Path:
-        """Return the on-disk path for a page in the standard wiki layout.
-
-        Layout mirrors ``_bootstrap_engine_from_wiki`` in the firm-mode
-        server so a single ``wiki_root`` works for both modes:
-
-        - ``firm/<domain>/<slug>.md``
-        - ``personal/<employee_id>/<domain>/<slug>.md``
-        """
-        assert self._wiki_root is not None
-        slug = page_or_slug.slug if isinstance(page_or_slug, Page) else page_or_slug
-        if plane == "personal":
-            assert employee_id is not None
-            validate_employee_id(employee_id)
-            return self._wiki_root / "personal" / employee_id / domain / f"{slug}.md"
-        return self._wiki_root / "firm" / domain / f"{slug}.md"
-
-    def _write_page_to_disk(
-        self,
-        page: Page,
-        *,
-        plane: Plane,
-        employee_id: str | None,
-    ) -> None:
-        path = self._path_for(page, plane=plane, employee_id=employee_id, domain=page.domain)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic write: temp file + rename so a crash mid-write can't leave
-        # a half-written page that the next ``connect()`` would mis-parse.
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(render_page(page), encoding="utf-8")
-        tmp.replace(path)
-
-    def _unlink_page_on_disk(
-        self,
-        page: Page,
-        *,
-        plane: Plane,
-        employee_id: str | None,
-    ) -> None:
-        path = self._path_for(page, plane=plane, employee_id=employee_id, domain=page.domain)
-        if path.exists():
-            path.unlink()
-
-    def _rehydrate_from_disk(self) -> None:
-        """Load any pages already on disk into the in-memory cache.
-
-        Mirrors ``_bootstrap_engine_from_wiki`` in ``mcp/server.py`` but
-        scoped to this engine instance. Symlink-safe: each candidate's
-        resolved path must live inside ``wiki_root.resolve()``.
-
-        Anything that doesn't match the expected layout is skipped silently;
-        operator files (READMEs, drafts) shouldn't crash startup.
-        """
-        assert self._wiki_root is not None
-        if not self._wiki_root.exists():
-            return
-        real_root = self._wiki_root.resolve()
-        for md_file in self._wiki_root.rglob("*.md"):
-            try:
-                resolved = md_file.resolve()
-            except OSError:
-                continue
-            if resolved != real_root and real_root not in resolved.parents:
-                continue
-            try:
-                rel = resolved.relative_to(real_root)
-            except ValueError:
-                continue
-            parts = rel.parts
-            try:
-                if parts[0] == "firm" and len(parts) == 3:
-                    plane: Plane = "firm"
-                    employee_id: str | None = None
-                elif parts[0] == "personal" and len(parts) == 4:
-                    plane = "personal"
-                    employee_id = validate_employee_id(parts[1])
-                else:
-                    continue
-                page = parse_page(md_file.read_text(encoding="utf-8"))
-                key = PageKey(plane=plane, slug=page.slug, employee_id=employee_id)
-                self._pages[key] = page
-                if self._embedder is not None:
-                    text = f"{page.frontmatter.title}\n{page.compiled_truth}"
-                    self._embeddings[key] = self._embedder.embed(text)
-            except Exception:
-                # Best-effort load — never crash on one bad file.
-                continue
-
     # ---------- Internals ----------
 
     def _log_and_return(
@@ -654,6 +550,113 @@ class InMemoryEngine:
             latency_ms=latency_ms,
         )
         return hits
+
+
+class FileSystemEngine(InMemoryEngine):
+    """Markdown-file backed engine using canonical vault paths.
+
+    ``InMemoryEngine`` remains process-local and side-effect free. This
+    implementation keeps the same in-memory search/index behavior, but
+    persists page writes to disk and reloads pages on ``connect()``.
+    """
+
+    def __init__(
+        self,
+        root: Path | str,
+        *,
+        embedder: EmbeddingProvider | None = None,
+    ) -> None:
+        super().__init__(embedder=embedder)
+        self._root = Path(root).expanduser()
+
+    def connect(self) -> None:
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._load_from_disk()
+        super().connect()
+
+    def put_page(
+        self,
+        page: Page,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> None:
+        super().put_page(page, plane=plane, employee_id=employee_id)
+        path = self._page_file(page, plane=plane, employee_id=employee_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(render_page(page), encoding="utf-8")
+        tmp.replace(path)
+
+    def delete_page(
+        self,
+        slug: str,
+        *,
+        plane: Plane,
+        employee_id: str | None = None,
+    ) -> None:
+        page = self.get_page(slug, plane=plane, employee_id=employee_id)
+        super().delete_page(slug, plane=plane, employee_id=employee_id)
+        if page is None:
+            return
+        try:
+            self._page_file(page, plane=plane, employee_id=employee_id).unlink()
+        except FileNotFoundError:
+            pass
+
+    def _load_from_disk(self) -> None:
+        self._pages.clear()
+        self._embeddings.clear()
+        if not self._root.exists():
+            return
+        real_root = self._root.resolve()
+        for md_file in self._root.rglob("*.md"):
+            try:
+                real_file = md_file.resolve()
+            except OSError:
+                continue
+            if not real_file.is_relative_to(real_root):
+                continue
+            plane, employee_id = _plane_from_page_file(md_file, self._root)
+            if plane is None:
+                continue
+            try:
+                page = parse_page(real_file.read_text(encoding="utf-8"))
+                super().put_page(page, plane=plane, employee_id=employee_id)
+            except (OSError, ValueError):
+                continue
+
+    def _page_file(
+        self,
+        page: Page,
+        *,
+        plane: Plane,
+        employee_id: str | None,
+    ) -> Path:
+        rel = page_path(
+            plane,
+            page.frontmatter.domain,
+            page.frontmatter.slug,
+            employee_id=employee_id,
+        )
+        return self._root / Path(rel)
+
+
+def _plane_from_page_file(md_file: Path, root: Path) -> tuple[Plane | None, str | None]:
+    try:
+        rel = md_file.relative_to(root)
+    except ValueError:
+        return None, None
+    parts = rel.parts
+    if len(parts) == 3 and parts[0] == "firm":
+        return "firm", None
+    if len(parts) == 5 and parts[0] == "personal" and parts[2] == "semantic":
+        try:
+            employee_id = validate_employee_id(parts[1])
+        except ValueError:
+            return None, None
+        return "personal", employee_id
+    return None, None
 
 
 def _validate_scope_filter(plane: Plane | None, employee_id: str | None) -> None:

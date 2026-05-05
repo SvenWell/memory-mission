@@ -295,34 +295,226 @@ def test_resolve_entity_rejects_empty_name(installed_ctx) -> None:
         server.resolve_entity("   ")
 
 
-# ---------- record_decision persistence (regression test for InMemoryEngine evaporation) ----------
+# ---------- record_decision persistence ----------
 
 
 def test_record_decision_persists_across_initialize_cycles(tmp_path: Path) -> None:
     """A decision logged in one MCP session must be visible in the next.
 
-    Before the wiki_root persistence fix, individual_server constructed an
+    Before the filesystem engine fix, individual_server constructed an
     in-memory engine that evaporated when the MCP subprocess exited — so
     record_decision wrote to RAM and the boot context returned no decisions
     on the next process. This test guards against that regression.
     """
-    server.initialize(root=tmp_path, user_id="sven", agent_id="hermes")
-    server.record_decision(
-        slug="pivot-2026",
-        title="Pivot to AI tooling",
-        summary="Reallocating Q2 budget to AI tooling spend.",
-        source_closet="conversational",
-        source_file="session-1",
-        decided_at=date(2026, 4, 15),
-    )
-    # Simulate the subprocess dying.
-    server.reset()
+    first = server.initialize(root=tmp_path, user_id="sven", agent_id="hermes")
+    try:
+        server.record_decision(
+            slug="pivot-2026",
+            title="Pivot to AI tooling",
+            summary="Reallocating Q2 budget to AI tooling spend.",
+            source_closet="conversational",
+            source_file="session-1",
+            decided_at=date(2026, 4, 15),
+        )
+        written = tmp_path / "personal" / "sven" / "semantic" / "concepts" / "pivot-2026.md"
+        assert written.exists()
+    finally:
+        first.kg.close()
+        first.engine.disconnect()
+        close_identity = getattr(first.identity, "close", None)
+        if callable(close_identity):
+            close_identity()
+        server.reset()
 
-    # Fresh initialize against the SAME root — what would happen on the
-    # next ``python -m memory_mission.mcp.individual_server`` boot.
-    server.initialize(root=tmp_path, user_id="sven", agent_id="hermes")
-    ctx = server._ctx()
-    page = ctx.engine.get_page("pivot-2026", plane="personal", employee_id="sven")
-    assert page is not None
-    assert page.frontmatter.title == "Pivot to AI tooling"
-    server.reset()
+    second = server.initialize(root=tmp_path, user_id="sven", agent_id="hermes")
+    try:
+        page = second.engine.get_page("pivot-2026", plane="personal", employee_id="sven")
+        assert page is not None
+        assert page.frontmatter.title == "Pivot to AI tooling"
+    finally:
+        second.kg.close()
+        second.engine.disconnect()
+        close_identity = getattr(second.identity, "close", None)
+        if callable(close_identity):
+            close_identity()
+        server.reset()
+
+
+# ---------- compile_agent_context / render_agent_context (parity with firm-mode) ----------
+
+
+def test_compile_agent_context_returns_packet_for_personal_plane(installed_ctx, kg) -> None:
+    """Smoke test: structured packet contains role + task + attendee context."""
+    kg.add_triple("alice", "works_at", "acme", source_closet="gmail", source_file="m1")
+    kg.add_triple("alice", "role", "CEO", source_closet="gmail", source_file="m1")
+
+    out = server.compile_agent_context(
+        role="meeting-prep",
+        task="Discovery call with Alice from Acme",
+        attendees=["alice"],
+    )
+    assert out["role"] == "meeting-prep"
+    assert "Alice" in out["task"] or "alice" in out["task"]
+    assert len(out["attendees"]) == 1
+    alice_ctx = out["attendees"][0]
+    # Triples about alice should surface in the per-attendee context.
+    outgoing_predicates = {t["predicate"] for t in alice_ctx.get("outgoing_triples", [])}
+    assert "works_at" in outgoing_predicates
+    assert "role" in outgoing_predicates
+
+
+def test_render_agent_context_returns_markdown(installed_ctx, kg) -> None:
+    """render_agent_context returns the same data as compile, formatted as markdown."""
+    kg.add_triple("bob", "lives_in", "cape-town", source_closet="conversational", source_file="s1")
+
+    rendered = server.render_agent_context(
+        role="email-draft",
+        task="Reply to Bob",
+        attendees=["bob"],
+    )
+    assert isinstance(rendered, str)
+    assert "email-draft" in rendered
+    assert "bob" in rendered.lower()
+    # Triples should appear in the rendered form.
+    assert "lives_in" in rendered or "cape-town" in rendered
+
+
+def test_compile_agent_context_respects_tier_floor(installed_ctx) -> None:
+    """tier_floor=None ⇒ no doctrine section. We just verify the packet is well-formed."""
+    out = server.compile_agent_context(
+        role="meeting-prep",
+        task="Cold outreach",
+        attendees=["unknown-prospect"],
+        tier_floor=None,
+    )
+    # Doctrine should be empty when no engine pages + no tier_floor.
+    assert out["doctrine"]["pages"] == []
+
+
+def test_compile_agent_context_with_unknown_attendee_returns_empty_context(installed_ctx) -> None:
+    """An attendee we know nothing about returns empty triple lists, not an error."""
+    out = server.compile_agent_context(
+        role="meeting-prep",
+        task="Intro",
+        attendees=["ghost-of-future-past"],
+    )
+    assert len(out["attendees"]) == 1
+    ghost = out["attendees"][0]
+    assert ghost["outgoing_triples"] == []
+    assert ghost["incoming_triples"] == []
+
+
+# ---------- query_entity conflict surfacing ----------
+
+
+def test_query_entity_returns_plain_list_when_no_conflicts(installed_ctx, kg) -> None:
+    """Backwards-compat: triples without conflicts have no conflicts_with key."""
+    kg.add_triple("uniqueco", "founded", "2024", source_closet="conversational", source_file="s")
+    out = server.query_entity("uniqueco")
+    assert len(out) == 1
+    assert "conflicts_with" not in out[0]
+
+
+def test_query_entity_annotates_conflicting_triples(installed_ctx, kg) -> None:
+    """Two currently-true triples with same (subject, predicate) but different object."""
+    kg.add_triple(
+        "sara", "works_at", "acme", confidence=0.95, source_closet="gmail", source_file="msg-1"
+    )
+    kg.add_triple(
+        "sara", "works_at", "beta", confidence=0.7, source_closet="gmail", source_file="msg-2"
+    )
+    out = server.query_entity("sara")
+    assert len(out) == 2
+    # Each triple should carry the OTHER as a conflict peer.
+    for t in out:
+        assert "conflicts_with" in t
+        assert len(t["conflicts_with"]) == 1
+        peer = t["conflicts_with"][0]
+        assert peer["object"] != t["object"]
+        assert "confidence" in peer
+        assert "source_closet" in peer
+        assert "source_file" in peer
+
+
+def test_query_entity_corroboration_is_not_a_conflict(installed_ctx, kg) -> None:
+    """Same (subject, predicate, object) corroborated must NOT surface as conflict."""
+    kg.add_triple("vendor", "sells", "widgets", source_closet="gmail", source_file="msg-a")
+    kg.corroborate(
+        "vendor", "sells", "widgets", confidence=0.9, source_closet="gmail", source_file="msg-b"
+    )
+    out = server.query_entity("vendor")
+    assert len(out) == 1
+    assert "conflicts_with" not in out[0]
+
+
+def test_query_entity_three_way_conflict_lists_all_peers(installed_ctx, kg) -> None:
+    """Three live objects on (s, p) — each lists the other two as peers, conf-desc."""
+    kg.add_triple(
+        "startup",
+        "lead_investor",
+        "fund-a",
+        confidence=0.9,
+        source_closet="gmail",
+        source_file="m1",
+    )
+    kg.add_triple(
+        "startup",
+        "lead_investor",
+        "fund-b",
+        confidence=0.6,
+        source_closet="gmail",
+        source_file="m2",
+    )
+    kg.add_triple(
+        "startup",
+        "lead_investor",
+        "fund-c",
+        confidence=0.8,
+        source_closet="gmail",
+        source_file="m3",
+    )
+    out = server.query_entity("startup")
+    fund_a = next(t for t in out if t["object"] == "fund-a")
+    assert len(fund_a["conflicts_with"]) == 2
+    # Peers ordered by confidence desc.
+    peer_objects = [p["object"] for p in fund_a["conflicts_with"]]
+    assert peer_objects == ["fund-c", "fund-b"]
+
+
+def test_query_entity_filters_invalidated_triples_from_conflicts(installed_ctx, kg) -> None:
+    """Invalidated (valid_to set) triples shouldn't surface as a conflict against the live one."""
+    kg.add_triple("joe", "role", "engineer", source_closet="conversational", source_file="s1")
+    kg.invalidate("joe", "role", "engineer", ended=date(2026, 4, 1))
+    kg.add_triple("joe", "role", "manager", source_closet="conversational", source_file="s2")
+    out = server.query_entity("joe")
+    # Only one currently-true triple → no conflict annotation.
+    assert len(out) == 1
+    assert out[0]["object"] == "manager"
+    assert "conflicts_with" not in out[0]
+
+
+# ---------- CLI bootstrap: stdio-safe logging ----------
+
+
+def test_configure_stdio_safe_logging_pins_factory_to_stderr() -> None:
+    """MCP stdio servers must keep stdout reserved for JSON-RPC frames.
+
+    The default structlog.PrintLoggerFactory writes to stdout — any log
+    line emitted before / during mcp.run() would mix with the protocol
+    stream and cause strict MCP clients to refuse the connection. This
+    bootstrap helper must re-pin the factory so the very next log line
+    lands on stderr, not stdout.
+    """
+    import sys
+
+    import structlog
+
+    server._configure_stdio_safe_logging()
+
+    cfg = structlog.get_config()
+    factory = cfg["logger_factory"]
+    assert isinstance(factory, structlog.PrintLoggerFactory)
+    # PrintLoggerFactory stashes the file as a private attr; allow the
+    # public-vs-private rename without breaking by checking both shapes.
+    file_attr = getattr(factory, "_file", None) or getattr(factory, "file", None)
+    assert file_attr is sys.stderr, f"expected logger factory to write to stderr; got {file_attr!r}"

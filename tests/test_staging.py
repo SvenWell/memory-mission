@@ -332,3 +332,51 @@ def test_staged_item_is_frozen() -> None:
     )
     with pytest.raises(Exception):  # noqa: B017
         item.item_id = "other"  # type: ignore[misc]
+
+
+# ---------- External-id length boundary (Google Calendar recurring events) ----------
+
+
+def test_writer_accepts_long_external_item_id(tmp_path: Path) -> None:
+    """Google Calendar recurring-event instance ids routinely exceed 128 chars.
+
+    Example shape: <base-id>_20260414T090000Z where the base alone is
+    ~200 hex chars. Staging must accept these — they are real, system-generated
+    identifiers that we don't control.
+    """
+    w = _personal_writer(tmp_path)
+    long_id = (
+        "_60q30c1g60o30e1i60o4ac1g60rj8gpl88rj2c1h84s34h9g60s30c1g60o30c1g"
+        "8oo32g9j8l2k2gpp6csk8ghg64o30c1g60o30c1g60o30c1g60o32c1g60o30c1g"
+        "6t1j2cq66gsk8gpi64sjgchk88sk8h2270o34ca68d136hho6l0g_20260414T090000Z"
+    )
+    assert len(long_id) > 128
+    item = w.write(item_id=long_id, raw={"id": long_id}, markdown_body="x")
+    assert item.item_id == long_id
+
+
+def test_writer_accepts_246_char_external_item_id(tmp_path: Path) -> None:
+    """246 chars — sized for ext4 (255-byte filename) minus our suffix."""
+    w = _personal_writer(tmp_path)
+    boundary_id = "a" * 246
+    item = w.write(item_id=boundary_id, raw={"id": boundary_id}, markdown_body="x")
+    assert item.item_id == boundary_id
+
+
+def test_writer_rejects_247_char_external_item_id(tmp_path: Path) -> None:
+    """One past the ceiling — would exceed ext4 filename limit on disk."""
+    w = _personal_writer(tmp_path)
+    too_long = "a" * 247
+    with pytest.raises(ValueError, match="item_id"):
+        w.write(item_id=too_long, raw={"id": too_long}, markdown_body="x")
+
+
+def test_writer_still_rejects_overlong_source_label(tmp_path: Path) -> None:
+    """Source labels are operator-controlled — keep the tight 128-char rule."""
+    too_long_source = "a" * 200
+    with pytest.raises(ValueError, match="source"):
+        StagingWriter(
+            wiki_root=tmp_path,
+            source=too_long_source,
+            target_plane="firm",
+        )
