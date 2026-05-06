@@ -63,6 +63,19 @@ from memory_mission.promotion.proposals import (
 )
 
 
+class ProposalIntegrityError(Exception):
+    """Raised when a proposal's stored id doesn't match its recomputed hash.
+
+    Triggered when an identity-bearing field (plane / employee / entity /
+    source_report_path / facts) was mutated between proposal creation
+    and the next pipeline operation (promote / reject / reopen). The
+    pipeline refuses to act on tampered proposals — modeled on SomaOS's
+    ``context_hash`` binding for governed actions, where an approval is
+    bound to the exact context at approval time and reuse with mutated
+    context is rejected.
+    """
+
+
 class ProposalStateError(Exception):
     """Raised when an operation is attempted on a proposal in the wrong status."""
 
@@ -299,6 +312,7 @@ def reopen(
             f"proposal {proposal_id!r} is {proposal.status!r}; only "
             "rejected proposals can be reopened"
         )
+    _require_integrity(proposal)
     _require_rationale(rationale)
 
     now = datetime.now(UTC)
@@ -352,7 +366,24 @@ def _require_pending(store: ProposalStore, proposal_id: str) -> Proposal:
         raise ProposalStateError(
             f"proposal {proposal_id!r} is {proposal.status!r}; expected pending"
         )
+    _require_integrity(proposal)
     return proposal
+
+
+def _require_integrity(proposal: Proposal) -> None:
+    """Refuse to act on a proposal whose stored id no longer matches its facts.
+
+    Defends against post-creation tampering of identity-bearing fields.
+    See ``ProposalIntegrityError`` for the threat model.
+    """
+    if not proposal.integrity_ok():
+        raise ProposalIntegrityError(
+            f"proposal {proposal.proposal_id!r} integrity check failed: "
+            f"stored id does not match recomputed hash "
+            f"({proposal.expected_proposal_id()!r}). "
+            "Identity-bearing fields (plane / employee / entity / "
+            "source_report_path / facts) were mutated after creation."
+        )
 
 
 def _require_rationale(rationale: str) -> None:
@@ -671,6 +702,7 @@ def _source_closet(proposal: Proposal) -> str:
 
 
 __all__ = [
+    "ProposalIntegrityError",
     "ProposalStateError",
     "create_proposal",
     "promote",

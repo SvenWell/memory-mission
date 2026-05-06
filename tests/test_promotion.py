@@ -24,6 +24,7 @@ from memory_mission.observability import (
 )
 from memory_mission.promotion import (
     Proposal,
+    ProposalIntegrityError,
     ProposalStateError,
     ProposalStore,
     create_proposal,
@@ -1120,3 +1121,148 @@ def test_knowledge_graph_enables_wal(tmp_path: Path) -> None:
     finally:
         graph.close()
     assert mode == "wal"
+
+
+# ---------- Integrity verification (ProposalIntegrityError) ----------
+#
+# SomaOS-style invariant: a proposal's stored ``proposal_id`` is a hash
+# of identity-bearing fields. Mutating any of those fields after creation
+# breaks the link. The pipeline refuses to act on tampered proposals so
+# an approval at one set of facts cannot be replayed against a different
+# set of facts.
+
+
+def test_integrity_ok_for_freshly_created_proposal(store: ProposalStore, tmp_path: Path) -> None:
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        proposal = _create_sample(store)
+    assert proposal.integrity_ok() is True
+    assert proposal.expected_proposal_id() == proposal.proposal_id
+
+
+def test_integrity_ok_false_when_facts_mutated() -> None:
+    """Constructing a proposal with mismatched (id, facts) demonstrates the check."""
+    facts = _sample_facts()
+    real_id = generate_proposal_id(
+        target_plane="firm",
+        target_employee_id=None,
+        target_entity="sarah-chen",
+        source_report_path="/tmp/r.json",
+        facts=facts,
+    )
+    tampered = Proposal(
+        proposal_id=real_id,
+        target_plane="firm",
+        target_entity="sarah-chen",
+        proposer_agent_id="extract-from-staging-v1",
+        proposer_employee_id="alice",
+        # Inject ONE extra fact relative to what real_id was hashed over.
+        facts=[*facts, _identity("ghost-entity")],
+        source_report_path="/tmp/r.json",
+    )
+    assert tampered.integrity_ok() is False
+    assert tampered.expected_proposal_id() != tampered.proposal_id
+
+
+def test_promote_raises_proposal_integrity_error_on_tamper(
+    store: ProposalStore, kg: KnowledgeGraph, tmp_path: Path
+) -> None:
+    """Mutating facts after creation must block promotion."""
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        proposal = _create_sample(store)
+        # Simulate post-creation tampering by overwriting the stored row
+        # with a Proposal whose facts differ from what the id was hashed over.
+        tampered = proposal.model_copy(update={"facts": [*proposal.facts, _identity("ghost")]})
+        store.save(tampered)
+        with pytest.raises(ProposalIntegrityError) as excinfo:
+            promote(
+                store,
+                kg,
+                proposal.proposal_id,
+                reviewer_id="alice",
+                rationale="should not land",
+            )
+    msg = str(excinfo.value)
+    assert "integrity check failed" in msg
+    assert proposal.proposal_id in msg
+
+
+def test_promote_does_not_apply_facts_when_integrity_fails(
+    store: ProposalStore, kg: KnowledgeGraph, tmp_path: Path
+) -> None:
+    """No KG writes leak when the integrity check refuses promotion."""
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        proposal = _create_sample(store)
+        tampered = proposal.model_copy(update={"facts": [_identity("ghost-only-in-tampered-row")]})
+        store.save(tampered)
+        with pytest.raises(ProposalIntegrityError):
+            promote(
+                store,
+                kg,
+                proposal.proposal_id,
+                reviewer_id="alice",
+                rationale="ignored",
+            )
+    # The ghost from the tampered row must NOT have been registered.
+    assert kg.get_entity("ghost-only-in-tampered-row") is None
+    # And the original sarah-chen entity must NOT have landed either,
+    # because the pipeline halted before _apply_facts.
+    assert kg.get_entity("sarah-chen") is None
+
+
+def test_reject_raises_proposal_integrity_error_on_tamper(
+    store: ProposalStore, tmp_path: Path
+) -> None:
+    """The integrity check fires for reject() too, not only promote()."""
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        proposal = _create_sample(store)
+        tampered = proposal.model_copy(update={"target_entity": "different-entity"})
+        store.save(tampered)
+        with pytest.raises(ProposalIntegrityError):
+            reject(
+                store,
+                proposal.proposal_id,
+                reviewer_id="alice",
+                rationale="ignored",
+            )
+
+
+def test_reopen_raises_proposal_integrity_error_on_tamper(
+    store: ProposalStore, tmp_path: Path
+) -> None:
+    """The integrity check fires for reopen() too — covers all three transitions."""
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        proposal = _create_sample(store)
+        rejected = reject(
+            store,
+            proposal.proposal_id,
+            reviewer_id="alice",
+            rationale="not yet",
+        )
+        # Tamper after the legitimate reject.
+        tampered = rejected.model_copy(update={"source_report_path": "/tmp/different.json"})
+        store.save(tampered)
+        with pytest.raises(ProposalIntegrityError):
+            reopen(
+                store,
+                proposal.proposal_id,
+                reviewer_id="alice",
+                rationale="reconsidering",
+            )
+
+
+def test_promote_succeeds_when_integrity_intact(
+    store: ProposalStore, kg: KnowledgeGraph, tmp_path: Path
+) -> None:
+    """Sanity: untampered proposals still promote normally — guard against
+    over-zealous integrity check breaking the happy path."""
+    with observability_scope(observability_root=tmp_path, firm_id="acme"):
+        proposal = _create_sample(store)
+        approved = promote(
+            store,
+            kg,
+            proposal.proposal_id,
+            reviewer_id="alice",
+            rationale="Evidence holds",
+        )
+    assert approved.status == "approved"
+    assert kg.get_entity("sarah-chen") is not None

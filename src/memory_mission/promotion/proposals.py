@@ -81,6 +81,29 @@ class Proposal(BaseModel):
     decision_history: list[DecisionEntry] = Field(default_factory=list)
     rejection_count: int = 0
 
+    def expected_proposal_id(self) -> str:
+        """Recompute the deterministic id from the proposal's identity-bearing fields.
+
+        Useful for integrity verification: a proposal whose stored
+        ``proposal_id`` no longer matches this recomputed value has had
+        its identity-bearing fields (target plane / employee / entity /
+        source_report_path / facts) mutated since creation. The
+        promotion pipeline calls this before any state change to refuse
+        approving a tampered proposal — same shape as SomaOS's
+        ``context_hash`` invariant for governed actions.
+        """
+        return generate_proposal_id(
+            target_plane=self.target_plane,
+            target_employee_id=self.target_employee_id,
+            target_entity=self.target_entity,
+            source_report_path=self.source_report_path,
+            facts=self.facts,
+        )
+
+    def integrity_ok(self) -> bool:
+        """``True`` when the stored ``proposal_id`` matches the recomputed hash."""
+        return self.proposal_id == self.expected_proposal_id()
+
 
 def generate_proposal_id(
     *,

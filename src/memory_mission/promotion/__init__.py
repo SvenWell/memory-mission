@@ -13,10 +13,12 @@ Public surface:
   functions — they combine store updates with KG writes and
   observability events)
 - ``ProposalStateError`` (raised on wrong-status operations)
+- ``ProposalIntegrityError`` (raised when stored id doesn't match facts)
 """
 
 from memory_mission.promotion.pipeline import (
     CoherenceBlockedError,
+    ProposalIntegrityError,
     ProposalStateError,
     ScopeConflictError,
     create_proposal,
@@ -36,6 +38,7 @@ __all__ = [
     "CoherenceBlockedError",
     "DecisionEntry",
     "Proposal",
+    "ProposalIntegrityError",
     "ProposalStateError",
     "ProposalStatus",
     "ProposalStore",
