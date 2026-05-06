@@ -1,7 +1,7 @@
 # deploy/
 
 Operational artefacts for running memory-mission as a long-lived MCP server.
-Captured 2026-05-06 from `/root/memory-mission/` on the production VPS, where
+Captured 2026-05-06 from `/root/memory-mission/` on the main VPS, where
 they had been living untracked.
 
 ## Layout
@@ -50,16 +50,16 @@ env or argparse so the same scripts work in a local test loop.
 
 ## Deploy contract
 
-VPS is pinned to the `production` branch on `SvenWell/memory-mission`. The
+VPS is pinned to the `main` branch on `SvenWell/memory-mission`. The
 launcher Hermes spawns at `/root/memory-mission/individual_with_mempalace.py`
 is a symlink (tracked in git) to `deploy/individual_with_mempalace.py`. So
 Hermes's mcp_servers config never has to change when the launcher does.
 
 Hermes runs as a user systemd unit: `hermes-gateway.service`.
 
-To deploy a change to production:
+To deploy a change to main:
 
-1. Merge into `production` on GitHub (PR or direct push).
+1. Merge into `main` on GitHub (PR or direct push).
 2. SSH to the VPS, then:
 
    ```
@@ -67,7 +67,7 @@ To deploy a change to production:
    ./deploy.sh
    ```
 
-   `deploy.sh` is idempotent: fast-forwards `production`, ensures the
+   `deploy.sh` is idempotent: fast-forwards `main`, ensures the
    launcher symlink, and restarts `hermes-gateway`.
 
 Never edit files on the VPS directly. If you find yourself wanting to,

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Production deploy: pull the production branch and restart Hermes.
+# Deploy: fast-forward main and restart Hermes.
 #
-# Run as root from /root/memory-mission on the production VPS.
-# The VPS is pinned to the `production` branch on SvenWell/memory-mission.
-# Updating production = merging into it on GitHub, then running this script.
+# Run as root from /root/memory-mission on the VPS.
+# The VPS is pinned to `main` on SvenWell/memory-mission. Updating = merging
+# into main on GitHub, then running this script.
 #
 # This script is idempotent — safe to re-run.
 
@@ -12,17 +12,17 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_DIR"
 
-if [ "$(git rev-parse --abbrev-ref HEAD)" != "production" ]; then
-  echo "ERROR: not on the production branch (HEAD = $(git rev-parse --abbrev-ref HEAD))." >&2
-  echo "Run: git checkout production" >&2
+if [ "$(git rev-parse --abbrev-ref HEAD)" != "main" ]; then
+  echo "ERROR: not on main (HEAD = $(git rev-parse --abbrev-ref HEAD))." >&2
+  echo "Run: git checkout main" >&2
   exit 1
 fi
 
-echo "==> Fetching production..."
-git fetch origin production
+echo "==> Fetching main..."
+git fetch origin main
 
-echo "==> Fast-forwarding to origin/production..."
-git pull --ff-only origin production
+echo "==> Fast-forwarding to origin/main..."
+git pull --ff-only origin main
 
 # Belt-and-suspenders: ensure the launcher symlink resolves to the deploy/ path.
 # The symlink is also tracked in git, so a fresh checkout already has it,
@@ -33,6 +33,12 @@ if [ ! -L "$LINK" ] || [ "$(readlink "$LINK")" != "$TARGET" ]; then
   echo "==> (re)creating launcher symlink: $LINK -> $TARGET"
   rm -f "$LINK"
   ln -s "$TARGET" "$LINK"
+fi
+
+# Refresh dependencies in case pyproject.toml moved.
+if [ -d ".venv" ]; then
+  echo "==> Refreshing editable install (picks up pyproject.toml changes)..."
+  ./.venv/bin/pip install -e . --quiet
 fi
 
 echo "==> Restarting Hermes (systemctl --user restart hermes-gateway)..."
