@@ -1,11 +1,14 @@
 """Ingest staged source items into MemPalace.
 
-Walks every raw-sidecar JSON in `staging/personal/keagan/{gmail,gcal}/.raw/`,
+Walks every raw-sidecar JSON in `staging/personal/<employee>/{gmail,gcal}/.raw/`,
 re-runs the envelope helper to rebuild a `NormalizedSourceItem`, and pushes
 each item to the per-employee MemPalace palace via `MemPalaceAdapter.ingest`.
 
 Idempotent at the MemPalace layer — re-ingesting the same item updates the
 chromadb document rather than duplicating.
+
+Identity (EMPLOYEE, FIRM_ID, FIRM_ROOT) comes from env — see
+deploy/.env.example.
 """
 from __future__ import annotations
 
@@ -18,7 +21,8 @@ from pathlib import Path
 # Avoid the protobuf C++ binding mismatch chromadb sometimes hits.
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
-sys.path.insert(0, "/root/memory-mission")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _config import EMPLOYEE, FIRM_ID, FIRM_ROOT, OBS_ROOT, STAGING
 
 from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.ingestion.envelopes import (
@@ -29,12 +33,6 @@ from memory_mission.ingestion.envelopes import (
 from memory_mission.ingestion.systems_manifest import load_systems_manifest
 from memory_mission.observability import observability_scope
 from memory_mission.personal_brain import MemPalaceAdapter
-
-FIRM_ROOT = Path("/root/memory-mission-data")
-STAGING = FIRM_ROOT / "wiki" / "staging" / "personal" / "keagan"
-OBS_ROOT = FIRM_ROOT / ".observability"
-EMPLOYEE = "keagan"
-FIRM_ID = "keagan"
 
 
 def main() -> None:

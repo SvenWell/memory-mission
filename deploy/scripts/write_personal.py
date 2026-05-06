@@ -19,19 +19,16 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-sys.path.insert(0, "/root/memory-mission")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _config import EMPLOYEE, FIRM_ID, FIRM_ROOT, OBS_ROOT, STAGING_FACTS as FACT_STAGING
+
 from memory_mission.extraction import ExtractionReport
 from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.memory.knowledge_graph import KnowledgeGraph
 from memory_mission.observability import observability_scope
 
-FIRM_ROOT = Path("/root/memory-mission-data")
 KG_PATH = FIRM_ROOT / "knowledge.db"
 IDENTITY_PATH = FIRM_ROOT / "identity.db"
-FACT_STAGING = FIRM_ROOT / "wiki" / "staging" / "personal" / "keagan" / ".facts"
-OBS_ROOT = FIRM_ROOT / ".observability"
-EMPLOYEE = "keagan"
-FIRM_ID = "keagan"
 
 
 def canonicalize(resolver: LocalIdentityResolver, name: str, identifiers: list[str], kind: str) -> str:

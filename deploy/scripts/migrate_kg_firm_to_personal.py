@@ -1,15 +1,17 @@
 """Migrate the firm-mode KG (knowledge.db) into PersonalKnowledgeGraph.
 
-The pilot populated `/root/memory-mission-data/knowledge.db` with 179
-entities + 1,312 triples through the firm-mode pipeline. We've since
-swapped Hermes back to individual-mode + MemPalace, which reads its KG
-from `personal/keagan/personal_kg.db` — so those facts are unreachable
-through the active agent surface.
+A firm-mode pipeline pilot populated `<FIRM_ROOT>/knowledge.db` with entities
++ triples. After swapping back to individual-mode + MemPalace, those facts
+are unreachable because Hermes reads its KG from
+`<FIRM_ROOT>/personal/<employee>/personal_kg.db`.
 
-Schemas are identical (same triples + entities columns). This script
-walks firm KG and writes into personal KG via the corroborate-or-insert
+Schemas are identical (same triples + entities columns). This script walks
+the firm KG and writes into the personal KG via the corroborate-or-insert
 pattern: same logic the framework's promotion pipeline uses, idempotent
 across re-runs.
+
+Identity (EMPLOYEE, FIRM_ID, FIRM_ROOT) comes from env — see
+deploy/.env.example.
 """
 from __future__ import annotations
 
@@ -19,16 +21,14 @@ import sys
 from datetime import date
 from pathlib import Path
 
-sys.path.insert(0, "/root/memory-mission")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _config import EMPLOYEE, FIRM_ID, FIRM_ROOT, OBS_ROOT
+
 from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.observability import observability_scope
 from memory_mission.personal_brain.personal_kg import PersonalKnowledgeGraph
 
-FIRM_ROOT = Path("/root/memory-mission-data")
 FIRM_KG = FIRM_ROOT / "knowledge.db"
-OBS_ROOT = FIRM_ROOT / ".observability"
-EMPLOYEE = "keagan"
-FIRM_ID = "keagan"
 
 
 def parse_date_or_none(s: str | None) -> date | None:

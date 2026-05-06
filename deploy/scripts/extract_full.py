@@ -13,7 +13,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-sys.path.insert(0, "/root/memory-mission")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # Reuse the heavy logic from the pilot script — same prompt, same parser,
 # same ingest_facts call. We only override the selector.

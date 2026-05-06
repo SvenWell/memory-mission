@@ -2,25 +2,35 @@
 
 Multiple views in one file:
   1. Hub view — top N entities by degree, filterable.
-  2. Ego networks for the highest-corroborated entities.
+  2. Ego networks for the entities listed in MM_VIZ_CENTERS (env-driven).
   3. Stats panel — entity type breakdown, top corroborations, fact-kind mix.
 
-Output: /root/memory-mission-data/kg_viz/index.html plus per-view files.
+Output: <MM_VIZ_OUT_DIR or $FIRM_ROOT/kg_viz>/index.html plus per-view files.
 Opens in any browser, no server needed.
+
+Env (see deploy/.env.example):
+  MM_USER_ID, MM_FIRM_ROOT  (required, via _config)
+  MM_VIZ_CENTERS            comma-separated entity ids for ego views
+  MM_VIZ_OUT_DIR            optional output dir override
 """
 from __future__ import annotations
 
 import html
 import json
 import sqlite3
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
 from pyvis.network import Network
 
-KG_PATH = Path("/root/memory-mission-data/personal/keagan/personal_kg.db")
-OUT_DIR = Path("/root/memory-mission-data/kg_viz")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _config import EMPLOYEE, FIRM_ROOT, viz_centers, viz_out_dir
+
+KG_PATH = FIRM_ROOT / "personal" / EMPLOYEE / "personal_kg.db"
+OUT_DIR = viz_out_dir()
 OUT_DIR.mkdir(parents=True, exist_ok=True)
+EGO_CENTERS = viz_centers()
 
 # Color palette for entity types — keep stable so hub + ego views are consistent.
 TYPE_COLORS: dict[str, str] = {
@@ -185,6 +195,14 @@ def build_ego_network(
     return len(visited)
 
 
+def _ego_links_html() -> str:
+    """Build the ego-view links from MM_VIZ_CENTERS (empty string if none)."""
+    return "".join(
+        f'    <a href="ego_{html.escape(c)}.html">ego: {html.escape(c)}</a>\n'
+        for c in EGO_CENTERS
+    )
+
+
 def _inject_header(path: Path, title: str) -> None:
     """Wedge a small dark header bar onto pyvis output so the file is self-explanatory."""
     src = path.read_text()
@@ -201,10 +219,7 @@ body {{ margin: 0; background: #0e1116; color: #e6edf3; font-family: -apple-syst
   <div class="links">
     <a href="index.html">overview</a>
     <a href="hub_top80.html">hub (top 80)</a>
-    <a href="ego_keagan-stokoe.html">ego: keagan-stokoe</a>
-    <a href="ego_verascient.html">ego: verascient</a>
-    <a href="ego_heed-digital-media.html">ego: heed-digital-media</a>
-  </div>
+{_ego_links_html()}  </div>
 </div>
 """
     src = src.replace("<body>", "<body>" + header)
@@ -268,10 +283,7 @@ code {{ background: #21262d; padding: 1px 5px; border-radius: 3px; }}
   <div class="links">
     <a href="index.html">overview</a>
     <a href="hub_top80.html">hub (top 80)</a>
-    <a href="ego_keagan-stokoe.html">ego: keagan-stokoe</a>
-    <a href="ego_verascient.html">ego: verascient</a>
-    <a href="ego_heed-digital-media.html">ego: heed-digital-media</a>
-  </div>
+{_ego_links_html()}  </div>
 </div>
 <div class="container">
   <div class="stats">
@@ -317,12 +329,17 @@ def main() -> None:
                                  title="hub (top 80 by degree)",
                                  out_html=OUT_DIR / "hub_top80.html")
 
-    print("building ego views...")
-    for center in ("keagan-stokoe", "verascient", "heed-digital-media"):
-        if center in entity_types or any(s == center for s, _p, _o, _c, _corro in triples):
-            n = build_ego_network(entity_types, triples, center,
-                                   out_html=OUT_DIR / f"ego_{center}.html")
-            print(f"  {center}: {n} nodes")
+    if EGO_CENTERS:
+        print("building ego views...")
+        for center in EGO_CENTERS:
+            if center in entity_types or any(s == center for s, _p, _o, _c, _corro in triples):
+                n = build_ego_network(entity_types, triples, center,
+                                       out_html=OUT_DIR / f"ego_{center}.html")
+                print(f"  {center}: {n} nodes")
+            else:
+                print(f"  {center}: not in KG, skipping")
+    else:
+        print("no MM_VIZ_CENTERS set — skipping ego views")
 
     print("building index page...")
     build_index(entity_types, triples, degrees)

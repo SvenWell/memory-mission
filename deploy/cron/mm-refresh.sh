@@ -2,8 +2,8 @@
 # Daily memory-mission refresh: backfill all sources, ingest into MemPalace,
 # extract entity facts, promote to proposals.
 #
-# Mirrors the gbrain `brain-refresh.sh` pattern: each source is isolated —
-# one failure does not stop the others. Logs land per-source for diagnosis.
+# Each source is isolated — one failure does not stop the others. Logs land
+# per-source under /var/log/memory-mission/.
 #
 # Idempotent end-to-end:
 #   - StagingWriter.get(external_id) skips already-staged items
@@ -11,11 +11,13 @@
 #   - extract_pilot skips items with existing extraction reports
 #   - promote_staged uses deterministic proposal_id (re-runs return existing)
 #
+# All operational config (identity, account labels, Composio credentials)
+# comes from `deploy/.env.local` — see `deploy/.env.example` for the
+# contract. The script aborts loudly if required env is missing.
+#
 # Required: codex CLI logged in via ChatGPT subscription (NOT API key).
 # `codex exec` is what extract_pilot calls per item — API-key mode bills
-# metered OpenAI. The script aborts loudly if subscription auth isn't active.
-#
-# Run via cron (see deploy/cron/install-cron.sh) or manually.
+# metered OpenAI. Subscription is required.
 
 set -uo pipefail
 
@@ -29,6 +31,19 @@ MAIN_LOG="$LOG_DIR/mm-refresh.log"
 
 echo "[$STAMP] starting mm-refresh (commit $(git rev-parse --short HEAD))" >> "$MAIN_LOG"
 
+# --- env -------------------------------------------------------------------
+
+# Source the deploy-local env (gitignored). This is where MM_USER_ID,
+# MM_FIRM_ROOT, MM_*_ACCOUNTS, COMPOSIO_API_KEY etc. live.
+if [ -f deploy/.env.local ]; then
+  set -a
+  . deploy/.env.local
+  set +a
+else
+  echo "[$STAMP] ABORT: deploy/.env.local missing — copy from deploy/.env.example" >> "$MAIN_LOG"
+  exit 1
+fi
+
 # --- prerequisites ---------------------------------------------------------
 
 # Codex auth gate. Subscription mode reports "Logged in using ChatGPT".
@@ -41,40 +56,52 @@ if ! echo "$codex_status" | grep -q "ChatGPT"; then
   exit 1
 fi
 
-# Source the gbrain env so Composio / Granola creds are present, mirroring
-# the pattern other VPS cron jobs use.
-if [ -f /root/.gbrain.env ]; then
-  set -a
-  . /root/.gbrain.env
-  set +a
-fi
-
-PY=/root/memory-mission/.venv/bin/python
+PY="$REPO_DIR/.venv/bin/python"
 if [ ! -x "$PY" ]; then
   echo "[$STAMP] ABORT: $PY missing — run deploy.sh first" >> "$MAIN_LOG"
   exit 1
 fi
 
-# --- Phase 1: source backfills --------------------------------------------
-# Each source has its own log + isolated `|| ... FAILED` so others continue.
+# --- helpers ---------------------------------------------------------------
 
 run_step() {
   local label="$1"; shift
   local logfile="$LOG_DIR/$label.log"
-  echo "[$STAMP] $label start" >> "$MAIN_LOG"
+  echo "[$(date -Iseconds)] $label start" >> "$MAIN_LOG"
   if "$@" >> "$logfile" 2>&1; then
-    echo "[$STAMP] $label ok" >> "$MAIN_LOG"
+    echo "[$(date -Iseconds)] $label ok" >> "$MAIN_LOG"
   else
     rc=$?
-    echo "[$STAMP] $label FAILED (rc=$rc) — see $logfile" >> "$MAIN_LOG"
+    echo "[$(date -Iseconds)] $label FAILED (rc=$rc) — see $logfile" >> "$MAIN_LOG"
   fi
 }
 
-run_step cal-verascient    "$PY" deploy/scripts/backfill.py calendar verascient
-run_step cal-purpledorm    "$PY" deploy/scripts/backfill.py calendar purpledorm
-run_step gmail-verascient  "$PY" deploy/scripts/backfill.py gmail    verascient
-run_step gmail-purpledorm  "$PY" deploy/scripts/backfill.py gmail    purpledorm
-run_step granola           "$PY" deploy/scripts/backfill_granola.py
+# Iterate "label:user_id,label:user_id" env entries; emit just the labels.
+extract_labels() {
+  local raw="${1:-}"
+  [ -z "$raw" ] && return
+  printf '%s\n' "$raw" | tr ',' '\n' | while IFS= read -r entry; do
+    entry="${entry# }"; entry="${entry% }"
+    [ -z "$entry" ] && continue
+    printf '%s\n' "${entry%%:*}"
+  done
+}
+
+# --- Phase 1: source backfills (per-account isolation) --------------------
+
+while IFS= read -r label; do
+  [ -z "$label" ] && continue
+  run_step "cal-$label" "$PY" deploy/scripts/backfill.py calendar "$label"
+done < <(extract_labels "${MM_CALENDAR_ACCOUNTS:-}")
+
+while IFS= read -r label; do
+  [ -z "$label" ] && continue
+  run_step "gmail-$label" "$PY" deploy/scripts/backfill.py gmail "$label"
+done < <(extract_labels "${MM_GMAIL_ACCOUNTS:-}")
+
+if [ -n "${MM_GRANOLA_USER_ID:-}" ]; then
+  run_step granola "$PY" deploy/scripts/backfill_granola.py
+fi
 
 # --- Phase 2: stage → MemPalace -------------------------------------------
 

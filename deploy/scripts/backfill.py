@@ -3,11 +3,13 @@
 Configurable for either toolkit and account. Idempotent: skips items already
 staged. Checkpointed via the durable_run primitive so crashes resume cleanly.
 
-Usage:
-    python backfill.py calendar verascient
-    python backfill.py calendar purpledorm
-    python backfill.py gmail verascient
-    python backfill.py gmail purpledorm
+Identity (EMPLOYEE, FIRM_ID, FIRM_ROOT) and the per-toolkit account mapping
+come from environment variables — see deploy/scripts/_config.py and
+deploy/.env.example for the contract.
+
+Usage (account label must exist in MM_GMAIL_ACCOUNTS / MM_CALENDAR_ACCOUNTS):
+    python backfill.py calendar primary
+    python backfill.py gmail work
 """
 
 from __future__ import annotations
@@ -19,7 +21,8 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, "/root/memory-mission")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _config import EMPLOYEE, FIRM_ID, FIRM_ROOT, OBS_ROOT, WIKI_ROOT, parse_accounts
 from composio_live import make_live_calendar_client, make_live_gmail_client
 
 from memory_mission.durable import durable_run
@@ -34,12 +37,7 @@ from memory_mission.ingestion.staging import StagingWriter
 from memory_mission.ingestion.systems_manifest import load_systems_manifest
 from memory_mission.observability import observability_scope
 
-FIRM_ROOT = Path("/root/memory-mission-data")
-WIKI_ROOT = FIRM_ROOT / "wiki"
-OBS_ROOT = FIRM_ROOT / ".observability"
 DURABLE_DB = FIRM_ROOT / "durable.sqlite3"
-EMPLOYEE = "keagan"
-FIRM_ID = "keagan"
 
 # 180 days back from today
 LOOKBACK_DAYS = 180
@@ -54,10 +52,15 @@ GMAIL_QUERY = (
     "(is:starred OR is:important OR -is:list)"
 )
 
-ACCOUNTS = {
-    "verascient": "keagan-verascient",
-    "purpledorm": "keagan-purpledorm",
-}
+
+def _resolve_account(env_var: str, label: str) -> str:
+    accounts = parse_accounts(env_var)
+    if label not in accounts:
+        sys.stderr.write(
+            f"account label {label!r} not in {env_var}={accounts or 'unset'}\n"
+        )
+        raise SystemExit(2)
+    return accounts[label]
 
 
 def _stage(writer: StagingWriter, item) -> bool:
@@ -73,7 +76,7 @@ def _stage(writer: StagingWriter, item) -> bool:
 
 
 def backfill_calendar(account_label: str) -> None:
-    user_id = ACCOUNTS[account_label]
+    user_id = _resolve_account("MM_CALENDAR_ACCOUNTS", account_label)
     print(f"[cal/{account_label}] start  user_id={user_id}", flush=True)
 
     manifest = load_systems_manifest(FIRM_ROOT / "firm" / "systems.yaml")
@@ -119,7 +122,7 @@ def backfill_calendar(account_label: str) -> None:
 
 
 def backfill_gmail(account_label: str) -> None:
-    user_id = ACCOUNTS[account_label]
+    user_id = _resolve_account("MM_GMAIL_ACCOUNTS", account_label)
     print(f"[gmail/{account_label}] start  user_id={user_id}", flush=True)
     print(f"[gmail/{account_label}] query: {GMAIL_QUERY}", flush=True)
 
@@ -171,7 +174,7 @@ def backfill_gmail(account_label: str) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("source", choices=["calendar", "gmail"])
-    ap.add_argument("account", choices=list(ACCOUNTS))
+    ap.add_argument("account", help="label from MM_CALENDAR_ACCOUNTS / MM_GMAIL_ACCOUNTS")
     args = ap.parse_args()
     if args.source == "calendar":
         backfill_calendar(args.account)

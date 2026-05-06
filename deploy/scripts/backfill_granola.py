@@ -5,14 +5,19 @@ walks meetings via list_meetings, fetches each meeting's metadata + full
 transcript, runs them through `granola_transcript_to_envelope`, and stages.
 
 Granola's `time_range` enum supports 'last_30_days'; we use that.
+
+Identity (EMPLOYEE, FIRM_ID, FIRM_ROOT) and the Granola Composio user_id
+come from environment variables — see deploy/.env.example.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, "/root/memory-mission")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _config import EMPLOYEE, FIRM_ID, FIRM_ROOT, OBS_ROOT, WIKI_ROOT
 from composio_live import make_live_granola_client
 
 from memory_mission.ingestion.envelopes import granola_transcript_to_envelope
@@ -20,12 +25,10 @@ from memory_mission.ingestion.staging import StagingWriter
 from memory_mission.ingestion.systems_manifest import load_systems_manifest
 from memory_mission.observability import observability_scope
 
-FIRM_ROOT = Path("/root/memory-mission-data")
-WIKI_ROOT = FIRM_ROOT / "wiki"
-OBS_ROOT = FIRM_ROOT / ".observability"
-EMPLOYEE = "keagan"
-FIRM_ID = "keagan"
-USER_ID = "keagan"  # Composio connection user_id
+USER_ID = os.environ.get("MM_GRANOLA_USER_ID")
+if not USER_ID:
+    sys.stderr.write("missing required env var MM_GRANOLA_USER_ID\n")
+    raise SystemExit(2)
 
 
 def main() -> None:

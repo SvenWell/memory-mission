@@ -13,9 +13,9 @@ instead of returning `{"error": "no_recall_backend"}`.
 
 Required env (no defaults — fail loudly if missing):
 
-    MM_USER_ID  e.g. keagan
-    MM_AGENT_ID e.g. hermes
-    MM_ROOT     e.g. /root/memory-mission-data
+    MM_USER_ID  employee identity (e.g. "alice")
+    MM_AGENT_ID consuming agent identity (e.g. "hermes")
+    MM_ROOT     firm root data dir (e.g. /root/memory-mission-data)
 
 Wire example (Hermes):
 
@@ -24,7 +24,7 @@ Wire example (Hermes):
         command: <repo>/.venv/bin/python
         args: [<repo>/deploy/individual_with_mempalace.py]
         env:
-          MM_USER_ID: keagan
+          MM_USER_ID: alice
           MM_AGENT_ID: hermes
           MM_ROOT: /root/memory-mission-data
 """

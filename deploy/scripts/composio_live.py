@@ -10,8 +10,8 @@ This is the addon that wires Composio for real — memory-mission's stock
 ``composio.py`` ships the Protocol but raises NotImplementedError. We're the
 first integration test of the Composio path in this repo.
 
-Place this on PYTHONPATH (e.g. /root/memory-mission/composio_live.py) so
-backfill scripts can import it.
+Lives alongside the backfill scripts under deploy/scripts/; each script
+adds its own dir to sys.path so `from composio_live import ...` resolves.
 """
 
 from __future__ import annotations

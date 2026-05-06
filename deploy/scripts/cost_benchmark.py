@@ -13,11 +13,10 @@ import sys
 from pathlib import Path
 from statistics import mean, median, quantiles
 
-sys.path.insert(0, "/root/memory-mission")
-from memory_mission.extraction import EXTRACTION_PROMPT
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _config import FIRM_ROOT as FIRM, STAGING
 
-FIRM = Path("/root/memory-mission-data")
-STAGING = FIRM / "wiki" / "staging" / "personal" / "keagan"
+from memory_mission.extraction import EXTRACTION_PROMPT
 
 # Token rates per 1M tokens (input, output), current public list prices.
 # Adjust if a model is added or rates change.

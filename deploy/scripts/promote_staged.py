@@ -8,6 +8,9 @@ Proposal per (report, entity). Proposals land in proposals.db pending review.
 
 Idempotent: create_proposal() uses a deterministic proposal_id, so re-runs
 return the existing proposal instead of duplicating.
+
+Identity (EMPLOYEE, FIRM_ID, FIRM_ROOT) comes from env — see
+deploy/.env.example.
 """
 from __future__ import annotations
 
@@ -16,18 +19,13 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-sys.path.insert(0, "/root/memory-mission")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _config import EMPLOYEE, FIRM_ID, FIRM_ROOT, OBS_ROOT, STAGING_FACTS, WIKI_ROOT
+
 from memory_mission.extraction import ExtractionReport
 from memory_mission.observability import observability_scope
 from memory_mission.promotion.pipeline import create_proposal
 from memory_mission.promotion.proposals import ProposalStore
-
-FIRM_ROOT = Path("/root/memory-mission-data")
-WIKI_ROOT = FIRM_ROOT / "wiki"
-STAGING_FACTS = WIKI_ROOT / "staging" / "personal" / "keagan" / ".facts"
-OBS_ROOT = FIRM_ROOT / ".observability"
-EMPLOYEE = "keagan"
-FIRM_ID = "keagan"
 
 
 def fact_target_entity(fact: dict) -> str | None:

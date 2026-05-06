@@ -8,11 +8,10 @@ from pathlib import Path
 
 from anthropic import Anthropic
 
-sys.path.insert(0, "/root/memory-mission")
-from memory_mission.extraction import EXTRACTION_PROMPT
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _config import FIRM_ROOT as FIRM, STAGING
 
-FIRM = Path("/root/memory-mission-data")
-STAGING = FIRM / "wiki" / "staging" / "personal" / "keagan"
+from memory_mission.extraction import EXTRACTION_PROMPT
 
 # Model pricing per 1M tokens (input/output) — current Anthropic published rates
 PRICES = {

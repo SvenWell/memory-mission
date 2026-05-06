@@ -25,17 +25,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, "/root/memory-mission")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _config import EMPLOYEE, FIRM_ID, FIRM_ROOT, OBS_ROOT, STAGING, WIKI_ROOT
+
 from memory_mission.extraction import EXTRACTION_PROMPT, ExtractionReport, ingest_facts
 from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.observability import observability_scope
-
-FIRM_ROOT = Path("/root/memory-mission-data")
-WIKI_ROOT = FIRM_ROOT / "wiki"
-STAGING = WIKI_ROOT / "staging" / "personal" / "keagan"
-OBS_ROOT = FIRM_ROOT / ".observability"
-EMPLOYEE = "keagan"
-FIRM_ID = "keagan"
 
 WORKERS = 4
 BODY_TRUNC_CHARS = 8000  # cap input cost on long emails
