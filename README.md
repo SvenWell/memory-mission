@@ -157,6 +157,13 @@ skills/                     # 19 shipped, markdown + YAML frontmatter (10 backfi
 tests/                      # 1091 passing
 docs/                       # VISION + ARCHITECTURE + ABSTRACTIONS + OPERATING_STATE + ACTION_MEMORY + EVALS + AGENTS + adr/ + recipes/
 overlays/venture/           # P7-A constitution + page templates + lifecycle vocabulary
+deploy/                     # operational artefacts — MCP launcher, ingestion scripts, daily cron
+├── individual_with_mempalace.py   # stdio MCP entry point (consuming agent spawns this)
+├── scripts/                       # backfills, extraction, promotion, KG migrations, viz
+├── cron/                          # mm-refresh.sh + install-cron.sh (daily ingestion)
+├── .env.example                   # env contract — copy to .env.local on the deploy host
+└── README.md                      # deploy contract + setup
+deploy.sh                   # idempotent VPS deploy: pull main, refresh deps, restart Hermes
 BUILD_LOG.md                # per-step record
 ```
 
@@ -181,6 +188,50 @@ make check           # full pre-commit check
 make lint-fix        # auto-apply ruff fixes
 pytest -k <pattern>  # run a subset
 ```
+
+## Deploying + daily ingestion
+
+The `deploy/` directory holds everything you need to run memory-mission as a
+long-lived MCP server with a daily ingestion pipeline (Gmail, Calendar,
+Granola → MemPalace + KG). All deploy-specific values (identity, account
+labels, API keys) come from `deploy/.env.local` (gitignored). Anyone can
+clone, fill in `.env.example`, and run the same flow against their own data.
+
+**MCP server.** `deploy/individual_with_mempalace.py` is the stdio entry
+point. Wire it into your consuming agent's `mcp_servers` config with
+`MM_USER_ID` / `MM_AGENT_ID` / `MM_ROOT` set in env. See
+[`deploy/README.md`](deploy/README.md).
+
+**One-command deploy.** On a host pinned to `main`, `./deploy.sh`
+fast-forwards `main`, refreshes the editable install (so new dependency
+pins land), ensures the launcher symlink, and restarts the consuming
+agent's systemd unit. Idempotent — safe to re-run.
+
+**Daily refresh.** `deploy/cron/mm-refresh.sh` runs the full pipeline once:
+
+| Phase | Step |
+|---|---|
+| Backfill (per source, isolated) | `backfill.py calendar <label>`, `backfill.py gmail <label>`, `backfill_granola.py` |
+| Stage → MemPalace | `mempalace_ingest.py` |
+| Extract facts via Codex CLI (subscription) | `extract_pilot.py` |
+| Promote → proposals | `promote_staged.py` |
+
+Each step has its own log under `/var/log/memory-mission/<step>.log` and is
+isolated — one source failing does not stop the others. The whole pipeline
+is idempotent: re-runs over overlapping windows skip already-processed
+items rather than duplicating.
+
+To wire it up on a fresh host:
+
+```bash
+cp deploy/.env.example deploy/.env.local
+$EDITOR deploy/.env.local                    # MM_USER_ID, MM_FIRM_ROOT, account labels, COMPOSIO_API_KEY, ...
+codex login --device-auth                    # extract_pilot uses `codex exec`; subscription mode required
+./deploy/cron/install-cron.sh                # idempotent — installs a single 04:00 UTC daily entry
+```
+
+Full setup, env contract, diagnostics, and disable instructions in
+[`deploy/cron/README.md`](deploy/cron/README.md).
 
 ## Next chapter — signal-driven, post-Hermes-validation
 
