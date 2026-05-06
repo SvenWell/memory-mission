@@ -35,6 +35,9 @@ import pytest
 from memory_mission.integrations import hermes_provider
 from memory_mission.integrations.hermes_provider import (
     TOOL_BOOT_CONTEXT,
+    TOOL_COMPLETE_TASK,
+    TOOL_CREATE_TASK,
+    TOOL_LIST_TASKS,
     TOOL_LIST_THREADS,
     TOOL_OBSERVE,
     TOOL_QUERY_ENTITY,
@@ -44,6 +47,7 @@ from memory_mission.integrations.hermes_provider import (
     TOOL_RESOLVE_ENTITY,
     TOOL_SEARCH_RECALL,
     TOOL_THREAD_STATUS,
+    TOOL_UPDATE_TASK_STATUS,
     MemoryMissionProvider,
     register,
 )
@@ -155,13 +159,17 @@ EXPECTED_TOOL_NAMES: tuple[str, ...] = (
     TOOL_SEARCH_RECALL,
     TOOL_RESOLVE_ENTITY,
     TOOL_OBSERVE,
+    TOOL_CREATE_TASK,
+    TOOL_UPDATE_TASK_STATUS,
+    TOOL_COMPLETE_TASK,
+    TOOL_LIST_TASKS,
 )
 
 
-def test_tool_count_is_ten() -> None:
+def test_tool_count_is_fourteen() -> None:
     """Adding/removing tools is a contract change. This test makes that intentional."""
     schemas = MemoryMissionProvider().get_tool_schemas()
-    assert len(schemas) == 10
+    assert len(schemas) == 14
 
 
 def test_tool_names_are_pinned() -> None:
@@ -231,6 +239,9 @@ def test_module_exports_expected_public_names() -> None:
         "MemoryMissionProvider",
         "register",
         "TOOL_BOOT_CONTEXT",
+        "TOOL_COMPLETE_TASK",
+        "TOOL_CREATE_TASK",
+        "TOOL_LIST_TASKS",
         "TOOL_LIST_THREADS",
         "TOOL_OBSERVE",
         "TOOL_QUERY_ENTITY",
@@ -240,6 +251,7 @@ def test_module_exports_expected_public_names() -> None:
         "TOOL_RESOLVE_ENTITY",
         "TOOL_SEARCH_RECALL",
         "TOOL_THREAD_STATUS",
+        "TOOL_UPDATE_TASK_STATUS",
     }
     actual = set(hermes_provider.__all__)
     missing = expected - actual

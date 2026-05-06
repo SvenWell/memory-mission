@@ -59,8 +59,47 @@ PROJECT_STATUS_PREDICATE = "status"
 PROJECT_TYPE_MARKER = "project"  # frontmatter `extra: type: project`
 PROJECT_TYPE_KEY = "type"
 
+# Task predicates (Phase A of native tasks layer; ADR-0017 forthcoming).
+# Tasks are the durable-obligation superset of commitments — broader
+# status enum, owner / linked_thread / next_action / outcome / completed_at
+# fields. Phase A introduces the predicates + write tools; Phase B
+# renames boot context's `commitments` field to `tasks`.
+TASK_STATUS_PREDICATE = "task_status"
+TASK_TITLE_PREDICATE = "task_title"
+TASK_OWNER_PREDICATE = "task_owner"
+TASK_DUE_PREDICATE = "task_due_by"
+TASK_COMPLETED_AT_PREDICATE = "task_completed_at"
+TASK_LINKED_THREAD_PREDICATE = "task_linked_thread"
+TASK_NEXT_ACTION_PREDICATE = "task_next_action"
+TASK_OUTCOME_PREDICATE = "task_outcome"
+
 ThreadStatus = Literal["active", "in_progress", "blocked", "deferred"]
 CommitmentStatus = Literal["open", "completed", "blocked", "cancelled"]
+TaskStatus = Literal[
+    "open",
+    "in_progress",
+    "waiting",
+    "blocked",
+    "deferred",
+    "completed",
+    "cancelled",
+    "superseded",
+]
+TASK_STATUS_VALUES: frozenset[str] = frozenset(
+    (
+        "open",
+        "in_progress",
+        "waiting",
+        "blocked",
+        "deferred",
+        "completed",
+        "cancelled",
+        "superseded",
+    )
+)
+TASK_ACTIVE_STATUSES: frozenset[str] = frozenset(
+    ("open", "in_progress", "waiting", "blocked", "deferred")
+)
 
 
 # ---------- Aspect types ----------
@@ -87,6 +126,39 @@ class Commitment(BaseModel):
     status: CommitmentStatus
     description: str | None = None
     due_by: date | None = None
+    last_signal_at: date | None = None
+    source_closet: str | None = None
+    source_file: str | None = None
+
+
+class Task(BaseModel):
+    """A durable obligation captured as operating-state, never deleted on completion.
+
+    Phase A (native tasks layer): superset of Commitment with broader
+    status enum + owner / linked_thread / next_action / outcome /
+    completed_at. Boot-context surfacing waits for Phase B's
+    ``commitments`` -> ``tasks`` field rename.
+
+    Per Hermes' design brief: "a task is not removed when completed. It
+    changes state." Open views filter to active work; completed /
+    cancelled / deferred / superseded tasks remain queryable as history.
+    Provenance is on every state-change triple, not on the Task object —
+    the event log is "all currently-true ``task_status`` triples for
+    this task_id ordered by ``valid_from``" (no separate event table
+    for MVP per ADR-0016 §"Event log" precedent).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    task_id: str
+    title: str
+    status: TaskStatus
+    owner: str | None = None
+    due_at: date | None = None
+    completed_at: date | None = None
+    linked_thread: str | None = None
+    next_action: str | None = None
+    outcome: str | None = None
     last_signal_at: date | None = None
     source_closet: str | None = None
     source_file: str | None = None

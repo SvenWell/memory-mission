@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -54,7 +55,18 @@ from memory_mission.synthesis.individual_boot import (
     COMMITMENT_DUE_PREDICATE,
     COMMITMENT_STATUS_PREDICATE,
     PREFERENCE_PREDICATE_PREFIX,
+    TASK_ACTIVE_STATUSES,
+    TASK_COMPLETED_AT_PREDICATE,
+    TASK_DUE_PREDICATE,
+    TASK_LINKED_THREAD_PREDICATE,
+    TASK_NEXT_ACTION_PREDICATE,
+    TASK_OUTCOME_PREDICATE,
+    TASK_OWNER_PREDICATE,
+    TASK_STATUS_PREDICATE,
+    TASK_STATUS_VALUES,
+    TASK_TITLE_PREDICATE,
     THREAD_STATUS_PREDICATE,
+    Task,
     compile_individual_boot_context,
 )
 
@@ -82,6 +94,10 @@ TOOL_QUERY_ENTITY = "mm_query_entity"
 TOOL_SEARCH_RECALL = "mm_search_recall"
 TOOL_RESOLVE_ENTITY = "mm_resolve_entity"
 TOOL_OBSERVE = "mm_observe"
+TOOL_CREATE_TASK = "mm_create_task"
+TOOL_UPDATE_TASK_STATUS = "mm_update_task_status"
+TOOL_COMPLETE_TASK = "mm_complete_task"
+TOOL_LIST_TASKS = "mm_list_tasks"
 
 
 class MemoryMissionProvider:
@@ -448,6 +464,101 @@ class MemoryMissionProvider:
                     },
                 },
             },
+            {
+                "name": TOOL_CREATE_TASK,
+                "description": (
+                    "Open a new task. A task is a durable obligation — "
+                    "never deleted on completion, only state-changed. "
+                    "Status defaults to 'open'. Owner defaults to the "
+                    "current user_id. Returns the generated task_id."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "owner": {"type": "string"},
+                        "due_at": {"type": "string", "format": "date"},
+                        "linked_thread": {"type": "string"},
+                        "source_closet": {"type": "string"},
+                        "source_file": {"type": "string"},
+                    },
+                    "required": ["title", "source_closet", "source_file"],
+                },
+            },
+            {
+                "name": TOOL_UPDATE_TASK_STATUS,
+                "description": (
+                    "Transition a task to a new status. Invalidates the "
+                    "prior status. Use mm_complete_task instead when "
+                    "marking complete (it also writes completed_at + "
+                    "outcome). Status enum: open / in_progress / waiting "
+                    "/ blocked / deferred / completed / cancelled / "
+                    "superseded."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string"},
+                        "new_status": {
+                            "type": "string",
+                            "enum": [
+                                "open",
+                                "in_progress",
+                                "waiting",
+                                "blocked",
+                                "deferred",
+                                "completed",
+                                "cancelled",
+                                "superseded",
+                            ],
+                        },
+                        "valid_from": {"type": "string", "format": "date"},
+                        "source_closet": {"type": "string"},
+                        "source_file": {"type": "string"},
+                    },
+                    "required": ["task_id", "new_status", "source_closet", "source_file"],
+                },
+            },
+            {
+                "name": TOOL_COMPLETE_TASK,
+                "description": (
+                    "Mark a task completed. Never deletes the task — "
+                    "writes status=completed, completed_at, and "
+                    "(optionally) outcome. The task remains queryable "
+                    "as completed history."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {"type": "string"},
+                        "outcome": {"type": "string"},
+                        "completed_at": {"type": "string", "format": "date"},
+                        "source_closet": {"type": "string"},
+                        "source_file": {"type": "string"},
+                    },
+                    "required": ["task_id", "source_closet", "source_file"],
+                },
+            },
+            {
+                "name": TOOL_LIST_TASKS,
+                "description": (
+                    "List currently-true tasks filtered by status / "
+                    "owner / linked_thread / due_before / since. Special "
+                    "status value 'active' filters to open / in_progress "
+                    "/ waiting / blocked / deferred. Sorted: due_at ASC "
+                    "nulls last, then last_signal_at DESC."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string"},
+                        "owner": {"type": "string"},
+                        "linked_thread": {"type": "string"},
+                        "due_before": {"type": "string", "format": "date"},
+                        "since": {"type": "string", "format": "date"},
+                    },
+                },
+            },
         ]
 
     def handle_tool_call(self, name: str, args: dict[str, Any]) -> Any:
@@ -473,6 +584,14 @@ class MemoryMissionProvider:
             return self._tool_resolve_entity(args)
         if name == TOOL_OBSERVE:
             return self._tool_observe(args)
+        if name == TOOL_CREATE_TASK:
+            return self._tool_create_task(args)
+        if name == TOOL_UPDATE_TASK_STATUS:
+            return self._tool_update_task_status(args)
+        if name == TOOL_COMPLETE_TASK:
+            return self._tool_complete_task(args)
+        if name == TOOL_LIST_TASKS:
+            return self._tool_list_tasks(args)
         # Unknown tool — keep KG reference live to satisfy the type checker.
         del kg
         raise ValueError(f"Unknown Memory Mission tool: {name}")
@@ -850,6 +969,226 @@ class MemoryMissionProvider:
         )
         return {"hits": [h.model_dump(mode="json") for h in hits]}
 
+    def _tool_create_task(self, args: dict[str, Any]) -> dict[str, Any]:
+        kg = self._require_kg()
+        title = str(args["title"])
+        _validate_source(args.get("source_closet"), args.get("source_file"))
+        source_closet = str(args["source_closet"])
+        source_file = str(args["source_file"])
+        owner = args.get("owner")
+        owner_str = str(owner) if owner else self._require_user_id()
+        due_at = _parse_date(args.get("due_at"))
+        linked_thread = args.get("linked_thread")
+        linked_str = str(linked_thread) if linked_thread else None
+
+        task_id = f"task_{uuid.uuid4().hex}"
+        triples: list[dict[str, Any]] = []
+        triples.append(
+            kg.add_triple(
+                task_id,
+                TASK_STATUS_PREDICATE,
+                "open",
+                source_closet=source_closet,
+                source_file=source_file,
+            ).model_dump(mode="json")
+        )
+        triples.append(
+            kg.add_triple(
+                task_id,
+                TASK_TITLE_PREDICATE,
+                title,
+                source_closet=source_closet,
+                source_file=source_file,
+            ).model_dump(mode="json")
+        )
+        triples.append(
+            kg.add_triple(
+                task_id,
+                TASK_OWNER_PREDICATE,
+                owner_str,
+                source_closet=source_closet,
+                source_file=source_file,
+            ).model_dump(mode="json")
+        )
+        if due_at is not None:
+            triples.append(
+                kg.add_triple(
+                    task_id,
+                    TASK_DUE_PREDICATE,
+                    due_at.isoformat(),
+                    source_closet=source_closet,
+                    source_file=source_file,
+                ).model_dump(mode="json")
+            )
+        if linked_str is not None:
+            triples.append(
+                kg.add_triple(
+                    task_id,
+                    TASK_LINKED_THREAD_PREDICATE,
+                    linked_str,
+                    source_closet=source_closet,
+                    source_file=source_file,
+                ).model_dump(mode="json")
+            )
+        return {"task_id": task_id, "owner": owner_str, "triples": triples}
+
+    def _tool_update_task_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        kg = self._require_kg()
+        task_id = str(args["task_id"])
+        new_status = str(args["new_status"])
+        if new_status not in TASK_STATUS_VALUES:
+            raise ValueError("new_status must be one of: " + ", ".join(sorted(TASK_STATUS_VALUES)))
+        _validate_source(args.get("source_closet"), args.get("source_file"))
+        valid_from = _parse_date(args.get("valid_from"))
+        for prior in kg.query_entity(task_id, direction="outgoing"):
+            if prior.predicate == TASK_STATUS_PREDICATE and prior.valid_to is None:
+                kg.invalidate(prior.subject, prior.predicate, prior.object, ended=valid_from)
+                break
+        triple = kg.add_triple(
+            task_id,
+            TASK_STATUS_PREDICATE,
+            new_status,
+            valid_from=valid_from,
+            source_closet=str(args["source_closet"]),
+            source_file=str(args["source_file"]),
+        )
+        return triple.model_dump(mode="json")
+
+    def _tool_complete_task(self, args: dict[str, Any]) -> dict[str, Any]:
+        kg = self._require_kg()
+        task_id = str(args["task_id"])
+        _validate_source(args.get("source_closet"), args.get("source_file"))
+        source_closet = str(args["source_closet"])
+        source_file = str(args["source_file"])
+        completed_on = _parse_date(args.get("completed_at")) or date.today()
+        outcome = args.get("outcome")
+        outcome_str = str(outcome) if outcome else None
+
+        for prior in kg.query_entity(task_id, direction="outgoing"):
+            if prior.predicate == TASK_STATUS_PREDICATE and prior.valid_to is None:
+                kg.invalidate(prior.subject, prior.predicate, prior.object, ended=completed_on)
+                break
+        triples: list[dict[str, Any]] = []
+        triples.append(
+            kg.add_triple(
+                task_id,
+                TASK_STATUS_PREDICATE,
+                "completed",
+                valid_from=completed_on,
+                source_closet=source_closet,
+                source_file=source_file,
+            ).model_dump(mode="json")
+        )
+        triples.append(
+            kg.add_triple(
+                task_id,
+                TASK_COMPLETED_AT_PREDICATE,
+                completed_on.isoformat(),
+                source_closet=source_closet,
+                source_file=source_file,
+            ).model_dump(mode="json")
+        )
+        if outcome_str is not None:
+            triples.append(
+                kg.add_triple(
+                    task_id,
+                    TASK_OUTCOME_PREDICATE,
+                    outcome_str,
+                    source_closet=source_closet,
+                    source_file=source_file,
+                ).model_dump(mode="json")
+            )
+        return {
+            "task_id": task_id,
+            "completed_at": completed_on.isoformat(),
+            "triples": triples,
+        }
+
+    def _tool_list_tasks(self, args: dict[str, Any]) -> list[dict[str, Any]]:
+        kg = self._require_kg()
+        status = args.get("status")
+        owner = args.get("owner")
+        linked_thread = args.get("linked_thread")
+        due_before = _parse_date(args.get("due_before"))
+        since = _parse_date(args.get("since"))
+
+        if status is not None and status != "active" and status not in TASK_STATUS_VALUES:
+            raise ValueError(
+                "status must be one of: active, " + ", ".join(sorted(TASK_STATUS_VALUES))
+            )
+
+        status_triples = [
+            t for t in kg.query_relationship(TASK_STATUS_PREDICATE) if t.valid_to is None
+        ]
+        if status == "active":
+            status_triples = [t for t in status_triples if t.object in TASK_ACTIVE_STATUSES]
+        elif status is not None:
+            status_triples = [t for t in status_triples if t.object == status]
+
+        out: list[dict[str, Any]] = []
+        for st in status_triples:
+            task_id = st.subject
+            triples = [
+                t for t in kg.query_entity(task_id, direction="outgoing") if t.valid_to is None
+            ]
+            title = next((t.object for t in triples if t.predicate == TASK_TITLE_PREDICATE), "")
+            task_owner = next(
+                (t.object for t in triples if t.predicate == TASK_OWNER_PREDICATE),
+                None,
+            )
+            due_raw = next(
+                (t.object for t in triples if t.predicate == TASK_DUE_PREDICATE),
+                None,
+            )
+            completed_at_raw = next(
+                (t.object for t in triples if t.predicate == TASK_COMPLETED_AT_PREDICATE),
+                None,
+            )
+            linked = next(
+                (t.object for t in triples if t.predicate == TASK_LINKED_THREAD_PREDICATE),
+                None,
+            )
+            next_act = next(
+                (t.object for t in triples if t.predicate == TASK_NEXT_ACTION_PREDICATE),
+                None,
+            )
+            outcome_v = next(
+                (t.object for t in triples if t.predicate == TASK_OUTCOME_PREDICATE),
+                None,
+            )
+
+            if owner is not None and task_owner != str(owner):
+                continue
+            if linked_thread is not None and linked != str(linked_thread):
+                continue
+            due_at = date.fromisoformat(due_raw) if due_raw else None
+            if due_before is not None:
+                if due_at is None or due_at >= due_before:
+                    continue
+            if since is not None:
+                if st.valid_from is None or st.valid_from < since:
+                    continue
+
+            task = Task(
+                task_id=task_id,
+                title=title,
+                status=st.object,  # type: ignore[arg-type]
+                owner=task_owner,
+                due_at=due_at,
+                completed_at=date.fromisoformat(completed_at_raw) if completed_at_raw else None,
+                linked_thread=linked,
+                next_action=next_act,
+                outcome=outcome_v,
+                last_signal_at=st.valid_from,
+                source_closet=st.source_closet,
+                source_file=st.source_file,
+            )
+            out.append(task.model_dump(mode="json"))
+
+        out.sort(key=lambda t: t["last_signal_at"] or "", reverse=True)
+        out.sort(key=lambda t: (t["due_at"] is None, t["due_at"] or ""))
+        return out
+
     # ------------------------------------------------------------------ #
     # Internal helpers                                                     #
     # ------------------------------------------------------------------ #
@@ -907,6 +1246,9 @@ def _parse_date(raw: object) -> date | None:
 
 __all__ = [
     "TOOL_BOOT_CONTEXT",
+    "TOOL_COMPLETE_TASK",
+    "TOOL_CREATE_TASK",
+    "TOOL_LIST_TASKS",
     "TOOL_LIST_THREADS",
     "TOOL_OBSERVE",
     "TOOL_QUERY_ENTITY",
@@ -916,6 +1258,7 @@ __all__ = [
     "TOOL_RESOLVE_ENTITY",
     "TOOL_SEARCH_RECALL",
     "TOOL_THREAD_STATUS",
+    "TOOL_UPDATE_TASK_STATUS",
     "MemoryMissionProvider",
     "register",
 ]
