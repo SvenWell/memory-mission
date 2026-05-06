@@ -48,12 +48,35 @@ env or argparse so the same scripts work in a local test loop.
 | `visualize_kg.py` | KG visualization |
 | `write_personal.py` | Direct personal-KG writes |
 
-## Deploy contract (target — Phase 3 of the cleanup plan)
+## Deploy contract
 
-VPS pinned to a `production` branch. Updates only via:
+VPS is pinned to the `production` branch on `SvenWell/memory-mission`. The
+launcher Hermes spawns at `/root/memory-mission/individual_with_mempalace.py`
+is a symlink (tracked in git) to `deploy/individual_with_mempalace.py`. So
+Hermes's mcp_servers config never has to change when the launcher does.
+
+Hermes runs as a user systemd unit: `hermes-gateway.service`.
+
+To deploy a change to production:
+
+1. Merge into `production` on GitHub (PR or direct push).
+2. SSH to the VPS, then:
+
+   ```
+   cd /root/memory-mission
+   ./deploy.sh
+   ```
+
+   `deploy.sh` is idempotent: fast-forwards `production`, ensures the
+   launcher symlink, and restarts `hermes-gateway`.
+
+Never edit files on the VPS directly. If you find yourself wanting to,
+that change belongs on a branch on GitHub.
+
+### Verifying the running deploy
 
 ```
-git fetch origin && git checkout production && git pull && systemctl reload hermes
+git -C /root/memory-mission rev-parse HEAD          # exact commit
+systemctl --user status hermes-gateway              # service health
+tail -50 /root/.hermes/logs/mcp-stderr.log          # MCP child log
 ```
-
-Never edit files on the VPS directly.
