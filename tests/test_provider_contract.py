@@ -36,6 +36,7 @@ from memory_mission.integrations import hermes_provider
 from memory_mission.integrations.hermes_provider import (
     TOOL_BOOT_CONTEXT,
     TOOL_LIST_THREADS,
+    TOOL_OBSERVE,
     TOOL_QUERY_ENTITY,
     TOOL_RECORD_COMMITMENT,
     TOOL_RECORD_DECISION,
@@ -153,13 +154,14 @@ EXPECTED_TOOL_NAMES: tuple[str, ...] = (
     TOOL_QUERY_ENTITY,
     TOOL_SEARCH_RECALL,
     TOOL_RESOLVE_ENTITY,
+    TOOL_OBSERVE,
 )
 
 
-def test_tool_count_is_nine() -> None:
+def test_tool_count_is_ten() -> None:
     """Adding/removing tools is a contract change. This test makes that intentional."""
     schemas = MemoryMissionProvider().get_tool_schemas()
-    assert len(schemas) == 9
+    assert len(schemas) == 10
 
 
 def test_tool_names_are_pinned() -> None:
@@ -230,6 +232,7 @@ def test_module_exports_expected_public_names() -> None:
         "register",
         "TOOL_BOOT_CONTEXT",
         "TOOL_LIST_THREADS",
+        "TOOL_OBSERVE",
         "TOOL_QUERY_ENTITY",
         "TOOL_RECORD_COMMITMENT",
         "TOOL_RECORD_DECISION",

@@ -49,7 +49,10 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
+
+if TYPE_CHECKING:
+    from memory_mission.personal_brain.observations import PersonalObservation
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -989,6 +992,83 @@ class KnowledgeGraph:
         if viewer_scopes is not None:
             triples = [t for t in triples if t.scope in viewer_scopes]
         return triples
+
+    def query_observations(
+        self,
+        *,
+        subject: str | None = None,
+        predicate: str | None = None,
+        since: date | None = None,
+        viewer_scopes: frozenset[str] | None = None,
+        now: datetime | None = None,
+    ) -> list[PersonalObservation]:
+        """Return currently-true observations matching the filters (ADR-0016).
+
+        An observation is a read-projection of a currently-true triple
+        plus its corroboration history, enriched with a freshness trend
+        computed at read time. Nothing new persists — every field is
+        derived from existing ``triples`` + ``triple_sources`` rows.
+
+        Filters:
+        - ``subject`` / ``predicate`` — equality match on the underlying
+          triple. ``None`` means "any."
+        - ``since`` — only observations whose latest corroboration is on
+          or after this date.
+        - ``viewer_scopes`` — drops triples whose scope isn't in the
+          viewer's set, mirroring ``query_entity``.
+        - ``now`` — override for the freshness rule's "now" anchor.
+          Defaults to ``datetime.now(UTC)``. Tests pass an explicit
+          value for determinism.
+
+        Contradiction is detected on read: if two or more currently-true
+        triples share the same ``(subject, predicate)`` but disagree on
+        ``object``, every triple in that group gets ``freshness_trend``
+        ``"contradicted"``. Same shape as ``conflicts_with`` annotations
+        on ``query_entity`` in the individual MCP server.
+
+        Sorted by ``last_corroborated_at`` descending — most-recently
+        evidenced observations first.
+        """
+        # Lazy import to avoid the personal_brain.observations <->
+        # memory.knowledge_graph cycle (observations.py imports Triple
+        # + TripleSource from this module). PersonalObservation type
+        # comes from the TYPE_CHECKING block at module top.
+        from memory_mission.personal_brain.observations import build_observation
+
+        clauses: list[str] = ["valid_to IS NULL"]
+        params: list[Any] = []
+        if subject is not None:
+            clauses.append("subject = ?")
+            params.append(subject)
+        if predicate is not None:
+            clauses.append("predicate = ?")
+            params.append(predicate)
+        where = " WHERE " + " AND ".join(clauses)
+        rows = self._conn.execute(f"SELECT * FROM triples{where}", params).fetchall()  # noqa: S608
+        triples = [_row_to_triple(r) for r in rows]
+        if viewer_scopes is not None:
+            triples = [t for t in triples if t.scope in viewer_scopes]
+
+        # Group by (subject, predicate) to detect intra-result contradictions.
+        groups: dict[tuple[str, str], list[Triple]] = {}
+        for t in triples:
+            groups.setdefault((t.subject, t.predicate), []).append(t)
+
+        observations: list[PersonalObservation] = []
+        for t in triples:
+            sources = self.triple_sources(t.subject, t.predicate, t.object)
+            if since is not None and sources:
+                last_at = max(s.added_at for s in sources)
+                if last_at.date() < since:
+                    continue
+            peers = [
+                other for other in groups[(t.subject, t.predicate)] if other.object != t.object
+            ]
+            contradicted = bool(peers)
+            observations.append(build_observation(t, sources, contradicted=contradicted, now=now))
+
+        observations.sort(key=lambda o: o.last_corroborated_at, reverse=True)
+        return observations
 
     def timeline(
         self,

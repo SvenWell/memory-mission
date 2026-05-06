@@ -28,9 +28,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from memory_mission.identity.base import IdentityResolver
 from memory_mission.memory.knowledge_graph import (
@@ -41,6 +41,9 @@ from memory_mission.memory.knowledge_graph import (
 )
 from memory_mission.memory.schema import validate_employee_id
 from memory_mission.memory.tiers import DEFAULT_TIER, Tier
+
+if TYPE_CHECKING:
+    from memory_mission.personal_brain.observations import PersonalObservation
 
 
 def employee_scope(employee_id: str) -> str:
@@ -289,6 +292,27 @@ class PersonalKnowledgeGraph:
             predicate,
             as_of=as_of,
             viewer_scopes=self._scope_set,
+        )
+
+    def query_observations(
+        self,
+        *,
+        subject: str | None = None,
+        predicate: str | None = None,
+        since: date | None = None,
+        now: datetime | None = None,
+    ) -> list[PersonalObservation]:
+        """Currently-true observations on this employee's plane (ADR-0016).
+
+        Auto-applies the per-employee viewer scope so callers cannot
+        accidentally widen beyond the employee's own data.
+        """
+        return self._kg.query_observations(
+            subject=subject,
+            predicate=predicate,
+            since=since,
+            viewer_scopes=self._scope_set,
+            now=now,
         )
 
     def timeline(self, entity_name: str | None = None) -> list[Triple]:

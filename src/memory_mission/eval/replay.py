@@ -31,7 +31,7 @@ from memory_mission.eval.captures import EvalCapture, EvalCapturesStore, _result
 from memory_mission.personal_brain.personal_kg import PersonalKnowledgeGraph
 
 # Tools we know how to replay faithfully (args fully preserved through scrubbing).
-REPLAYABLE_TOOLS = frozenset({"mm_query_entity"})
+REPLAYABLE_TOOLS = frozenset({"mm_query_entity", "mm_observe"})
 
 
 @dataclass(frozen=True)
@@ -153,6 +153,8 @@ def _replay_one(capture: EvalCapture, *, kg: PersonalKnowledgeGraph) -> ReplayCa
 
     if capture.tool_name == "mm_query_entity":
         return _replay_query_entity(capture, args, kg)
+    if capture.tool_name == "mm_observe":
+        return _replay_observe(capture, args, kg)
 
     return _skip(capture, f"unhandled_tool:{capture.tool_name}")
 
@@ -205,6 +207,50 @@ def _replay_query_entity(
             ]
         out.append(payload)
 
+    new_latency_ms = int((time.perf_counter() - started) * 1000)
+    new_sig = _result_signature(out)
+    return ReplayCase(
+        capture_id=capture.capture_id,
+        tool_name=capture.tool_name,
+        matched=(new_sig == capture.result_signature),
+        skipped=False,
+        skip_reason=None,
+        old_latency_ms=capture.latency_ms,
+        new_latency_ms=new_latency_ms,
+        old_signature=capture.result_signature,
+        new_signature=new_sig,
+    )
+
+
+def _replay_observe(
+    capture: EvalCapture, args: dict[str, Any], kg: PersonalKnowledgeGraph
+) -> ReplayCase:
+    """Replay an mm_observe capture against the live KG and diff signatures.
+
+    The freshness rule depends on "now," so we anchor it to the
+    capture's ``captured_at`` to keep the replayed result deterministic
+    relative to what was originally produced. Without this, a capture
+    from yesterday would always disagree with today's replay just
+    because freshness drifted with elapsed time.
+    """
+    subject_arg = args.get("subject")
+    predicate_arg = args.get("predicate")
+    since_raw = args.get("since")
+    since: date | None = None
+    if isinstance(since_raw, str):
+        try:
+            since = date.fromisoformat(since_raw)
+        except ValueError:
+            return _skip(capture, "since_invalid")
+
+    started = time.perf_counter()
+    observations = kg.query_observations(
+        subject=str(subject_arg) if subject_arg is not None else None,
+        predicate=str(predicate_arg) if predicate_arg is not None else None,
+        since=since,
+        now=capture.captured_at,
+    )
+    out = [obs.model_dump(mode="json") for obs in observations]
     new_latency_ms = int((time.perf_counter() - started) * 1000)
     new_sig = _result_signature(out)
     return ReplayCase(

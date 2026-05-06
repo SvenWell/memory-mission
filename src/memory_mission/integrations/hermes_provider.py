@@ -81,6 +81,7 @@ TOOL_RECORD_DECISION = "mm_record_decision"
 TOOL_QUERY_ENTITY = "mm_query_entity"
 TOOL_SEARCH_RECALL = "mm_search_recall"
 TOOL_RESOLVE_ENTITY = "mm_resolve_entity"
+TOOL_OBSERVE = "mm_observe"
 
 
 class MemoryMissionProvider:
@@ -426,6 +427,27 @@ class MemoryMissionProvider:
                     "required": ["name"],
                 },
             },
+            {
+                "name": TOOL_OBSERVE,
+                "description": (
+                    "BELIEF — currently-true observations enriched with "
+                    "proof_count + freshness_trend (new / strengthening / "
+                    "stable / weakening / stale / contradicted). Use when "
+                    "you need 'what do we believe about X, and is the "
+                    "picture strengthening or going stale?' Distinct from "
+                    "mm_query_entity which returns raw triples without "
+                    "aggregation. All filters optional; absent filter "
+                    "means 'any.' Sorted by last_corroborated_at desc."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string"},
+                        "predicate": {"type": "string"},
+                        "since": {"type": "string", "format": "date"},
+                    },
+                },
+            },
         ]
 
     def handle_tool_call(self, name: str, args: dict[str, Any]) -> Any:
@@ -449,6 +471,8 @@ class MemoryMissionProvider:
             return self._tool_search_recall(args)
         if name == TOOL_RESOLVE_ENTITY:
             return self._tool_resolve_entity(args)
+        if name == TOOL_OBSERVE:
+            return self._tool_observe(args)
         # Unknown tool — keep KG reference live to satisfy the type checker.
         del kg
         raise ValueError(f"Unknown Memory Mission tool: {name}")
@@ -752,6 +776,18 @@ class MemoryMissionProvider:
             triples = [t for t in triples if t.valid_to is None]
         return [t.model_dump(mode="json") for t in triples]
 
+    def _tool_observe(self, args: dict[str, Any]) -> list[dict[str, Any]]:
+        kg = self._require_kg()
+        subject_arg = args.get("subject")
+        predicate_arg = args.get("predicate")
+        since = _parse_date(args.get("since"))
+        observations = kg.query_observations(
+            subject=str(subject_arg) if subject_arg is not None else None,
+            predicate=str(predicate_arg) if predicate_arg is not None else None,
+            since=since,
+        )
+        return [obs.model_dump(mode="json") for obs in observations]
+
     def _tool_resolve_entity(self, args: dict[str, Any]) -> dict[str, Any]:
         """Resolve a typed identifier or bare entity name to canonical form.
 
@@ -872,6 +908,7 @@ def _parse_date(raw: object) -> date | None:
 __all__ = [
     "TOOL_BOOT_CONTEXT",
     "TOOL_LIST_THREADS",
+    "TOOL_OBSERVE",
     "TOOL_QUERY_ENTITY",
     "TOOL_RECORD_COMMITMENT",
     "TOOL_RECORD_DECISION",

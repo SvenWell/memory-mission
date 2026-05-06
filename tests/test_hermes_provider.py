@@ -24,6 +24,7 @@ from memory_mission.identity.local import LocalIdentityResolver
 from memory_mission.integrations.hermes_provider import (
     TOOL_BOOT_CONTEXT,
     TOOL_LIST_THREADS,
+    TOOL_OBSERVE,
     TOOL_QUERY_ENTITY,
     TOOL_RECORD_COMMITMENT,
     TOOL_RECORD_DECISION,
@@ -124,7 +125,7 @@ def test_initialize_with_explicit_kwargs(tmp_path: Path) -> None:
 # ---------- Tool schemas ----------
 
 
-def test_get_tool_schemas_lists_nine_mm_tools(provider: MemoryMissionProvider) -> None:
+def test_get_tool_schemas_lists_ten_mm_tools(provider: MemoryMissionProvider) -> None:
     names = [s["name"] for s in provider.get_tool_schemas()]
     assert names == [
         TOOL_BOOT_CONTEXT,
@@ -136,6 +137,7 @@ def test_get_tool_schemas_lists_nine_mm_tools(provider: MemoryMissionProvider) -
         TOOL_QUERY_ENTITY,
         TOOL_SEARCH_RECALL,
         TOOL_RESOLVE_ENTITY,
+        TOOL_OBSERVE,
     ]
     # Every schema names a tool starting with the mm_ prefix to avoid
     # collision with other Hermes providers' tool names.

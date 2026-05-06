@@ -917,6 +917,61 @@ def query_entity(
     return out
 
 
+# ---------- Observations (ADR-0016 — read-shape over Triple + triple_sources) ----------
+
+
+@mcp.tool()
+def observe(
+    subject: str | None = None,
+    predicate: str | None = None,
+    since: date | None = None,
+) -> list[dict[str, Any]]:
+    """Currently-true observations matching the filters (ADR-0016).
+
+    Returns evidence-backed beliefs as a flat list of dicts. Each dict
+    carries the underlying triple plus aggregated provenance:
+
+    - ``proof_count`` — number of independent sources backing the claim
+    - ``freshness_trend`` — one of ``new`` / ``strengthening`` /
+      ``stable`` / ``weakening`` / ``stale`` / ``contradicted``
+    - ``last_corroborated_at`` — ISO timestamp of most recent source
+    - ``history`` — full ordered source list with timestamps
+
+    Filters:
+    - ``subject`` — equality match on the underlying triple's subject
+    - ``predicate`` — equality match on the predicate
+    - ``since`` — drop observations whose latest corroboration is
+      before this date
+
+    All filters are optional; absent filter means "any." Use this when
+    the agent needs "what do we believe about X, and is the picture
+    strengthening or going stale?" — distinct from ``query_entity``
+    which returns raw triples without aggregation.
+    """
+    ctx = _ctx()
+    started = time.perf_counter()
+    observations = ctx.kg.query_observations(
+        subject=subject,
+        predicate=predicate,
+        since=since,
+    )
+    out = [obs.model_dump(mode="json") for obs in observations]
+    record_eval_capture(
+        captures_path=ctx.eval_captures_path,
+        user_id=ctx.user_id,
+        tool_name="mm_observe",
+        args={
+            "subject": subject,
+            "predicate": predicate,
+            "since": since.isoformat() if since else None,
+        },
+        result=out,
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        mm_version=__version__,
+    )
+    return out
+
+
 # ---------- Agent-context compile / render (parity with firm-mode tools) ----------
 
 
