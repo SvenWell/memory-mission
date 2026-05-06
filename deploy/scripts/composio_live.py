@@ -188,10 +188,11 @@ _GRANOLA_EMAIL_RE = re.compile(r"<([^>@]+@[^>]+)>")
 
 
 def _granola_parse_date(s: str) -> str:
-    """Granola dates come as 'Apr 29, 2026 2:00 PM' or 'Apr 3, 2026 3:15 PM'.
+    """Granola dates come in several formats — try each, return ISO string.
 
-    Day and hour can be 1- or 2-digit. ``strptime``'s ``%d``/``%I`` are
-    zero-padded on Linux, so we zero-pad first.
+    Returns empty string if no format matches, so callers can fall back
+    rather than propagating an unparseable raw string downstream (the
+    library's `_require_datetime` would reject it).
     """
     if not s:
         return ""
@@ -200,26 +201,55 @@ def _granola_parse_date(s: str) -> str:
     norm = re.sub(r"^(\w{3,})\s+(\d),", r"\1 0\2,", norm)
     # Zero-pad single-digit hour: " 3:15 PM" → " 03:15 PM"
     norm = re.sub(r"\s(\d):(\d{2})\s(AM|PM)$", r" 0\1:\2 \3", norm)
+
+    # Try Granola's prevailing string formats — abbreviated and full month,
+    # with and without time-of-day.
+    for fmt in (
+        "%b %d, %Y %I:%M %p",   # Apr 29, 2026 02:00 PM
+        "%b %d, %Y",             # Apr 29, 2026
+        "%B %d, %Y %I:%M %p",   # April 29, 2026 02:00 PM
+        "%B %d, %Y",             # April 29, 2026
+    ):
+        try:
+            return datetime.strptime(norm, fmt).isoformat() + "+00:00"
+        except ValueError:
+            continue
+
+    # Last resort: ISO 8601 — handles "2026-04-29T15:00:00Z", "2026-04-29", etc.
     try:
-        for fmt in ("%b %d, %Y %I:%M %p", "%b %d, %Y"):
-            try:
-                return datetime.strptime(norm, fmt).isoformat() + "+00:00"
-            except ValueError:
-                continue
-    except Exception:
+        parsed = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.isoformat()
+    except (ValueError, TypeError):
         pass
-    return s
+
+    return ""
 
 
 def _granola_parse_meeting_block(block: str, mid: str, title: str, date: str) -> dict[str, Any]:
-    """Parse one <meeting>…</meeting> body — extract attendees + summary content."""
+    """Parse one <meeting>…</meeting> body — extract attendees + summary content.
+
+    If Granola returns a date we can't parse (drafts, older records, format
+    drift), fall back to the current UTC time so ingestion still succeeds.
+    Better to have an approximate timestamp than to lose the meeting.
+    """
+    import sys as _sys
+
     attendees = _GRANOLA_EMAIL_RE.findall(block)
+    created_at = _granola_parse_date(date)
+    if not created_at:
+        _sys.stderr.write(
+            f"[granola] WARN: meeting {mid} date={date!r} unparseable; "
+            "using current UTC time as fallback\n"
+        )
+        created_at = datetime.now(timezone.utc).isoformat()
     return {
         "id": mid,
         "transcript_id": mid,
         "meeting_id": mid,
         "title": title,
-        "created_at": _granola_parse_date(date),
+        "created_at": created_at,
         "attendees": attendees,
         "labels": [],
         "transcript": block.strip(),  # the structured notes ARE our body
