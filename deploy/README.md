@@ -11,11 +11,16 @@ contract.
 deploy/
 ├── individual_with_mempalace.py    # MCP server entry point (stdio)
 ├── individual_with_mempalace.py    # symlinked at repo root for convenience
-├── scripts/                        # backfills, migrations, ingestion utilities
+├── scripts/
 │   ├── _config.py                  # shared env-driven config (imported by all scripts)
+│   ├── _kg_projection.py           # KG → generic Person/Company records (target-agnostic)
+│   ├── _crm_target.py              # CRMTarget protocol; what every adapter implements
+│   ├── _target_hubspot.py          # HubSpotTarget adapter
+│   ├── _target_notion.py           # NotionTarget adapter (with --provision)
+│   ├── push_to_crm.py              # KG → CRM orchestrator (--target=hubspot|notion)
 │   ├── backfill.py                 # Gmail/Calendar → staging via Composio
 │   ├── backfill_granola.py         # Granola transcripts → staging
-│   ├── composio_live.py            # Composio live-adapter factories
+│   ├── composio_live.py            # Composio live-adapter factories (Gmail/Cal/Granola/HubSpot/Notion)
 │   ├── mempalace_ingest.py         # staged → MemPalace
 │   ├── extract_pilot.py            # staged → ExtractionReport (codex CLI)
 │   ├── extract_full.py             # all-staged variant of extract_pilot
@@ -26,7 +31,7 @@ deploy/
 │   ├── migrate_kg_firm_to_personal.py  # one-time firm→personal KG migration
 │   └── visualize_kg.py             # interactive HTML KG visualization
 ├── cron/
-│   ├── mm-refresh.sh               # daily pipeline entrypoint
+│   ├── mm-refresh.sh               # daily pipeline entrypoint (5 phases)
 │   ├── install-cron.sh             # idempotent crontab installer
 │   └── README.md                   # cron usage + diagnostics
 ├── .env.example                    # env contract (copy to .env.local on VPS)
@@ -126,3 +131,43 @@ tail -50 /root/.hermes/logs/mcp-stderr.log          # MCP child log
 See `deploy/cron/README.md`. Single cron entry runs `deploy.sh` then
 `deploy/cron/mm-refresh.sh` to pull latest code, refresh deps, restart
 Hermes, and ingest the last day's data across all configured sources.
+
+## KG → CRM projection
+
+`push_to_crm.py` is the single entry point for projecting personal-KG
+entities into a CRM. Adapter pattern: each target implements `CRMTarget`
+(see `_crm_target.py`); shared filter, dedup, dry-run JSONL preview,
+matching, and create/update orchestration live in `push_to_crm.py` +
+`_kg_projection.py` once. Adding a new target is dropping in
+`_target_<name>.py` and registering it in `_load_target`.
+
+Targets currently shipped:
+
+| Target | Match | Provisioning | Status |
+|---|---|---|---|
+| `hubspot` | by `email` (contacts) / `domain` (companies) — built-in unique | none (HubSpot has typed objects) | active in cron |
+| `notion` | by `mm_entity_id` rich_text (fallback `Email` / `Domain`) | one-time `--provision` creates `Memory Mission CRM` parent + `Contacts (mm)` + `Companies (mm)` databases | active in cron |
+| `monday` | (skipped — paid plan blocker; adapter slot reserved) | — | not wired |
+
+Usage:
+
+```bash
+# dry-run: writes a JSONL preview of every proposed create/update
+python deploy/scripts/push_to_crm.py --target=hubspot
+python deploy/scripts/push_to_crm.py --target=notion
+
+# one-time setup (Notion only)
+python deploy/scripts/push_to_crm.py --target=notion --provision
+
+# write to the CRM
+python deploy/scripts/push_to_crm.py --target=hubspot --apply
+python deploy/scripts/push_to_crm.py --target=notion --apply
+```
+
+Both targets are idempotent: re-runs match existing records and update
+only what's actually different (HubSpot computes a real delta; Notion
+re-writes properties unconditionally — no-op when values match).
+Previews land at `<MM_FIRM_ROOT>/.crm-preview/<target>-<ts>.jsonl`.
+
+Required env per target lives in `.env.example`. The daily cron checks
+each target's env before running it — leave a target unset to skip it.

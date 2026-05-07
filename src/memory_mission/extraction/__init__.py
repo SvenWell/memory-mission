@@ -14,6 +14,15 @@ its own LLM (Claude, GPT, Gemini) with this prompt, parses the JSON,
 and calls ``ingest_facts``. Same pattern as Composio for connectors.
 """
 
+from memory_mission.extraction.dry_run import (
+    DryRunCandidate,
+    DryRunReport,
+    StagingSliceFilter,
+    dry_run_candidates_from_report,
+    select_staged_items,
+    write_dry_run_jsonl,
+    write_extraction_dry_run,
+)
 from memory_mission.extraction.ingest import (
     ExtractionWriter,
     IngestResult,
@@ -34,6 +43,8 @@ from memory_mission.extraction.schema import (
 
 __all__ = [
     "EXTRACTION_PROMPT",
+    "DryRunCandidate",
+    "DryRunReport",
     "EventFact",
     "ExtractedFact",
     "ExtractionReport",
@@ -43,7 +54,12 @@ __all__ = [
     "OpenQuestion",
     "PreferenceFact",
     "RelationshipFact",
+    "StagingSliceFilter",
     "TierCrossing",
     "UpdateFact",
+    "dry_run_candidates_from_report",
     "ingest_facts",
+    "select_staged_items",
+    "write_dry_run_jsonl",
+    "write_extraction_dry_run",
 ]

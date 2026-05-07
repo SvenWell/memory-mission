@@ -29,6 +29,7 @@ from memory_mission.ingestion.envelopes import (
     drive_file_to_envelope,
     gmail_message_to_envelope,
     granola_transcript_to_envelope,
+    hubspot_record_to_envelope,
     notion_page_to_envelope,
     onedrive_item_to_envelope,
     outlook_message_to_envelope,
@@ -949,6 +950,154 @@ def test_attio_envelope_rejects_wrong_app_binding() -> None:
     raw = {"id": {"record_id": "x"}, "values": {}, "updated_at": "2026-04-01T09:00:00Z"}
     with pytest.raises(ValueError, match="bound to app='affinity'"):
         attio_record_to_envelope(raw, object_slug="companies", manifest=manifest)
+
+
+# ---------- HubSpot ----------
+
+
+def _hubspot_manifest() -> SystemsManifest:
+    return SystemsManifest(
+        firm_id="northpoint",
+        bindings={
+            ConnectorRole.WORKSPACE: RoleBinding(
+                app="hubspot",
+                target_plane="firm",
+                visibility_rules=(
+                    VisibilityRule(
+                        if_field={"hubspot_pipeline": "sales-pipeline"},
+                        scope="partner-only",
+                    ),
+                    VisibilityRule(if_label="list:portfolio", scope="firm-internal"),
+                ),
+                default_visibility="firm-internal",
+            ),
+        },
+    )
+
+
+def test_hubspot_contact_envelope_round_trip() -> None:
+    raw = {
+        "id": "101",
+        "objectTypeId": "0-1",
+        "properties": {
+            "hs_object_id": "101",
+            "firstname": "Sarah",
+            "lastname": "Chen",
+            "email": "sarah@example.com",
+            "jobtitle": "CFO",
+            "associatedcompanyid": "202",
+            "hubspot_owner_id": "303",
+            "hs_lastmodifieddate": "2026-04-01T09:00:00Z",
+        },
+        "labels": ["manual-review"],
+        "list_memberships": [{"list_id": "portfolio"}],
+        "associations": {"companies": {"results": [{"id": "202", "type": "contact_to_company"}]}},
+        "archived": False,
+    }
+
+    item = hubspot_record_to_envelope(raw, object_type="0-1", manifest=_hubspot_manifest())
+
+    assert item.source_role == ConnectorRole.WORKSPACE
+    assert item.concrete_app == "hubspot"
+    assert item.external_object_type == "contact"
+    assert item.external_id == "contact_101"
+    assert item.container_id == "company:202"
+    assert item.target_plane == "firm"
+    assert item.target_scope == "firm-internal"  # list:portfolio rule fires
+    assert item.title == "Sarah Chen (sarah@example.com)"
+    assert "email: sarah@example.com" in item.body
+    assert "jobtitle: CFO" in item.body
+    assert "- companies: 202" in item.body
+    assert item.modified_at == datetime(2026, 4, 1, 9, 0, tzinfo=UTC)
+    assert item.visibility_metadata["labels"] == ["manual-review", "list:portfolio"]
+    assert item.visibility_metadata["hubspot_object_type"] == "contact"
+    assert item.visibility_metadata["hubspot_object_type_id"] == "0-1"
+    assert item.visibility_metadata["hubspot_owner_id"] == "303"
+    assert item.raw == raw
+
+
+def test_hubspot_deal_pipeline_rule_sets_scope() -> None:
+    raw = {
+        "id": "deal-9",
+        "properties": {
+            "dealname": "Acme renewal",
+            "pipeline": "sales-pipeline",
+            "dealstage": "qualified",
+            "hs_lastmodifieddate": "2026-04-01T09:00:00Z",
+        },
+        "archived": False,
+    }
+    item = hubspot_record_to_envelope(raw, object_type="deals", manifest=_hubspot_manifest())
+    assert item.external_object_type == "deal"
+    assert item.external_id == "deal_deal-9"
+    assert item.container_id == "pipeline:sales-pipeline"
+    assert item.target_scope == "partner-only"
+    assert item.title == "Acme renewal"
+    assert item.visibility_metadata["hubspot_pipeline"] == "sales-pipeline"
+    assert item.visibility_metadata["hubspot_dealstage"] == "qualified"
+
+
+def test_hubspot_company_envelope_uses_domain_title() -> None:
+    raw = {
+        "id": 202,
+        "properties": {
+            "name": "Acme Corp",
+            "domain": "acme.com",
+            "createdate": 1_711_972_800_000,
+        },
+        "archived": False,
+    }
+    item = hubspot_record_to_envelope(raw, object_type="companies", manifest=_hubspot_manifest())
+    assert item.external_id == "company_202"
+    assert item.title == "Acme Corp (acme.com)"
+    assert item.modified_at == datetime(2024, 4, 1, 12, 0, tzinfo=UTC)
+
+
+def test_hubspot_custom_object_type_is_path_safe() -> None:
+    raw = {
+        "id": "custom-1",
+        "properties": {
+            "name": "Renewal tracker",
+            "hs_lastmodifieddate": "2026-04-01T09:00:00Z",
+        },
+    }
+    item = hubspot_record_to_envelope(raw, object_type="2-123456", manifest=_hubspot_manifest())
+    assert item.external_object_type == "custom_2-123456"
+    assert item.external_id == "custom_2-123456_custom-1"
+
+
+def test_hubspot_envelope_rejects_empty_object_type() -> None:
+    raw = {"id": "x", "properties": {"hs_lastmodifieddate": "2026-04-01T09:00:00Z"}}
+    with pytest.raises(ValueError, match="object_type must be a non-empty string"):
+        hubspot_record_to_envelope(raw, object_type="", manifest=_hubspot_manifest())
+
+
+def test_hubspot_envelope_rejects_missing_id() -> None:
+    raw = {"properties": {"name": "x", "hs_lastmodifieddate": "2026-04-01T09:00:00Z"}}
+    with pytest.raises(ValueError, match="missing required object id"):
+        hubspot_record_to_envelope(raw, object_type="companies", manifest=_hubspot_manifest())
+
+
+def test_hubspot_envelope_rejects_missing_timestamp() -> None:
+    raw = {"id": "x", "properties": {"name": "x"}}
+    with pytest.raises(ValueError, match="missing required datetime field"):
+        hubspot_record_to_envelope(raw, object_type="companies", manifest=_hubspot_manifest())
+
+
+def test_hubspot_envelope_rejects_wrong_app_binding() -> None:
+    manifest = SystemsManifest(
+        firm_id="x",
+        bindings={
+            ConnectorRole.WORKSPACE: RoleBinding(
+                app="attio",
+                target_plane="firm",
+                default_visibility="firm-internal",
+            ),
+        },
+    )
+    raw = {"id": "x", "properties": {"hs_lastmodifieddate": "2026-04-01T09:00:00Z"}}
+    with pytest.raises(ValueError, match="bound to app='attio'"):
+        hubspot_record_to_envelope(raw, object_type="contacts", manifest=manifest)
 
 
 # ---------- Notion ----------

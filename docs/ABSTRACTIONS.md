@@ -342,6 +342,52 @@ class ExtractionReport(BaseModel):
 
 Written to fact staging at `<wiki_root>/staging/<plane>/.facts/<source>/<source_id>.json`.
 
+### Extraction dry-run preview (`extraction/dry_run.py`)
+
+Pilot workflows can preview extracted facts before fact staging:
+
+```python
+class StagingSliceFilter(BaseModel):
+    item_ids: tuple[str, ...]
+    meeting_ids: tuple[str, ...]
+    filter_tag: str | None
+    filter_entity: str | None
+    from_date: date | None
+    to_date: date | None
+    max_items: int = 25
+```
+
+`select_staged_items(writer, filter)` returns a bounded narrow slice
+from source staging. At least one selector is required; path-unsafe IDs
+and over-large slices are rejected.
+
+```python
+class DryRunCandidate(BaseModel):
+    run_id: str
+    source: str
+    source_id: str
+    target_plane: Plane
+    employee_id: str | None
+    meeting_id: str | None
+    meeting_date: date | None
+    meeting_path: str
+    title: str
+    fact_index: int
+    fact_kind: str
+    subject: str | None
+    predicate: str | None
+    object: str | None
+    confidence: float
+    support_quote: str
+    fact: dict
+```
+
+`write_extraction_dry_run(...)` writes one candidate per JSONL line to
+`<wiki_root>/staging/<plane>/<source>/.dry_run/<run_id>.jsonl`.
+It accepts host-produced `ExtractionReport` objects, drops facts below
+the pilot confidence threshold, and never calls `ingest_facts`,
+`create_proposal`, `promote`, KG writes, or page writes.
+
 ---
 
 ## Identity domain model (`identity/base.py`)

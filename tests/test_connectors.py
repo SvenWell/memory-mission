@@ -18,6 +18,7 @@ from memory_mission.ingestion.connectors import (
     DRIVE_ACTIONS,
     GMAIL_ACTIONS,
     GRANOLA_ACTIONS,
+    HUBSPOT_ACTIONS,
     NOTION_ACTIONS,
     ONEDRIVE_ACTIONS,
     OUTLOOK_ACTIONS,
@@ -34,6 +35,7 @@ from memory_mission.ingestion.connectors import (
     make_drive_connector,
     make_gmail_connector,
     make_granola_connector,
+    make_hubspot_connector,
     make_notion_connector,
     make_onedrive_connector,
     make_outlook_connector,
@@ -556,6 +558,83 @@ def test_attio_requires_client_for_invoke() -> None:
     conn = make_attio_connector()
     with pytest.raises(NotImplementedError, match="no client attached"):
         conn.invoke("list_records", {"object": "companies"})
+
+
+# ---------- HubSpot factory ----------
+
+
+def test_hubspot_exposes_crm_read_and_sync_actions() -> None:
+    conn = make_hubspot_connector()
+    names = {a.name for a in conn.list_actions()}
+    assert {
+        "list_contacts",
+        "get_contact",
+        "search_contacts",
+        "list_companies",
+        "get_company",
+        "search_companies",
+        "list_deals",
+        "get_deal",
+        "search_objects",
+        "read_object",
+        "read_batch",
+        "list_association_types",
+        "create_object_association",
+        "create_contact",
+        "update_contact",
+        "create_company",
+        "update_company",
+        "create_note",
+        "create_property",
+        "upsert_batch",
+    }.issubset(names)
+    assert conn.name == "hubspot"
+
+
+def test_hubspot_actions_match_exported_constant() -> None:
+    assert make_hubspot_connector().list_actions() == list(HUBSPOT_ACTIONS)
+
+
+def test_hubspot_preview_uses_contact_name_and_email() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": "101",
+                "objectTypeId": "0-1",
+                "properties": {
+                    "firstname": "Sarah",
+                    "lastname": "Chen",
+                    "email": "sarah@example.com",
+                },
+            }
+
+    conn = make_hubspot_connector(client=FakeClient())
+    result = conn.invoke("get_contact", {"object_id": "101"})
+    assert "0-1" in result.preview
+    assert "101" in result.preview
+    assert "Sarah Chen" in result.preview
+    assert "sarah@example.com" in result.preview
+
+
+def test_hubspot_preview_includes_note_body() -> None:
+    class FakeClient:
+        def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "id": "note-1",
+                "objectTypeId": "0-46",
+                "properties": {"hs_note_body": "Discussed renewal risk and next steps."},
+            }
+
+    conn = make_hubspot_connector(client=FakeClient())
+    result = conn.invoke("create_note", {"hs_timestamp": "2026-04-01T09:00:00Z"})
+    assert "note-1" in result.preview
+    assert "renewal risk" in result.preview
+
+
+def test_hubspot_requires_client_for_invoke() -> None:
+    conn = make_hubspot_connector()
+    with pytest.raises(NotImplementedError, match="no client attached"):
+        conn.invoke("list_contacts", {})
 
 
 # ---------- Notion factory ----------

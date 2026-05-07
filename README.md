@@ -76,12 +76,12 @@ briefing = context.render()       # markdown for the host-agent LLM
 
 ## What shipped
 
-V1 complete + MCP surface (firm-mode + individual-mode) + MemPalace personal substrate (ADR-0004) + P2 capability-based connector manifest + venture pack (10 connectors across 6 capability roles) + **P7-A venture overlay** (constitution + lifecycle predicate vocabulary + 4 workflow skills) + **Hermes integration** (`MemoryMissionProvider` + 19 markdown skills + `granola-extraction-pilot` validated end-to-end against real data: 35 meetings → 423 candidates → 18 promoted facts). Released `v0.1.0` → `v0.1.3` (Hermes-ready substrate, SQLite cross-thread fix, multi-agent identifier-coordination, `mm_resolve_entity` tool). Three-layer operational substrate per [`docs/VISION.md`](docs/VISION.md). **1,091 tests passing**, `mypy --strict` clean on 92 source files.
+V1 complete + MCP surface (firm-mode + individual-mode) + MemPalace personal substrate (ADR-0004) + P2 capability-based connector manifest + venture pack (11 connectors across 6 capability roles) + **P7-A venture overlay** (constitution + lifecycle predicate vocabulary + 4 workflow skills) + **Hermes integration** (`MemoryMissionProvider` + 20 markdown skills + `granola-extraction-pilot` validated end-to-end against real data: 35 meetings → 423 candidates → 18 promoted facts). Released `v0.1.0` → `v0.1.3` (Hermes-ready substrate, SQLite cross-thread fix, multi-agent identifier-coordination, `mm_resolve_entity` tool). Three-layer operational substrate per [`docs/VISION.md`](docs/VISION.md). **1,116 tests passing**, `mypy --strict` clean on 94 source files.
 
 | Layer | What you can do today |
 |---|---|
 | **Foundations** | Append-only observability log per firm; checkpointed durable execution with resume-on-crash; PII-redacted middleware around every LLM call |
-| **Connectors** | `Connector` Protocol + `invoke()` harness. Composio-backed adapters (SDK stub; host wires the client) for **Gmail, Outlook, Google Calendar, Granola, Google Drive, OneDrive/SharePoint, Affinity, Attio, Notion, Slack** — 10 apps across 6 capability roles (`email` / `calendar` / `transcript` / `document` / `workspace` / `chat`). Per-firm `firm/systems.yaml` binds roles → apps; envelope helpers normalize each app's raw payload to `NormalizedSourceItem` with fail-closed visibility mapping (ADR-0007 + ADR-0011) |
+| **Connectors** | `Connector` Protocol + `invoke()` harness. Composio-backed adapters (SDK stub; host wires the client) for **Gmail, Outlook, Google Calendar, Granola, Google Drive, OneDrive/SharePoint, Affinity, Attio, HubSpot, Notion, Slack** — 11 apps across 6 capability roles (`email` / `calendar` / `transcript` / `document` / `workspace` / `chat`). Per-firm `firm/systems.yaml` binds roles → apps; envelope helpers normalize each app's raw payload to `NormalizedSourceItem` with fail-closed visibility mapping (ADR-0007 + ADR-0011) |
 | **Memory (factual layer)** | Compiled-truth + timeline page format (Obsidian-compatible); SQLite temporal knowledge graph with `valid_from` / `valid_to` validity windows and Bayesian corroboration (Noisy-OR, 0.99 cap); auto-registered entities on triple write; hybrid search (RRF + cosine + compiled-truth boost); tier-aware authority hierarchy (`constitution` / `doctrine` / `policy` / `decision`); durable `FileSystemEngine` for markdown-backed page persistence; rereadability via preserved `.raw/` sidecars + MemPalace evidence (ARCHITECTURE.md principle 11) |
 | **Evidence (interaction layer)** | MemPalace evidence layer indexed by drawer key (ADR-0004); `OpenQuestion` fact bucket with mandatory `support_quote`; `triple_sources` append-only provenance per corroboration; `PersonalMemoryBackend` Protocol for swappable evidence backends |
 | **Identity** | `IdentityResolver` Protocol + SQLite-backed local resolver; stable `p_<id>` / `o_<id>` across email / LinkedIn / Twitter / phone; `merge_entities` with reviewer gate |
@@ -144,7 +144,7 @@ src/memory_mission/
 │   ├── search.py           # RRF + cosine + compiled-truth boost
 │   └── templates/          # dashboard.base
 ├── personal_brain/         # PersonalMemoryBackend Protocol + MemPalaceAdapter
-├── extraction/             # 6-bucket ExtractedFact + ingest_facts
+├── extraction/             # 6-bucket ExtractedFact + ingest_facts + dry-run previews
 ├── identity/               # IdentityResolver Protocol + LocalIdentityResolver
 ├── permissions/            # Policy + can_read / can_propose
 ├── promotion/              # Proposal + PR-model review gate
@@ -211,15 +211,25 @@ agent's systemd unit. Idempotent — safe to re-run.
 
 | Phase | Step |
 |---|---|
-| Backfill (per source, isolated) | `backfill.py calendar <label>`, `backfill.py gmail <label>`, `backfill_granola.py` |
-| Stage → MemPalace | `mempalace_ingest.py` |
-| Extract facts via Codex CLI (subscription) | `extract_pilot.py` |
-| Promote → proposals | `promote_staged.py` |
+| 1. Backfill (per source, isolated) | `backfill.py calendar <label>`, `backfill.py gmail <label>`, `backfill_granola.py` |
+| 2. Stage → MemPalace | `mempalace_ingest.py` |
+| 3. Extract facts via Codex CLI (subscription) | `extract_pilot.py` |
+| 4. Promote → proposals | `promote_staged.py` |
+| 5. Project KG → CRM (per target, isolated) | `push_to_crm.py --target=hubspot --apply`, `push_to_crm.py --target=notion --apply` |
 
 Each step has its own log under `/var/log/memory-mission/<step>.log` and is
 isolated — one source failing does not stop the others. The whole pipeline
 is idempotent: re-runs over overlapping windows skip already-processed
 items rather than duplicating.
+
+**KG → CRM projection.** `push_to_crm.py` is the single entry point for
+projecting personal-KG entities (people + companies) into a CRM. Targets
+are pluggable: drop in `_target_<name>.py` implementing `CRMTarget`
+(see `_crm_target.py`) and register it in the orchestrator. Currently
+wired: HubSpot (matches by email/domain, delta-aware updates) and
+Notion (auto-provisions Contacts/Companies databases on first run,
+matches by `mm_entity_id` rich_text). Each target runs only if its env
+is set, so the cron stays a no-op for unconfigured CRMs.
 
 To wire it up on a fresh host:
 

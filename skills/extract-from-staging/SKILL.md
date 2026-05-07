@@ -28,6 +28,14 @@ Granola, memos from Drive), runs the host agent's LLM with the
 promotion pipeline (Step 10) — no fact lands in the knowledge graph or
 on a curated page until a human reviews and approves the proposal.
 
+For pilot workflows that need a reviewable preview before fact staging
+(for example `granola-extraction-pilot`), use
+`src/memory_mission/extraction/dry_run.py`: `select_staged_items`
+chooses the narrow source slice and `write_extraction_dry_run` writes
+`staging/<plane>/<source>/.dry_run/<run_id>.jsonl` from host-produced
+`ExtractionReport` objects. That dry-run path never calls
+`ingest_facts` and never mutates KG / pages / proposals.
+
 ## Workflow
 
 Open an observability scope for the firm + employee. Open the

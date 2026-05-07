@@ -2,7 +2,7 @@
 name: granola-extraction-pilot
 version: "2026-04-27"
 triggers: ["granola pilot", "narrow-slice extraction", "wealth-ai backfill", "extract granola pilot", "granola extraction pilot"]
-tools: [staging_reader, llm, ingest_facts, knowledge_graph, brain_engine, observability_scope, ask_user_question]
+tools: [staging_reader, llm, select_staged_items, write_extraction_dry_run, ingest_facts, knowledge_graph, brain_engine, observability_scope, ask_user_question]
 preconditions:
   - "firm_id resolved; running session is the user (or an admin acting on the user's behalf)"
   - "backfill-granola has already pulled the source corpus into staging — items live under staging/personal/<emp>/granola/"
@@ -39,10 +39,12 @@ controlled bridge.
    `staging/personal/<emp>/granola/` after `backfill-granola`. Each
    meeting keeps its full text, ID, date, title, participants, path.
    Raw memory; never deleted by this pilot.
-2. **Extraction layer** — host LLM reads the narrow slice and
-   proposes structured facts (people, companies, projects, pain
-   points, decisions, commitments, "X believes Y," "Wealthpoint
-   needs Z"). Output is a dry-run JSONL — NO KG writes yet.
+2. **Extraction layer** — `select_staged_items` resolves the narrow
+   slice, the host LLM reads each selected transcript and proposes
+   structured facts (people, companies, projects, pain points,
+   decisions, commitments, "X believes Y," "Wealthpoint needs Z"),
+   then `write_extraction_dry_run` writes a JSONL preview. NO KG
+   writes yet.
 3. **Curated layer** — operator inspects the JSONL, marks
    high-signal facts, runs `review-proposals` on the marked subset.
    Promotion writes to the KG with full provenance pointing back at
@@ -74,12 +76,16 @@ controlled bridge.
    schema (RelationshipFact / EventFact / UpdateFact / AttributeFact
    / OpinionFact / next-step).
 
-4. **Dry-run write to JSONL.** Output:
+4. **Dry-run write to JSONL.** Validate each host-LLM response as an
+   `ExtractionReport`, pair it with its `StagedItem`, then call
+   `write_extraction_dry_run(reports, wiki_root=..., run_id=...)`.
+   Output:
    `staging/personal/<emp>/granola/.dry_run/<run_id>.jsonl`. One JSON
    object per candidate fact. Schema: `{meeting_id, meeting_date,
-   meeting_path, fact_type, subject, predicate, object, confidence,
-   quote, suggested_target_plane}`. The operator can grep, sort,
-   filter, hand-edit before promotion.
+   meeting_path, fact_kind, subject, predicate, object, confidence,
+   support_quote, fact}`. The operator can grep, sort, filter,
+   hand-edit before promotion. The dry-run helper drops facts below
+   `min_confidence=0.6` and writes only the preview artifact.
 
 5. **Surface counts to operator.** "Slice: 17 wealth-ai meetings.
    Extracted: 142 candidate facts (43 RelationshipFact, 38
@@ -177,6 +183,9 @@ After every 5 pilot runs OR on any operator-flagged failure:
   Prerequisite for this skill.
 - `skills/extract-from-staging/SKILL.md` — generic extraction. This
   skill is a narrow-slice composition over it.
+- `src/memory_mission/extraction/dry_run.py` — narrow-slice selection
+  and dry-run JSONL writer. LLM-free; the host agent supplies
+  validated `ExtractionReport` objects.
 - `skills/review-proposals/SKILL.md` — the promotion gate. Operator
   runs it after marking approved facts.
 - `src/memory_mission/extraction/prompts.py` — `EXTRACTION_PROMPT`

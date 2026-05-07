@@ -271,6 +271,42 @@ and the connector picks it up automatically. Backfill is
 administrator-run only — Affinity holds the firm's relationship +
 deal data.
 
+## Customer CRM example — HubSpot as the firm workspace
+
+HubSpot is often the customer's core CRM. Treat it as a `workspace`
+binding when backfilling CRM records into Memory Mission, and as the
+sync target when approved Memory Mission context is projected back into
+HubSpot. Contacts, companies, deals, notes, tasks, and custom objects
+all flow through the same HubSpot connector surface.
+
+```yaml
+firm_id: northpoint
+bindings:
+  workspace:
+    app: hubspot
+    target_plane: firm
+    visibility_rules:
+      # HubSpot static/list memberships can be surfaced as list:<id>.
+      - if_label: list:portfolio
+        scope: firm-internal
+      # Pipeline and stage are the most common scoping signals for deals.
+      - if_field: { hubspot_pipeline: sales-pipeline }
+        scope: partner-only
+      - if_field: { hubspot_dealstage: closedwon }
+        scope: firm-internal
+      # Owner/team ids are available for firms that scope CRM access by team.
+      - if_field: { hubspot_team_id: "12345" }
+        scope: partner-only
+    default_visibility: firm-internal
+```
+
+Auth: Composio-managed HubSpot connection. Customer-shaped installs
+should use OAuth through Composio; private/static HubSpot tokens are
+acceptable for sandbox tests only when provisioned inside Composio, not
+stored in `systems.yaml` or Memory Mission config. The recommended
+sync-back identity property is a HubSpot custom unique field such as
+`mm_entity_id` on contacts, companies, and deals.
+
 ## Firm-plane example — Drive as the firm document substrate
 
 ```yaml

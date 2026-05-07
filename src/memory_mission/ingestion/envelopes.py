@@ -18,6 +18,7 @@ raw payload's visibility surface to a firm scope raises
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -526,6 +527,114 @@ def affinity_record_to_envelope(
     )
 
 
+_HUBSPOT_OBJECT_TYPE_ALIASES: dict[str, str] = {
+    "0-1": "contact",
+    "contact": "contact",
+    "contacts": "contact",
+    "0-2": "company",
+    "company": "company",
+    "companies": "company",
+    "0-3": "deal",
+    "deal": "deal",
+    "deals": "deal",
+    "0-46": "note",
+    "note": "note",
+    "notes": "note",
+    "0-47": "meeting",
+    "meeting": "meeting",
+    "meetings": "meeting",
+    "0-48": "call",
+    "call": "call",
+    "calls": "call",
+    "0-49": "email",
+    "email": "email",
+    "emails": "email",
+    "0-27": "task",
+    "task": "task",
+    "tasks": "task",
+}
+
+
+def hubspot_record_to_envelope(
+    raw: dict[str, Any],
+    *,
+    object_type: str,
+    manifest: SystemsManifest,
+) -> NormalizedSourceItem:
+    """Map a Composio HubSpot CRM record to a ``NormalizedSourceItem``.
+
+    ``object_type`` is supplied by the caller because HubSpot's generic
+    object APIs may return the same payload shape for contacts, companies,
+    deals, notes, and custom objects. Standard HubSpot object ids are
+    normalized to readable names: ``0-1`` -> ``contact``, ``0-2`` ->
+    ``company``, ``0-3`` -> ``deal``, ``0-46`` -> ``note``.
+
+    Visibility surface:
+
+    - ``labels`` - caller-provided labels plus HubSpot list memberships
+      surfaced as ``list:<id>``.
+    - ``hubspot_object_type`` - normalized object type, e.g. ``deal``.
+    - ``hubspot_object_type_id`` - the raw object type id/name the caller
+      used, e.g. ``0-3`` or ``deals``.
+    - ``hubspot_pipeline`` / ``hubspot_dealstage`` - useful for scoping deals.
+    - ``hubspot_owner_id`` / ``hubspot_team_id`` - useful for per-team rules.
+    - ``hubspot_archived`` - top-level HubSpot archive flag.
+
+    HubSpot records are not documents; the envelope body is a structured
+    property dump plus association ids so extraction/review can read the
+    record without parsing HubSpot's JSON shape.
+    """
+    if not object_type or not isinstance(object_type, str):
+        raise ValueError(f"object_type must be a non-empty string; got {object_type!r}")
+    binding = _binding_for(ConnectorRole.WORKSPACE, expected_app="hubspot", manifest=manifest)
+    props = _hubspot_properties(raw)
+    normalized_type = _hubspot_normalized_object_type(object_type)
+    record_id = _hubspot_record_id(raw, props)
+    labels = _hubspot_labels(raw)
+    archived = raw.get("archived")
+    visibility: dict[str, Any] = {
+        "labels": labels,
+        "hubspot_object_type": normalized_type,
+        "hubspot_object_type_id": object_type,
+        "hubspot_pipeline": _hubspot_prop_str(props, "pipeline"),
+        "hubspot_dealstage": _hubspot_prop_str(props, "dealstage"),
+        "hubspot_owner_id": _hubspot_owner_id(props),
+        "hubspot_team_id": _hubspot_team_id(props),
+        "hubspot_archived": archived if isinstance(archived, bool) else False,
+    }
+    target_scope = map_visibility(visibility, role=ConnectorRole.WORKSPACE, manifest=manifest)
+    external_type = _hubspot_external_object_type(normalized_type)
+    external_id = f"{external_type}_{record_id}"
+    timestamp_source = {**props, **{k: v for k, v in raw.items() if k != "properties"}}
+    return NormalizedSourceItem(
+        source_role=ConnectorRole.WORKSPACE,
+        concrete_app="hubspot",
+        external_object_type=normalized_type,
+        external_id=external_id,
+        container_id=_hubspot_container_id(props, raw),
+        url=_optional_str(raw, ("url", "web_url", "webUrl")),
+        modified_at=_require_datetime(
+            timestamp_source,
+            (
+                "updatedAt",
+                "updated_at",
+                "lastmodifieddate",
+                "hs_lastmodifieddate",
+                "createdAt",
+                "created_at",
+                "createdate",
+            ),
+            source="hubspot",
+        ),
+        visibility_metadata=visibility,
+        target_scope=target_scope,
+        target_plane=binding.target_plane,
+        title=_hubspot_title(props, object_type=normalized_type, fallback=external_id),
+        body=_hubspot_body(props, raw),
+        raw=dict(raw),
+    )
+
+
 def calendar_event_to_envelope(
     raw: dict[str, Any],
     *,
@@ -1000,6 +1109,195 @@ def _drive_grants_anyone(permissions: list[Any]) -> bool:
     return False
 
 
+def _hubspot_properties(raw: dict[str, Any]) -> dict[str, Any]:
+    props = raw.get("properties")
+    if isinstance(props, dict):
+        return props
+    return raw
+
+
+def _hubspot_record_id(raw: dict[str, Any], props: dict[str, Any]) -> str:
+    for value in (
+        raw.get("id"),
+        raw.get("object_id"),
+        raw.get("objectId"),
+        props.get("hs_object_id"),
+        props.get("id"),
+    ):
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, int) and not isinstance(value, bool):
+            return str(value)
+    raise ValueError(
+        "hubspot payload missing required object id "
+        "(tried id, object_id, objectId, properties.hs_object_id)"
+    )
+
+
+def _hubspot_normalized_object_type(object_type: str) -> str:
+    raw_type = object_type.strip()
+    alias = _HUBSPOT_OBJECT_TYPE_ALIASES.get(raw_type.lower())
+    if alias:
+        return alias
+    if raw_type.startswith("2-"):
+        return f"custom_{raw_type}"
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_type.strip().lower()).strip("_")
+    if not safe:
+        raise ValueError(f"hubspot object_type could not be normalized: {object_type!r}")
+    return safe
+
+
+def _hubspot_external_object_type(normalized_type: str) -> str:
+    # Keep standard names readable while ensuring custom object ids remain
+    # valid staging path segments.
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", normalized_type).strip("_")
+
+
+def _hubspot_labels(raw: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    labels = raw.get("labels")
+    if isinstance(labels, list):
+        out.extend(str(label) for label in labels if isinstance(label, str) and label)
+    for key in ("list_memberships", "listMemberships", "lists"):
+        block = raw.get(key)
+        if not isinstance(block, list):
+            continue
+        for entry in block:
+            if isinstance(entry, dict):
+                value = entry.get("list_id") or entry.get("listId") or entry.get("id")
+                if isinstance(value, str | int) and not isinstance(value, bool):
+                    out.append(f"list:{value}")
+            elif isinstance(entry, str | int) and not isinstance(entry, bool):
+                out.append(f"list:{entry}")
+    return out
+
+
+def _hubspot_prop_str(props: dict[str, Any], key: str) -> str | None:
+    value = props.get(key)
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return str(value)
+    return None
+
+
+def _hubspot_owner_id(props: dict[str, Any]) -> str | None:
+    for key in ("hubspot_owner_id", "hs_owner_id", "owner_id"):
+        value = _hubspot_prop_str(props, key)
+        if value:
+            return value
+    return None
+
+
+def _hubspot_team_id(props: dict[str, Any]) -> str | None:
+    for key in ("hubspot_team_id", "hs_team_id", "hs_all_team_ids"):
+        value = _hubspot_prop_str(props, key)
+        if value:
+            return value
+    return None
+
+
+def _hubspot_container_id(props: dict[str, Any], raw: dict[str, Any]) -> str | None:
+    pipeline = _hubspot_prop_str(props, "pipeline")
+    if pipeline:
+        return f"pipeline:{pipeline}"
+    associated_company = _hubspot_prop_str(props, "associatedcompanyid")
+    if associated_company:
+        return f"company:{associated_company}"
+    portal_id = raw.get("portalId") or raw.get("portal_id")
+    if isinstance(portal_id, str | int) and not isinstance(portal_id, bool):
+        return f"portal:{portal_id}"
+    return None
+
+
+def _hubspot_title(props: dict[str, Any], *, object_type: str, fallback: str) -> str:
+    if object_type == "deal":
+        deal = _hubspot_prop_str(props, "dealname") or _hubspot_prop_str(props, "deal_name")
+        if deal:
+            return deal
+    if object_type == "company":
+        name = _hubspot_prop_str(props, "name") or _hubspot_prop_str(props, "company")
+        domain = _hubspot_prop_str(props, "domain") or _hubspot_prop_str(props, "website")
+        if name and domain:
+            return f"{name} ({domain})"
+        if name:
+            return name
+    if object_type == "contact":
+        first = _hubspot_prop_str(props, "firstname") or _hubspot_prop_str(props, "first_name")
+        last = _hubspot_prop_str(props, "lastname") or _hubspot_prop_str(props, "last_name")
+        full = f"{first or ''} {last or ''}".strip()
+        email = _hubspot_prop_str(props, "email") or _hubspot_prop_str(props, "work_email")
+        if full and email:
+            return f"{full} ({email})"
+        if full or email:
+            return full or email or fallback
+    note = _hubspot_prop_str(props, "hs_note_body")
+    if note:
+        return note.splitlines()[0][:120]
+    return fallback
+
+
+def _hubspot_body(props: dict[str, Any], raw: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for key in sorted(props):
+        value = props[key]
+        rendered = _hubspot_render_value(value)
+        if rendered:
+            lines.append(f"{key}: {rendered}")
+    associations = raw.get("associations")
+    if isinstance(associations, dict):
+        assoc_lines = _hubspot_association_lines(associations)
+        if assoc_lines:
+            if lines:
+                lines.append("")
+            lines.append("Associations:")
+            lines.extend(assoc_lines)
+    return "\n".join(lines)
+
+
+def _hubspot_render_value(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str | int | float | bool):
+        return str(value)
+    if isinstance(value, list):
+        parts = [_hubspot_render_value(v) for v in value]
+        return ", ".join(part for part in parts if part)
+    if isinstance(value, dict):
+        scalar_items = []
+        for key in sorted(value):
+            rendered = _hubspot_render_value(value[key])
+            if rendered:
+                scalar_items.append(f"{key}={rendered}")
+        return " / ".join(scalar_items)
+    return str(value)
+
+
+def _hubspot_association_lines(associations: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for assoc_type, block in sorted(associations.items()):
+        ids: list[str] = []
+        if isinstance(block, dict):
+            results = block.get("results")
+            if isinstance(results, list):
+                for entry in results:
+                    if isinstance(entry, dict):
+                        value = entry.get("id")
+                        if isinstance(value, str | int) and not isinstance(value, bool):
+                            ids.append(str(value))
+        elif isinstance(block, list):
+            for entry in block:
+                if isinstance(entry, dict):
+                    value = entry.get("id")
+                    if isinstance(value, str | int) and not isinstance(value, bool):
+                        ids.append(str(value))
+                elif isinstance(entry, str | int) and not isinstance(entry, bool):
+                    ids.append(str(entry))
+        if ids:
+            lines.append(f"- {assoc_type}: {', '.join(ids)}")
+    return lines
+
+
 __all__ = [
     "affinity_record_to_envelope",
     "attio_record_to_envelope",
@@ -1007,6 +1305,7 @@ __all__ = [
     "drive_file_to_envelope",
     "gmail_message_to_envelope",
     "granola_transcript_to_envelope",
+    "hubspot_record_to_envelope",
     "notion_page_to_envelope",
     "onedrive_item_to_envelope",
     "outlook_message_to_envelope",

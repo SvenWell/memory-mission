@@ -4,10 +4,10 @@ Read this file first. Full `SKILL.md` contents load only when a skill's
 triggers match the current task. Machine-readable equivalent:
 `skills/_manifest.jsonl`. Conventions: `skills/_writing-skills.md`.
 
-**19 skills shipped** as of 2026-04-27. Backfill skills (gmail, outlook,
+**20 skills shipped** as of 2026-05-05. Backfill skills (gmail, outlook,
 granola, calendar, drive/firm-artefacts, onedrive, affinity, attio,
-notion, slack) route through P2's envelope path: load `firm/systems.yaml`,
-call the per-app envelope helper, and write via
+hubspot, notion, slack) route through P2's envelope path: load
+`firm/systems.yaml`, call the per-app envelope helper, and write via
 `StagingWriter.write_envelope`. Visibility maps to firm scope per the
 manifest — fail-closed by default (ADR-0007).
 
@@ -243,6 +243,31 @@ Constraints: firm plane only (administrator-run), envelope path only,
 `VisibilityMappingError` halts the loop, every fetch through the
 harness, no LLM. Affinity's pagination yields basic info — always
 `get_*` per id for full field data.
+
+## backfill-hubspot
+
+Pull HubSpot CRM records (companies, contacts, deals, notes, and
+optional custom objects) through Composio, normalize via
+`hubspot_record_to_envelope`, and write to the **firm staging plane**
+(`<wiki_root>/staging/firm/hubspot/`) via
+`StagingWriter.write_envelope`. Standard object order: companies →
+contacts → deals → notes; custom objects after standard objects.
+
+Visibility maps from HubSpot list memberships (`list:<id>` labels),
+object type, pipeline, deal stage, owner id, and team id. Customer
+installs should use HubSpot OAuth through Composio. Private/static
+tokens are acceptable for sandbox tests only when provisioned inside
+Composio, never stored in Memory Mission config.
+
+Triggers: "backfill hubspot", "import hubspot", "sync hubspot crm",
+"pull hubspot contacts", "pull hubspot companies",
+"pull hubspot deals"
+
+Constraints: firm plane only (administrator-run), envelope path only,
+`VisibilityMappingError` halts the loop, every fetch through the
+harness, no LLM, no write-side HubSpot mutations during backfill.
+The connector exposes write actions for the separate approved-context
+sync-back flow.
 
 ## backfill-firm-artefacts
 
