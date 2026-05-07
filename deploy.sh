@@ -42,6 +42,11 @@ if [ -d ".venv" ]; then
 fi
 
 echo "==> Restarting Hermes (systemctl --user restart hermes-gateway)..."
+# `systemctl --user` needs XDG_RUNTIME_DIR pointing at the user's runtime
+# bus socket. Interactive SSH sessions get this for free; cron does not,
+# so set it explicitly. Symptom we saw without it from cron:
+# "Failed to connect to bus: No medium found".
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 systemctl --user restart hermes-gateway
 
 echo "==> Done. Verify with:"
