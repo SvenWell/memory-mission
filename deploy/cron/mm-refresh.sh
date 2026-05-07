@@ -112,4 +112,18 @@ run_step mempalace-ingest  "$PY" deploy/scripts/mempalace_ingest.py
 run_step extract           "$PY" deploy/scripts/extract_pilot.py
 run_step promote           "$PY" deploy/scripts/promote_staged.py
 
+# --- Phase 4: project KG → CRM targets (per-target isolation) -------------
+# Each target runs only if its required env is set in deploy/.env.local.
+# A target failing does not stop the others.
+
+if [ -n "${MM_HUBSPOT_USER_ID:-}" ]; then
+  run_step crm-hubspot     "$PY" deploy/scripts/push_to_crm.py --target=hubspot --apply
+fi
+
+if [ -n "${MM_NOTION_USER_ID:-}" ] \
+    && [ -n "${MM_NOTION_CONTACTS_DB_ID:-}" ] \
+    && [ -n "${MM_NOTION_COMPANIES_DB_ID:-}" ]; then
+  run_step crm-notion      "$PY" deploy/scripts/push_to_crm.py --target=notion --apply
+fi
+
 echo "[$(date -Iseconds)] done" >> "$MAIN_LOG"

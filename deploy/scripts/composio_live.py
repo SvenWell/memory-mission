@@ -26,6 +26,9 @@ from composio import Composio
 _TOOLKIT_VERSIONS = {
     "gmail": "20251222_02",
     "googlecalendar": "20251230_01",
+    "hubspot": "20260501_00",
+    "monday": "20260429_00",
+    "notion": "20260501_00",
     # granola_mcp deliberately omitted — MCP-style toolkits don't pin to a static
     # version; LiveGranolaClient passes dangerously_skip_version_check directly.
 }
@@ -348,3 +351,318 @@ class LiveGranolaClient:
 
 def make_live_granola_client(*, user_id: str) -> LiveGranolaClient:
     return LiveGranolaClient(user_id=user_id)
+
+
+# ---------------------------------------------------------------------------
+# HubSpot
+# ---------------------------------------------------------------------------
+
+
+class LiveHubSpotClient:
+    """Composio adapter for HubSpot.
+
+    Implements the subset of the HubSpot connector's actions that
+    `push_hubspot.py` needs for the KG → CRM projection (read/match-side
+    SEARCH and write-side CREATE/UPDATE for contacts + companies). The
+    remaining HubSpot connector actions are not wired here yet — extend
+    the dispatch when a use case appears.
+    """
+
+    def __init__(self, *, user_id: str) -> None:
+        self._user_id = user_id
+
+    def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+        c = _client()
+
+        if action in ("search_contacts", "search_companies"):
+            slug = (
+                "HUBSPOT_SEARCH_CONTACTS_BY_CRITERIA"
+                if action == "search_contacts"
+                else "HUBSPOT_SEARCH_COMPANIES"
+            )
+            args: dict[str, Any] = {}
+            if "query" in params:
+                args["query"] = params["query"]
+            if "filter_groups" in params:
+                args["filterGroups"] = params["filter_groups"]
+            if "sorts" in params:
+                args["sorts"] = params["sorts"]
+            if "properties" in params:
+                args["properties"] = params["properties"]
+            if "limit" in params:
+                args["limit"] = params["limit"]
+            if "after" in params:
+                args["after"] = params["after"]
+            r = c.tools.execute(slug=slug, user_id=self._user_id, arguments=args)
+            return _unwrap(r)
+
+        if action in ("create_contact", "create_company"):
+            slug = (
+                "HUBSPOT_CREATE_CONTACT"
+                if action == "create_contact"
+                else "HUBSPOT_CREATE_COMPANY"
+            )
+            # Composio's create_contact / create_company expect each property
+            # at the top level (email, firstname, lastname, name, domain, ...)
+            # rather than nested under a "properties" object. Flatten.
+            args = dict(params.get("properties") or {})
+            if assoc := params.get("associations"):
+                args["associations"] = assoc
+            r = c.tools.execute(slug=slug, user_id=self._user_id, arguments=args)
+            return _unwrap(r)
+
+        if action in ("update_contact", "update_company"):
+            slug = (
+                "HUBSPOT_UPDATE_CONTACT"
+                if action == "update_contact"
+                else "HUBSPOT_UPDATE_COMPANY"
+            )
+            id_field = "contactId" if action == "update_contact" else "companyId"
+            args = {
+                id_field: str(params["object_id"]),
+                "properties": params.get("properties") or {},
+            }
+            r = c.tools.execute(slug=slug, user_id=self._user_id, arguments=args)
+            return _unwrap(r)
+
+        raise ValueError(f"Unknown hubspot action: {action}")
+
+
+def make_live_hubspot_client(*, user_id: str) -> LiveHubSpotClient:
+    return LiveHubSpotClient(user_id=user_id)
+
+
+# ---------------------------------------------------------------------------
+# Monday.com
+# ---------------------------------------------------------------------------
+
+
+class LiveMondayClient:
+    """Composio adapter for Monday.com.
+
+    Subset wired for the KG → Monday-CRM projection: workspace/board/column
+    discovery, item search by column value (the match operation), create
+    item with column_values, and per-column update.
+
+    Monday's API is generic — boards are user-defined, columns are typed
+    (text / email / phone / link / status / etc.) and each takes its own
+    value shape. This client serializes column values into the JSON form
+    Monday expects, then calls the appropriate MONDAY_* tool slug.
+    """
+
+    def __init__(self, *, user_id: str) -> None:
+        self._user_id = user_id
+
+    def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+        c = _client()
+
+        # --- discovery ---------------------------------------------------
+        if action == "list_workspaces":
+            r = c.tools.execute(
+                slug="MONDAY_GET_WORKSPACES",
+                user_id=self._user_id,
+                arguments=params or {},
+            )
+            return _unwrap(r)
+
+        if action == "list_boards":
+            args: dict[str, Any] = {}
+            for k in ("workspace_ids", "ids", "limit", "page", "state"):
+                if k in params:
+                    args[k] = params[k]
+            r = c.tools.execute(slug="MONDAY_BOARDS", user_id=self._user_id, arguments=args)
+            return _unwrap(r)
+
+        if action == "list_columns":
+            args = {"board_ids": params["board_ids"]}
+            if "column_types" in params:
+                args["column_types"] = params["column_types"]
+            r = c.tools.execute(slug="MONDAY_COLUMNS", user_id=self._user_id, arguments=args)
+            return _unwrap(r)
+
+        # --- provisioning -----------------------------------------------
+        if action == "create_board":
+            args = {
+                "board_name": params["board_name"],
+                "board_kind": params.get("board_kind", "public"),
+            }
+            for k in ("workspace_id", "folder_id", "description", "template_id"):
+                if k in params:
+                    args[k] = params[k]
+            r = c.tools.execute(slug="MONDAY_CREATE_BOARD", user_id=self._user_id, arguments=args)
+            return _unwrap(r)
+
+        if action == "create_column":
+            args = {
+                "board_id": params["board_id"],
+                "title": params["title"],
+                "column_type": params["column_type"],
+            }
+            for k in ("description", "after_column_id", "defaults"):
+                if k in params:
+                    args[k] = params[k]
+            r = c.tools.execute(slug="MONDAY_CREATE_COLUMN", user_id=self._user_id, arguments=args)
+            return _unwrap(r)
+
+        # --- search / read ----------------------------------------------
+        if action == "search_items_by_column":
+            # params: {board_id, column_id, value, limit?}
+            args = {
+                "board_id": params["board_id"],
+                "columns": [
+                    {
+                        "column_id": params["column_id"],
+                        "column_values": [params["value"]],
+                    }
+                ],
+                "limit": params.get("limit", 5),
+            }
+            r = c.tools.execute(
+                slug="MONDAY_LIST_ITEMS_BY_COLUMN_VALUES",
+                user_id=self._user_id,
+                arguments=args,
+            )
+            return _unwrap(r)
+
+        # --- write -------------------------------------------------------
+        if action == "create_item":
+            args = {
+                "board_id": params["board_id"],
+                "item_name": params["item_name"],
+            }
+            if "group_id" in params:
+                args["group_id"] = params["group_id"]
+            if cv := params.get("column_values"):
+                # Monday expects column_values as a JSON-stringified map.
+                import json as _json
+                args["column_values"] = _json.dumps(cv) if isinstance(cv, dict) else cv
+            r = c.tools.execute(slug="MONDAY_CREATE_ITEM", user_id=self._user_id, arguments=args)
+            return _unwrap(r)
+
+        if action == "set_column_value":
+            # Per-column update — covers text/email/phone/link via
+            # CHANGE_SIMPLE_COLUMN_VALUE which accepts a stringified value.
+            import json as _json
+            value = params["value"]
+            value_str = (
+                _json.dumps(value) if not isinstance(value, str) else value
+            )
+            args = {
+                "board_id": params["board_id"],
+                "item_id": str(params["item_id"]),
+                "column_id": params["column_id"],
+                "value": value_str,
+                "create_labels_if_missing": params.get("create_labels_if_missing", False),
+            }
+            r = c.tools.execute(
+                slug="MONDAY_CHANGE_SIMPLE_COLUMN_VALUE",
+                user_id=self._user_id,
+                arguments=args,
+            )
+            return _unwrap(r)
+
+        raise ValueError(f"Unknown monday action: {action}")
+
+
+def make_live_monday_client(*, user_id: str) -> LiveMondayClient:
+    return LiveMondayClient(user_id=user_id)
+
+
+# ---------------------------------------------------------------------------
+# Notion
+# ---------------------------------------------------------------------------
+
+
+class LiveNotionClient:
+    """Composio adapter for Notion.
+
+    Subset wired for the KG → Notion projection: page search/create
+    (parent discovery + provisioning), database create/fetch, and per-row
+    insert. Notion has a native UPSERT primitive (NOTION_UPSERT_ROW_DATABASE)
+    we may switch to once the basic insert path works.
+    """
+
+    def __init__(self, *, user_id: str) -> None:
+        self._user_id = user_id
+
+    def execute(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+        c = _client()
+
+        if action == "search_pages":
+            args = {"query": params.get("query", ""), "page_size": params.get("page_size", 25)}
+            for k in ("filter_value", "start_cursor"):
+                if k in params:
+                    args[k] = params[k]
+            r = c.tools.execute(
+                slug="NOTION_SEARCH_NOTION_PAGE", user_id=self._user_id, arguments=args
+            )
+            return _unwrap(r)
+
+        if action == "create_page":
+            # NOTION_CREATE_NOTION_PAGE — create a page with a parent (page or workspace).
+            r = c.tools.execute(
+                slug="NOTION_CREATE_NOTION_PAGE",
+                user_id=self._user_id,
+                arguments=params,
+            )
+            return _unwrap(r)
+
+        if action == "create_database":
+            args = {
+                "parent_id": params["parent_id"],
+                "title": params["title"],
+            }
+            if props := params.get("properties"):
+                args["properties"] = props
+            r = c.tools.execute(
+                slug="NOTION_CREATE_DATABASE", user_id=self._user_id, arguments=args
+            )
+            return _unwrap(r)
+
+        if action == "fetch_database":
+            r = c.tools.execute(
+                slug="NOTION_FETCH_DATABASE",
+                user_id=self._user_id,
+                arguments={"database_id": params["database_id"]},
+            )
+            return _unwrap(r)
+
+        if action == "query_database":
+            args = {"database_id": params["database_id"]}
+            for k in ("filter", "sorts", "page_size", "start_cursor"):
+                if k in params:
+                    args[k] = params[k]
+            r = c.tools.execute(
+                slug="NOTION_QUERY_DATABASE_WITH_FILTER",
+                user_id=self._user_id,
+                arguments=args,
+            )
+            return _unwrap(r)
+
+        if action == "insert_row":
+            args = {"database_id": params["database_id"]}
+            if props := params.get("properties"):
+                args["properties"] = props
+            r = c.tools.execute(
+                slug="NOTION_INSERT_ROW_DATABASE",
+                user_id=self._user_id,
+                arguments=args,
+            )
+            return _unwrap(r)
+
+        if action == "update_row":
+            args = {"row_id": params["row_id"]}
+            if props := params.get("properties"):
+                args["properties"] = props
+            r = c.tools.execute(
+                slug="NOTION_UPDATE_ROW_DATABASE",
+                user_id=self._user_id,
+                arguments=args,
+            )
+            return _unwrap(r)
+
+        raise ValueError(f"Unknown notion action: {action}")
+
+
+def make_live_notion_client(*, user_id: str) -> LiveNotionClient:
+    return LiveNotionClient(user_id=user_id)
