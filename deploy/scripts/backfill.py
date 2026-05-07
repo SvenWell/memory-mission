@@ -39,8 +39,8 @@ from memory_mission.observability import observability_scope
 
 DURABLE_DB = FIRM_ROOT / "durable.sqlite3"
 
-# 180 days back from today
-LOOKBACK_DAYS = 180
+# 365 days back from today (was 180)
+LOOKBACK_DAYS = 365
 WINDOW_END = datetime.now(timezone.utc)
 WINDOW_START = WINDOW_END - timedelta(days=LOOKBACK_DAYS)
 
